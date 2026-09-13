@@ -1,3 +1,5 @@
+import type { Role, WorkflowStatus } from '@studio/domain'
+
 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4010'
 
 export const TOKEN_KEY = 'studio-token'
@@ -89,6 +91,11 @@ export interface ProbeResult {
   message?: string
 }
 
+export interface ProbeResponse {
+  connectionId: string
+  results: ProbeResult[]
+}
+
 export interface Binding {
   id: string
   slot: string
@@ -111,47 +118,84 @@ export interface ResolvedCandidate {
   modality: string
 }
 
+export interface ResolveResponse {
+  slot: string
+  projectId: string | null
+  candidates: ResolvedCandidate[]
+}
+
 export interface Member {
   userId: string
   email: string
   name: string | null
-  role: string
+  role: Role
   joinedAt: string
+}
+
+/** Prisma returns the workflow enum SCREAMING_SNAKE; the domain speaks snake_case. */
+export type DbWorkflowStatus = Uppercase<WorkflowStatus>
+
+export function toWorkflowStatus(value: string): WorkflowStatus {
+  return value.toLowerCase() as WorkflowStatus
 }
 
 export interface Project {
   id: string
+  organizationId: string
   name: string
-  status: string
+  status: DbWorkflowStatus
+  createdAt: string
+  updatedAt: string
 }
 
 export interface Episode {
   id: string
+  projectId: string
   number: number
   title: string
-  status: string
+  status: DbWorkflowStatus
+  createdAt: string
+  updatedAt: string
+  storyboards?: Storyboard[]
+}
+
+export interface Storyboard {
+  id: string
+  episodeId: string
+  scriptVersionId: string | null
+  number: number
+  title: string
+  durationMs: number
+  description: string
+  sourceExcerpt: string
+  continuityIn: string
+  continuityOut: string
+  status: DbWorkflowStatus
+}
+
+export interface AuditEvent {
+  id: string
+  action: string
+  entityType: string
+  entityId: string
+  userEmail: string | null
+  payload: Record<string, unknown>
+  createdAt: string
+}
+
+export interface AuditPage {
+  events: AuditEvent[]
+  nextCursor: string | null
 }
 
 export interface Membership {
   organizationId: string
   organizationName: string
-  role: string
+  role: Role
 }
 
 export interface MeResponse {
   user: { id: string; email: string; name: string | null; locale: string }
-  organization: { id: string; role: string }
+  organization: { id: string; role: Role }
   memberships: Membership[]
 }
-
-export const capabilitySlots = [
-  'script_text',
-  'storyboard_text',
-  'image_gen',
-  'video_t2v',
-  'video_i2v',
-  'video_r2v',
-  'tts_voice',
-  'music_gen',
-  'visual_audit',
-] as const
