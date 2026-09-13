@@ -1,0 +1,329 @@
+import type { FastifyInstance } from 'fastify'
+import type { CapabilitySlot, Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, Stage, TaskStatus, WorkflowStatus } from '@studio/db'
+import { syncBatchStatus } from '@studio/db'
+import { createPipelineQueue, enqueue, type RunTaskCandidate } from '@studio/jobs'
+import { recordAudit } from '../lib/audit.js'
+import { requirePermission } from '../plugins/auth.js'
+import { toArtifactDto, type ArtifactDto } from './artifacts.js'
+
+type PipelineQueue = ReturnType<typeof createPipelineQueue>
+
+const generationStages = ['SCRIPT', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+type GenerationStage = (typeof generationStages)[number]
+
+const stageSlots: Record<GenerationStage, CapabilitySlot> = {
+  SCRIPT: 'SCRIPT_TEXT',
+  STORYBOARD: 'STORYBOARD_TEXT',
+  IMAGE: 'IMAGE_GEN',
+  VIDEO: 'VIDEO_T2V',
+  AUDIO: 'TTS_VOICE',
+}
+
+// Storyboard imagery is modelled as FIRST_FRAME in the schema; the pipeline API
+// and the console both call that stage IMAGE.
+const stageDbValues: Record<GenerationStage, Stage> = {
+  SCRIPT: 'SCRIPT',
+  STORYBOARD: 'STORYBOARD',
+  IMAGE: 'FIRST_FRAME',
+  VIDEO: 'VIDEO',
+  AUDIO: 'AUDIO',
+}
+
+const apiStageByDbStage: Partial<Record<Stage, GenerationStage>> = { FIRST_FRAME: 'IMAGE' }
+
+interface QcDto {
+  kind: string
+  score: number
+  status: WorkflowStatus
+}
+
+interface TaskDto {
+  id: string
+  stage: GenerationStage
+  status: TaskStatus
+  attempts: number
+  provider: string | null
+  model: string | null
+  error: string | null
+  createdAt: Date
+  updatedAt: Date
+  artifacts: ArtifactDto[]
+  qc: QcDto | null
+}
+
+interface BatchDto {
+  id: string
+  stage: GenerationStage
+  status: WorkflowStatus
+  plannedCount: number
+  createdAt: Date
+  tasks: TaskDto[]
+}
+
+interface CompositionDto {
+  id: string
+  status: WorkflowStatus
+  artifact: ArtifactDto | null
+}
+
+type TaskRow = GenerationTask & { artifacts: MediaArtifact[] }
+type BatchRow = GenerationBatch & { tasks: TaskRow[] }
+
+interface GenerationBody {
+  stage?: string
+  storyboardIds?: string[]
+}
+
+interface GenerationTarget {
+  entityId: string
+  prompt: string
+}
+
+function isGenerationStage(value: unknown): value is GenerationStage {
+  return (generationStages as readonly string[]).includes(value as string)
+}
+
+function toApiStage(stage: Stage): GenerationStage {
+  return apiStageByDbStage[stage] ?? (stage as GenerationStage)
+}
+
+function isPrismaUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'P2002'
+}
+
+async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
+  return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
+}
+
+// Same ordering contract as GET /bindings/resolve: project scope beats
+// organization scope, priority descends, and only verified capabilities on
+// enabled connections survive, deduplicated by capability.
+async function resolveCandidates(db: PrismaClient, organizationId: string, projectId: string, slot: CapabilitySlot): Promise<RunTaskCandidate[]> {
+  const bindings = await db.capabilityBinding.findMany({
+    where: { organizationId, slot, enabled: true },
+    orderBy: { priority: 'desc' },
+    include: { capability: { include: { connection: true } } },
+  })
+  const projectScoped = bindings.filter(binding => binding.projectId === projectId)
+  const orgScoped = bindings.filter(binding => binding.projectId === null)
+  const seen = new Set<string>()
+  const candidates: RunTaskCandidate[] = []
+  for (const binding of [...projectScoped, ...orgScoped]) {
+    if (seen.has(binding.capabilityId)) continue
+    if (!binding.capability.entitlementVerifiedAt) continue
+    if (!binding.capability.connection.enabled) continue
+    seen.add(binding.capabilityId)
+    candidates.push({
+      connectionId: binding.capability.connectionId,
+      capabilityId: binding.capability.id,
+      provider: binding.capability.connection.provider,
+      model: binding.capability.model,
+    })
+  }
+  return candidates
+}
+
+async function latestChecks(db: PrismaClient, tasks: TaskRow[]): Promise<QualityCheck[]> {
+  const artifactIds = tasks.flatMap(task => task.artifacts.map(artifact => artifact.id))
+  if (artifactIds.length === 0) return []
+  return db.qualityCheck.findMany({ where: { artifactId: { in: artifactIds } }, orderBy: { id: 'desc' } })
+}
+
+function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
+  const artifactIds = new Set(task.artifacts.map(artifact => artifact.id))
+  const check = checks.find(candidate => candidate.artifactId !== null && artifactIds.has(candidate.artifactId))
+  return {
+    id: task.id,
+    stage: toApiStage(task.stage),
+    status: task.status,
+    attempts: task.attempts,
+    provider: task.provider,
+    model: task.model,
+    error: task.errorSnapshot,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    artifacts: task.artifacts.map(toArtifactDto),
+    qc: check ? { kind: check.kind, score: check.score ?? 0, status: check.status } : null,
+  }
+}
+
+async function toTaskDtos(db: PrismaClient, tasks: TaskRow[]): Promise<TaskDto[]> {
+  const checks = await latestChecks(db, tasks)
+  return tasks.map(task => toTaskDto(task, checks))
+}
+
+async function toBatchDtos(db: PrismaClient, batches: BatchRow[]): Promise<BatchDto[]> {
+  const checks = await latestChecks(db, batches.flatMap(batch => batch.tasks))
+  return batches.map(batch => ({
+    id: batch.id,
+    stage: toApiStage(batch.stage),
+    status: batch.status,
+    plannedCount: batch.plannedCount,
+    // GenerationBatch has no timestamp columns; the batch and its tasks are
+    // written together, so the first task stamps the batch.
+    createdAt: batch.tasks[0]?.createdAt ?? new Date(0),
+    tasks: batch.tasks.map(task => toTaskDto(task, checks)),
+  }))
+}
+
+async function toBatchDto(db: PrismaClient, batchId: string): Promise<BatchDto> {
+  const batch = await db.generationBatch.findUniqueOrThrow({
+    where: { id: batchId },
+    include: { tasks: { include: { artifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+  })
+  const [dto] = await toBatchDtos(db, [batch])
+  return dto
+}
+
+async function toCompositionDto(db: PrismaClient, composition: Composition): Promise<CompositionDto> {
+  const artifact = composition.artifactId ? await db.mediaArtifact.findUnique({ where: { id: composition.artifactId } }) : null
+  return { id: composition.id, status: composition.status, artifact: artifact ? toArtifactDto(artifact) : null }
+}
+
+export async function generationRoutes(app: FastifyInstance): Promise<void> {
+  // Lazily created: an instance that never triggers a generation keeps no Redis
+  // connection open, and the one queue it does create is closed with the app.
+  let queue: PipelineQueue | undefined
+  app.addHook('onClose', async () => {
+    await queue?.close()
+  })
+  function pipeline(): PipelineQueue {
+    queue ??= createPipelineQueue()
+    return queue
+  }
+
+  app.post<{ Params: { episodeId: string }; Body: GenerationBody }>(
+    '/episodes/:episodeId/generations',
+    { preHandler: requirePermission('generation:trigger') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const stage = request.body?.stage
+      if (!isGenerationStage(stage)) return reply.code(400).send({ error: `stage must be one of: ${generationStages.join(', ')}` })
+
+      const episode = await app.db.episode.findFirst({
+        where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
+        include: { storyboards: { orderBy: { number: 'asc' } } },
+      })
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+
+      const requested = request.body?.storyboardIds
+      const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO'
+      const selected = perStoryboard
+        ? requested
+          ? episode.storyboards.filter(storyboard => requested.includes(storyboard.id))
+          : episode.storyboards
+        : []
+      if (perStoryboard) {
+        if (requested && selected.length !== new Set(requested).size) return reply.code(400).send({ error: 'storyboardIds must belong to this episode' })
+        if (selected.length === 0) return reply.code(400).send({ error: 'episode has no storyboards to generate' })
+      }
+      const targets: GenerationTarget[] = perStoryboard
+        ? selected.map(storyboard => ({ entityId: storyboard.id, prompt: `${storyboard.title}: ${storyboard.description}` }))
+        : [{ entityId: episode.id, prompt: episode.title }]
+
+      const slot = stageSlots[stage]
+      const candidates = await resolveCandidates(app.db, auth.organizationId, episode.projectId, slot)
+      if (candidates.length === 0) return reply.code(409).send({ error: `no verified candidates for slot ${slot.toLowerCase()}` })
+
+      const dbStage = stageDbValues[stage]
+      const idempotencyKeys = targets.map(target => `${episode.id}:${stage}:${target.entityId}`)
+      try {
+        const batch = await app.db.generationBatch.create({
+          data: {
+            organizationId: auth.organizationId,
+            episodeId: episode.id,
+            stage: dbStage,
+            plannedCount: targets.length,
+            // The composition worker walks batch → storyboards to find each clip.
+            storyboards: { connect: selected.map(storyboard => ({ id: storyboard.id })) },
+            tasks: {
+              create: targets.map((target, index) => ({
+                organizationId: auth.organizationId,
+                stage: dbStage,
+                idempotencyKey: idempotencyKeys[index],
+                // ProviderRequest payload; model and parameters belong to whichever
+                // candidate ends up running, so the worker fills them in.
+                requestSnapshot: JSON.stringify({ input: { prompt: target.prompt } }),
+              })),
+            },
+          },
+          include: { tasks: true },
+        })
+        // Queued tasks roll the batch up to RUNNING; without this the batch would
+        // read DRAFT until the worker happened to pick the first task up.
+        await syncBatchStatus(app.db, batch.id)
+        for (const task of batch.tasks) {
+          await enqueue(pipeline(), { kind: 'run-task', taskId: task.id, organizationId: auth.organizationId, attempt: 1, candidates })
+        }
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount } })
+        return reply.code(201).send({ batch: await toBatchDto(app.db, batch.id) })
+      } catch (error) {
+        if (!isPrismaUniqueViolation(error)) throw error
+        const existing = await app.db.generationTask.findFirst({ where: { organizationId: auth.organizationId, idempotencyKey: { in: idempotencyKeys } } })
+        if (!existing) throw error
+        return reply.send({ batch: await toBatchDto(app.db, existing.batchId) })
+      }
+    },
+  )
+
+  app.get<{ Params: { episodeId: string } }>(
+    '/episodes/:episodeId/generations',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const batches = await app.db.generationBatch.findMany({
+        where: { episodeId: episode.id },
+        include: { tasks: { include: { artifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+        // Neither GenerationBatch nor Composition carries a createdAt column;
+        // cuid ids sort chronologically.
+        orderBy: { id: 'desc' },
+      })
+      const composition = await app.db.composition.findFirst({ where: { episodeId: episode.id }, orderBy: { id: 'desc' } })
+      return {
+        batches: await toBatchDtos(app.db, batches),
+        composition: composition ? await toCompositionDto(app.db, composition) : null,
+      }
+    },
+  )
+
+  app.post<{ Params: { taskId: string } }>(
+    '/generations/tasks/:taskId/cancel',
+    { preHandler: requirePermission('generation:trigger') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const task = await app.db.generationTask.findFirst({ where: { id: request.params.taskId, organizationId: auth.organizationId }, include: { artifacts: true } })
+      if (!task) return reply.code(404).send({ error: 'task not found' })
+      if (task.status !== 'QUEUED') return reply.code(409).send({ error: 'only queued tasks can be cancelled' })
+      const cancelled = await app.db.generationTask.update({ where: { id: task.id }, data: { status: 'CANCELLED' }, include: { artifacts: true } })
+      await syncBatchStatus(app.db, cancelled.batchId)
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'generation.cancel', entityType: 'generation-task', entityId: cancelled.id, payload: { batchId: cancelled.batchId, stage: toApiStage(cancelled.stage) } })
+      const [dto] = await toTaskDtos(app.db, [cancelled])
+      return { task: dto }
+    },
+  )
+
+  app.post<{ Params: { episodeId: string } }>(
+    '/episodes/:episodeId/compositions',
+    { preHandler: requirePermission('generation:trigger') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await app.db.episode.findFirst({
+        where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
+        include: { storyboards: { orderBy: { number: 'asc' }, select: { id: true } } },
+      })
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const composition = await app.db.composition.create({
+        data: {
+          episodeId: episode.id,
+          status: 'RUNNING',
+          manifest: JSON.stringify({ storyboardIds: episode.storyboards.map(storyboard => storyboard.id) }),
+        },
+      })
+      await enqueue(pipeline(), { kind: 'compose-episode', compositionId: composition.id, episodeId: episode.id, organizationId: auth.organizationId })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'composition.trigger', entityType: 'composition', entityId: composition.id, payload: { storyboards: episode.storyboards.length } })
+      return reply.code(201).send({ composition: await toCompositionDto(app.db, composition) })
+    },
+  )
+}

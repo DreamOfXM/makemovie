@@ -11,6 +11,8 @@ import { memberRoutes } from './routes/members.js'
 import { auditRoutes } from './routes/audit.js'
 import { providerRoutes } from './routes/providers.js'
 import { bindingRoutes } from './routes/bindings.js'
+import { generationRoutes } from './routes/generations.js'
+import { artifactRoutes } from './routes/artifacts.js'
 
 export interface BuildAppOptions {
   config?: AppConfig
@@ -38,6 +40,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(auditRoutes)
   await app.register(providerRoutes)
   await app.register(bindingRoutes)
+  await app.register(generationRoutes)
+  await app.register(artifactRoutes)
 
   app.addHook('onClose', async () => {
     await db.$disconnect()

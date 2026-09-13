@@ -34,6 +34,8 @@ async function acquirePort(): Promise<number> {
 export interface TestEnv {
   app: FastifyInstance
   db: PrismaClient
+  /** Temporary artifact root the booted app streams from. */
+  artifactsDir: string
   register(email: string, organizationName: string): Promise<{ token: string; organization: { id: string; name: string }; role: string }>
   authHeaders(token: string): Record<string, string>
   stop(): Promise<void>
@@ -42,6 +44,7 @@ export interface TestEnv {
 export async function startTestEnv(): Promise<TestEnv> {
   const port = await acquirePort()
   const dataDir = mkdtempSync(path.join(tmpdir(), 'studio-it-'))
+  const artifactsDir = mkdtempSync(path.join(tmpdir(), 'studio-artifacts-'))
   const pg = new EmbeddedPostgres({ databaseDir: dataDir, user: 'studio', password: 'studio', port, persistent: false })
   await pg.initialise()
   await pg.start()
@@ -61,13 +64,14 @@ export async function startTestEnv(): Promise<TestEnv> {
   }
 
   const db = new PrismaClient({ datasources: { db: { url: databaseUrl } } })
-  const config = loadConfig({ DATABASE_URL: databaseUrl })
+  const config = loadConfig({ DATABASE_URL: databaseUrl, STUDIO_ARTIFACTS_DIR: artifactsDir })
   const app = await buildApp({ config, db, logger: false })
   await app.ready()
 
   return {
     app,
     db,
+    artifactsDir,
     authHeaders(token: string) {
       return { authorization: `Bearer ${token}` }
     },
@@ -81,6 +85,7 @@ export async function startTestEnv(): Promise<TestEnv> {
       await db.$disconnect()
       try { await pg.stop() } catch { /* already stopped */ }
       rmSync(dataDir, { recursive: true, force: true })
+      rmSync(artifactsDir, { recursive: true, force: true })
     },
   }
 }
