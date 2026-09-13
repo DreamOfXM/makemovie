@@ -10,6 +10,7 @@ interface ConnectionBody {
   name?: string
   apiKey?: string
   baseUrl?: string
+  enabled?: boolean
 }
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
@@ -70,7 +71,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const connection = await app.db.providerConnection.findFirst({ where: { id: request.params.connectionId, organizationId: auth.organizationId } })
       if (!connection) return reply.code(404).send({ error: 'connection not found' })
 
-      const data: { name?: string; baseUrl?: string; encryptedSecret?: string } = {}
+      const data: { name?: string; baseUrl?: string; encryptedSecret?: string; enabled?: boolean } = {}
       if (request.body?.name !== undefined) {
         const name = request.body.name.trim()
         if (!name) return reply.code(400).send({ error: 'name cannot be empty' })
@@ -81,6 +82,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         if (!baseUrl) return reply.code(400).send({ error: 'baseUrl cannot be empty' })
         data.baseUrl = baseUrl
       }
+      if (request.body?.enabled !== undefined) data.enabled = request.body.enabled
       if (request.body?.apiKey) data.encryptedSecret = encryptSecret(request.body.apiKey, app.config.masterKey)
 
       const updated = await app.db.providerConnection.update({ where: { id: connection.id }, data })

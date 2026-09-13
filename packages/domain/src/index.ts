@@ -139,6 +139,11 @@ export function can(role: Role, action: Action): boolean {
   return roleRank[role] >= roleRank[actionMinRole[action]]
 }
 
+/** Lowest role that may perform `action` — lets clients explain a denial. */
+export function minRoleFor(action: Action): Role {
+  return actionMinRole[action]
+}
+
 export function isRole(value: string): value is Role {
   return (roles as readonly string[]).includes(value)
 }

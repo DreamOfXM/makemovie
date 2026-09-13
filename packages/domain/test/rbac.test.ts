@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actions, can, isRole, roles } from '../src/index.js'
+import { actions, can, isRole, minRoleFor, roles } from '../src/index.js'
 
 describe('rbac', () => {
   it('owner can do everything', () => {
@@ -38,5 +38,12 @@ describe('rbac', () => {
     expect(isRole('ADMIN')).toBe(true)
     expect(isRole('SUPERUSER')).toBe(false)
     expect(roles).toHaveLength(5)
+  })
+
+  it('names a minimum role that is itself allowed for every action', () => {
+    expect(minRoleFor('read')).toBe('VIEWER')
+    expect(minRoleFor('review:decide')).toBe('REVIEWER')
+    expect(minRoleFor('audit:read')).toBe('ADMIN')
+    for (const action of actions) expect(can(minRoleFor(action), action)).toBe(true)
   })
 })
