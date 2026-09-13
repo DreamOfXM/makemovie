@@ -1,108 +1,83 @@
 'use client'
 
-import { FormEvent, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { getToken, request, setToken as persistToken, type MeResponse } from '../lib/api'
+import { I18nProvider, LocaleSwitcher, useI18n } from '../lib/i18n'
+import { AuthPanel } from '../components/auth'
+import { ProjectsPanel } from '../components/projects'
+import { ModelsPanel } from '../components/models'
+import { MembersPanel } from '../components/members'
 
-const api = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4010'
+type Tab = 'projects' | 'models' | 'members'
 
-type Project = { id: string; name: string; status: string }
+function Workspace() {
+  const { t, locale } = useI18n()
+  const [token, setTokenState] = useState<string | null>(null)
+  const [me, setMe] = useState<MeResponse | null>(null)
+  const [tab, setTab] = useState<Tab>('projects')
+  const [booting, setBooting] = useState(true)
 
-type Episode = { id: string; number: number; title: string; status: string }
+  const signOut = useCallback(async (current: string | null) => {
+    if (current) {
+      try { await request('/auth/logout', { method: 'POST', token: current }) } catch { /* session already gone */ }
+    }
+    persistToken(null)
+    setTokenState(null)
+    setMe(null)
+  }, [])
 
-async function request<T>(path: string, options: RequestInit = {}) {
-  const response = await fetch(`${api}${path}`, { ...options, headers: { 'content-type': 'application/json', ...(options.headers || {}) } })
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.error || 'Request failed')
-  return data as T
+  useEffect(() => {
+    const saved = getToken()
+    if (!saved) { setBooting(false); return }
+    request<MeResponse>('/auth/me', { token: saved })
+      .then(setMe)
+      .then(() => setTokenState(saved))
+      .catch(() => persistToken(null))
+      .finally(() => setBooting(false))
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
+  }, [locale])
+
+  if (booting) return <main className="auth-page"><p>{t('app.title')}…</p></main>
+  if (!token || !me) return <AuthPanel onAuthenticated={async nextToken => {
+    persistToken(nextToken)
+    const meResponse = await request<MeResponse>('/auth/me', { token: nextToken })
+    setMe(meResponse)
+    setTokenState(nextToken)
+  }} />
+
+  return (
+    <div className="workspace">
+      <header className="topbar">
+        <div>
+          <strong>{t('app.title')}</strong>
+          <small> · {me.memberships.find(m => m.organizationId === me.organization.id)?.organizationName ?? ''} · {t('auth.role')}: {me.organization.role}</small>
+        </div>
+        <nav className="tabs">
+          <button className={tab === 'projects' ? 'active' : ''} onClick={() => setTab('projects')}>{t('nav.projects')}</button>
+          <button className={tab === 'models' ? 'active' : ''} onClick={() => setTab('models')}>{t('nav.models')}</button>
+          <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>{t('nav.members')}</button>
+        </nav>
+        <div className="row">
+          <LocaleSwitcher />
+          <button type="button" className="secondary" onClick={() => void signOut(token)}>{t('auth.logout')}</button>
+        </div>
+      </header>
+      <main className="content">
+        {tab === 'projects' && <ProjectsPanel token={token} />}
+        {tab === 'models' && <ModelsPanel token={token} />}
+        {tab === 'members' && <MembersPanel token={token} />}
+      </main>
+    </div>
+  )
 }
 
 export default function HomePage() {
-  const [token, setToken] = useState('')
-  const [email, setEmail] = useState('owner@example.com')
-  const [password, setPassword] = useState('password123')
-  const [organizationName, setOrganizationName] = useState('Demo Studio')
-  const [projects, setProjects] = useState<Project[]>([])
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null)
-  const [episodes, setEpisodes] = useState<Episode[]>([])
-  const [projectName, setProjectName] = useState('My First Drama')
-  const [episodeTitle, setEpisodeTitle] = useState('Episode 1')
-  const [message, setMessage] = useState('')
-
-  const loadProjects = async (nextToken: string) => {
-    const data = await request<Project[]>('/projects', { headers: { authorization: `Bearer ${nextToken}` } })
-    setProjects(data)
-  }
-
-  const register = async (event: FormEvent) => {
-    event.preventDefault()
-    try {
-      const data = await request<{ token: string }>('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, organizationName }) })
-      setToken(data.token)
-      await loadProjects(data.token)
-      setMessage('Registered and signed in')
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Registration failed') }
-  }
-
-  const createProject = async (event: FormEvent) => {
-    event.preventDefault()
-    try {
-      const project = await request<Project>('/projects', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ name: projectName }) })
-      setProjects(current => [project, ...current])
-      setMessage('Project created')
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Project creation failed') }
-  }
-
-  const selectProject = async (project: Project) => {
-    setSelectedProject(project)
-    const data = await request<Episode[]>(`/projects/${project.id}/episodes`, { headers: { authorization: `Bearer ${token}` } })
-    setEpisodes(data)
-  }
-
-  const createEpisode = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!selectedProject) return
-    try {
-      const episode = await request<Episode>(`/projects/${selectedProject.id}/episodes`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ number: episodes.length + 1, title: episodeTitle }) })
-      setEpisodes(current => [...current, episode])
-      setMessage('Episode created')
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'Episode creation failed') }
-  }
-
-  useEffect(() => {
-    const saved = window.localStorage.getItem('studio-token')
-    if (saved) { setToken(saved); loadProjects(saved).catch(() => window.localStorage.removeItem('studio-token')) }
-  }, [])
-
-  useEffect(() => { if (token) window.localStorage.setItem('studio-token', token) }, [token])
-
-  if (!token) return (
-    <main style={{ maxWidth: 560, margin: '80px auto', padding: 24, fontFamily: 'sans-serif' }}>
-      <h1>Short Drama Studio</h1>
-      <p>AI short-drama production workspace</p>
-      <form onSubmit={register} style={{ display: 'grid', gap: 12 }}>
-        <input value={email} onChange={event => setEmail(event.target.value)} placeholder="Email" type="email" />
-        <input value={password} onChange={event => setPassword(event.target.value)} placeholder="Password" type="password" />
-        <input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder="Organization" />
-        <button type="submit">Create workspace</button>
-      </form>
-      <p>{message}</p>
-    </main>
-  )
-
   return (
-    <main style={{ maxWidth: 960, margin: '40px auto', padding: 24, fontFamily: 'sans-serif' }}>
-      <h1>Short Drama Studio</h1>
-      <p>{message || 'Workspace dashboard'}</p>
-      <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-        <div>
-          <h2>Projects</h2>
-          <form onSubmit={createProject} style={{ display: 'flex', gap: 8 }}><input value={projectName} onChange={event => setProjectName(event.target.value)} /><button type="submit">New project</button></form>
-          <ul>{projects.map(project => <li key={project.id}><button onClick={() => selectProject(project)}>{project.name}</button> <small>{project.status}</small></li>)}</ul>
-        </div>
-        <div>
-          <h2>{selectedProject ? selectedProject.name : 'Select a project'}</h2>
-          {selectedProject && <><form onSubmit={createEpisode} style={{ display: 'flex', gap: 8 }}><input value={episodeTitle} onChange={event => setEpisodeTitle(event.target.value)} /><button type="submit">New episode</button></form><ul>{episodes.map(episode => <li key={episode.id}>{episode.number}. {episode.title} <small>{episode.status}</small></li>)}</ul></>}
-        </div>
-      </section>
-    </main>
+    <I18nProvider>
+      <Workspace />
+    </I18nProvider>
   )
 }
