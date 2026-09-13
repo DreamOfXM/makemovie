@@ -29,6 +29,12 @@ importers:
       '@studio/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@studio/jobs':
+        specifier: workspace:*
+        version: link:../../packages/jobs
+      '@studio/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@studio/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -139,9 +145,27 @@ importers:
 
   apps/worker:
     dependencies:
+      '@studio/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@studio/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@studio/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@studio/jobs':
+        specifier: workspace:*
+        version: link:../../packages/jobs
+      '@studio/media':
+        specifier: workspace:*
+        version: link:../../packages/media
+      '@studio/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@studio/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       bullmq:
         specifier: ^5.30.0
         version: 5.81.5
@@ -149,12 +173,18 @@ importers:
         specifier: ^5.4.1
         version: 5.11.1
     devDependencies:
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
       tsx:
         specifier: ^4.19.2
         version: 4.23.13
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)(lightningcss@1.32.0)
 
   packages/config:
     devDependencies:
@@ -190,11 +220,27 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.2)(lightningcss@1.32.0)
 
-  packages/media:
+  packages/jobs:
+    dependencies:
+      bullmq:
+        specifier: ^5.30.0
+        version: 5.81.5
     devDependencies:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
+
+  packages/media:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.2
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)(lightningcss@1.32.0)
 
   packages/providers:
     dependencies:

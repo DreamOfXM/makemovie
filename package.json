@@ -7,7 +7,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p tsconfig.test.json",
     "test": "pnpm -r test",
-    "dev": "pnpm --parallel --filter @studio/api --filter @studio/worker --filter @studio/web dev"
+    "dev": "STUDIO_ARTIFACTS_DIR=\"$PWD/var/artifacts\" pnpm --parallel --filter @studio/api --filter @studio/worker --filter @studio/web dev"
   },
   "devDependencies": {
     "typescript": "^5.7.3"

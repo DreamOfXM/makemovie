@@ -6,10 +6,18 @@ COPY apps/api/package.json apps/api/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/domain/package.json packages/domain/package.json
+COPY packages/jobs/package.json packages/jobs/package.json
+COPY packages/media/package.json packages/media/package.json
+COPY packages/providers/package.json packages/providers/package.json
 COPY packages/security/package.json packages/security/package.json
 RUN pnpm install --frozen-lockfile
 COPY . .
-RUN pnpm --filter @studio/db generate && pnpm --filter @studio/api build
-ENV NODE_ENV=production
+RUN pnpm --filter @studio/db generate \
+  && pnpm --filter @studio/providers build \
+  && pnpm --filter @studio/api build
+ENV NODE_ENV=production \
+    STUDIO_ARTIFACTS_DIR=/var/lib/studio/artifacts
+RUN mkdir -p /var/lib/studio/artifacts
+VOLUME /var/lib/studio/artifacts
 EXPOSE 4010
 CMD ["sh", "-c", "pnpm --filter @studio/db exec prisma migrate deploy && node apps/api/dist/main.js"]

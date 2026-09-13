@@ -9,3 +9,4 @@ out
 .turbo
 *.tsbuildinfo
 coverage
+var

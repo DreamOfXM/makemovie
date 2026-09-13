@@ -11,6 +11,8 @@ export interface AppConfig {
   corsOrigins: string[]
   sessionTtlMs: number
   port: number
+  /** Root for generated media. The API streams from it and the worker writes into it, so both must agree. */
+  artifactsDir: string
 }
 
 const DEV_MASTER_KEY = '0'.repeat(64)
@@ -44,5 +46,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     corsOrigins: (env.CORS_ORIGIN || 'http://localhost:3010').split(',').map(origin => origin.trim()).filter(Boolean),
     sessionTtlMs,
     port: Number(env.PORT || 4010),
+    artifactsDir: env.STUDIO_ARTIFACTS_DIR || 'var/artifacts',
   }
 }

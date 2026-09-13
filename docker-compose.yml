@@ -42,9 +42,11 @@ services:
       REDIS_URL: redis://redis:6379
       # dev-only default; in production set a random 64-hex master key
       STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3010}
       PORT: 4010
     ports: ["4010:4010"]
+    volumes: ["artifacts:/var/lib/studio/artifacts"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,6 +60,9 @@ services:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
       STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
+      STUDIO_QC_MODE: ${STUDIO_QC_MODE:-random}
+    volumes: ["artifacts:/var/lib/studio/artifacts"]
     depends_on:
       redis:
         condition: service_healthy
@@ -74,3 +79,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  artifacts:
