@@ -50,10 +50,13 @@ enum TaskStatus {
 model User {
   id String @id @default(cuid())
   email String @unique
+  name String?
   passwordHash String
+  locale String @default("en")
   createdAt DateTime @default(now())
   memberships OrganizationMember[]
   auditEvents AuditEvent[]
+  sessions Session[]
 }
 
 model Organization {
@@ -65,6 +68,9 @@ model Organization {
   projects Project[]
   providerConnections ProviderConnection[]
   auditEvents AuditEvent[]
+  sessions Session[]
+  capabilityBindings CapabilityBinding[]
+  usage UsageLedger[]
 }
 
 model OrganizationMember {
@@ -86,6 +92,7 @@ model Project {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   episodes Episode[]
   providerConnections ProviderConnection[]
+  capabilityBindings CapabilityBinding[]
 }
 
 model Episode {
@@ -187,6 +194,7 @@ model StoryboardAsset {
 
 model GenerationBatch {
   id String @id @default(cuid())
+  organizationId String
   episodeId String
   stage Stage
   status WorkflowStatus @default(DRAFT)
@@ -195,13 +203,16 @@ model GenerationBatch {
   storyboards Storyboard[]
   tasks GenerationTask[]
   qualityChecks QualityCheck[]
+  @@index([organizationId, stage, status])
 }
 
 model GenerationTask {
   id String @id @default(cuid())
+  organizationId String
   batchId String
   stage Stage
   status TaskStatus @default(QUEUED)
+  idempotencyKey String? @unique
   provider String?
   model String?
   capabilitySnapshot String?
@@ -209,23 +220,33 @@ model GenerationTask {
   responseSnapshot String?
   errorSnapshot String?
   attempts Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
   batch GenerationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
   artifacts MediaArtifact[]
+  @@index([organizationId, status])
   @@index([batchId, status])
 }
 
 model MediaArtifact {
   id String @id @default(cuid())
+  organizationId String
   taskId String?
+  stage Stage?
   objectKey String
   checksum String
   mimeType String
   version Int
+  width Int?
+  height Int?
+  durationMs Int?
   metadata String?
+  createdAt DateTime @default(now())
   task GenerationTask? @relation(fields: [taskId], references: [id])
   assetVersions AssetVersion[]
   qualityChecks QualityCheck[]
   @@unique([objectKey, version])
+  @@index([organizationId, stage])
 }
 
 model QualityCheck {
@@ -267,24 +288,35 @@ model ProviderConnection {
   organizationId String
   projectId String?
   provider String
+  name String
   encryptedSecret String
   baseUrl String
   enabled Boolean @default(true)
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
   capabilities ModelCapability[]
+  @@unique([organizationId, name])
 }
 
 model ModelCapability {
   id String @id @default(cuid())
   connectionId String
   model String
+  displayName String?
   modality String
   acceptsFirstFrame Boolean @default(false)
   acceptsReferenceImages Boolean @default(false)
   maxReferenceImages Int @default(0)
+  spec Json?
+  probeStatus String @default("unverified")
+  probeMessage String?
   entitlementVerifiedAt DateTime?
+  lastProbedAt DateTime?
   connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  bindings CapabilityBinding[]
   @@unique([connectionId, model])
 }
 
@@ -299,5 +331,61 @@ model AuditEvent {
   createdAt DateTime @default(now())
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user User? @relation(fields: [userId], references: [id])
+  @@index([organizationId, createdAt])
+}
+
+enum CapabilitySlot {
+  SCRIPT_TEXT
+  STORYBOARD_TEXT
+  IMAGE_GEN
+  VIDEO_T2V
+  VIDEO_I2V
+  VIDEO_R2V
+  TTS_VOICE
+  MUSIC_GEN
+  VISUAL_AUDIT
+}
+
+model Session {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  userId String
+  organizationId String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model CapabilityBinding {
+  id String @id @default(cuid())
+  organizationId String
+  projectId String?
+  slot CapabilitySlot
+  capabilityId String
+  priority Int @default(0)
+  enabled Boolean @default(true)
+  createdAt DateTime @default(now())
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  capability ModelCapability @relation(fields: [capabilityId], references: [id], onDelete: Cascade)
+  @@index([organizationId, slot])
+  @@index([projectId, slot])
+  @@index([capabilityId])
+}
+
+model UsageLedger {
+  id String @id @default(cuid())
+  organizationId String
+  taskId String?
+  provider String
+  model String
+  modality String
+  inputUnits Int @default(0)
+  outputUnits Int @default(0)
+  createdAt DateTime @default(now())
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   @@index([organizationId, createdAt])
 }
