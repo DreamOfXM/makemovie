@@ -6,7 +6,9 @@ Short Drama Studio is a pnpm monorepo. This guide covers setup, the conventions 
 
 - Node.js ≥ 22.18 — workspace packages are consumed as TypeScript source through Node's native type stripping
 - pnpm 9 — `corepack enable` picks up the pinned version from `packageManager`
-- Docker — only for local PostgreSQL/Redis/MinIO; the test suite does **not** need it
+- FFmpeg ≥ 6 on `PATH` — the media and worker tests synthesize and compose real media
+- Redis on `127.0.0.1:6380` — the pipeline tests use a real queue (API tests take database 7, worker tests database 5, and each obliterates its own database at teardown). `docker compose up -d redis` provides it; CI runs a service container.
+- Docker — for local PostgreSQL/Redis/MinIO. PostgreSQL is **not** needed for tests: they boot an embedded instance.
 
 ## Setup
 
@@ -54,6 +56,12 @@ Every workspace package points its `exports` at `src/index.ts` **except `@studio
 ### Secrets
 
 Provider API keys go through `encryptSecret(plaintext, masterKey)` / `decryptSecret(payload, masterKey)` from `@studio/security` (AES-256-GCM, ciphertext format `v1.<iv>.<tag>.<ct>`). The master key comes from `app.config.masterKey`. Never store a plaintext key, never include `encryptedSecret` in a response, and never log it.
+
+### Generation pipeline
+
+- Never assign `GenerationBatch.status` directly. Call `syncBatchStatus(db, batchId)` from `@studio/db` after any task transition; the batch status is derived from its task counts.
+- The API streams artifacts from, and the worker writes them into, `app.config.artifactsDir` (`STUDIO_ARTIFACTS_DIR`). Both processes must resolve the same **absolute** path — a relative default resolves against each package directory and silently splits the media in two.
+- Artifact bytes reach the browser only through `GET /artifacts/:artifactId/content`, which needs the session bearer token. Media elements cannot send headers, so the web app fetches the bytes and hands `URL.createObjectURL` results to the element, revoking them on unmount. Do not paste the URL into an `src` attribute.
 
 ### Domain vs Prisma enums
 

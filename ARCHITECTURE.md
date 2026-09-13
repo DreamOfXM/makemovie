@@ -1,6 +1,6 @@
 # Short Drama Studio
 
-> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center) is implemented and covered by tests. The generation pipeline sections — queue design, quality gates, artifact traceability, and object storage — describe the design the schema already anticipates but the workers do not yet execute. Section-level status is called out inline.
+> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center) and the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition) are implemented and covered by tests. The upstream content stages (source documents, script and asset versions, storyboard authoring gates), the acceptance audits, and delivery remain design; section-level status is called out inline.
 
 ## Goal
 
@@ -21,26 +21,31 @@ Shipped:
 - Fastify API
 - Model capability configuration center with encrypted provider credentials and entitlement probes
 - Provider adapters for Alibaba Bailian (DashScope) and a credential-free mock provider
+- Generation pipeline: stage batches, BullMQ queue on Redis, worker with ordered candidate fallback, quality gate with rework attempts, immutable artifacts, usage ledger entries
+- FFmpeg composition of an episode's succeeded video artifacts, plus mock media synthesis for credential-free runs
+- Local disk artifact storage shared by the API and the worker, streamed over an authenticated endpoint
 - Docker Compose deployment (compose file and API/worker/web Dockerfiles present; end-to-end startup not yet verified)
 - Apache-2.0 licensing
 
 Planned:
 
 - OAuth and SSO extension points
-- Redis and BullMQ workers
-- S3-compatible storage; MinIO for local deployment
-- FFmpeg media worker
+- S3-compatible object storage behind the same `Storage` interface; MinIO for local deployment
+- Source document, script version, and asset stages with upstream-approval gating
+- Acceptance audits and delivery manifests
+- Per-tenant, per-provider, and per-model concurrency limits
 - Additional provider adapters (OpenAI-compatible APIs, Volcengine)
 
 ## Monorepo
 
-- `apps/web`: Next.js application (projects, model center, members; English/Chinese UI)
-- `apps/api`: Fastify API (auth, projects, episodes, members, providers, bindings, audit)
-- `apps/worker`: BullMQ workers; scaffolding only until the generation pipeline lands
+- `apps/web`: Next.js application (projects, generation panel, model center, members; English/Chinese UI)
+- `apps/api`: Fastify API (auth, projects, episodes, members, providers, bindings, generations, artifact streaming, audit)
+- `apps/worker`: BullMQ consumer running generation tasks and episode composition
 - `packages/domain`: domain entities, capability slots, state machines, validation
-- `packages/db`: Prisma schema, migrations, and the generated client
+- `packages/db`: Prisma schema, migrations, the generated client, and the batch status rollup
+- `packages/jobs`: queue name and job payload contracts shared by the API and the worker
 - `packages/providers`: provider catalogs and adapters (dashscope, mock)
-- `packages/media`: FFmpeg pipelines and media inspection
+- `packages/media`: object storage, mock media synthesis, FFmpeg composition, and media inspection
 - `packages/config`: typed environment and runtime configuration
 - `packages/security`: Argon2id hashing, token hashing, AES-256-GCM secret encryption
 - `infra`: API, worker, and web Dockerfiles (`docker-compose.yml` sits at the repository root)
@@ -48,7 +53,7 @@ Planned:
 
 ## Domain model
 
-Tenant isolation is mandatory on every aggregate. Exercised by the API today:
+Tenant isolation is mandatory on every aggregate. Exercised by the API and worker today:
 
 - User
 - Organization
@@ -56,23 +61,24 @@ Tenant isolation is mandatory on every aggregate. Exercised by the API today:
 - Session
 - Project
 - Episode
+- Storyboard
 - ProviderConnection
 - ModelCapability
 - CapabilityBinding
-- AuditEvent
-- UsageLedger
-
-Defined in the schema and migrations, driven by the pipeline once it lands:
-
-- SourceDocumentVersion
-- ScriptVersion
-- Asset and AssetVersion
-- Storyboard, StoryboardVersion, and StoryboardAsset
 - GenerationBatch
 - GenerationTask
 - MediaArtifact
 - QualityCheck
 - Composition
+- AuditEvent
+- UsageLedger
+
+Defined in the schema and migrations, waiting on the upstream content stages and delivery:
+
+- SourceDocumentVersion
+- ScriptVersion
+- Asset and AssetVersion
+- StoryboardVersion and StoryboardAsset
 - Delivery
 
 All generated artifacts are immutable. A new generation creates a new artifact version and never overwrites an existing file or prompt.
@@ -92,6 +98,8 @@ Each stage has explicit states:
 
 Transitions require validated inputs and produce an audit event. A downstream job cannot start unless its upstream stage is approved.
 
+Episode and storyboard transitions are implemented that way — validated by `packages/domain`, written through the API, and audited. The upstream-approval gate is not yet enforced on generation: a stage can be triggered as soon as its slot has a verified candidate, because the script and asset stages that would approve it do not exist yet.
+
 ## Model capability policy
 
 A provider connection is separate from a model capability. A capability declares:
@@ -104,13 +112,17 @@ A provider connection is separate from a model capability. A capability declares
 
 Tasks are planned against capabilities, not model names alone.
 
-Rules:
+Rules enforced by the worker today:
 
-- A task with first-frame or character references may use only I2V/R2V capabilities.
-- T2V is never an automatic fallback for reference tasks.
-- Fallback candidates are unique, capability-compatible, entitlement-verified, and recorded in order.
-- Every attempt stores provider, model, configuration version, request snapshot, response status, and sanitized error.
-- A successful submission stops fallback; polling never creates a replacement task.
+- Fallback candidates are resolved in order, unique per capability, entitlement-verified, and only from enabled connections.
+- The first candidate that settles successfully stops the fallback loop; polling happens inside the same job and never creates a replacement task.
+- `GenerationTask` records the winning `provider` and `model`, the planned `requestSnapshot`, a `responseSnapshot` (attempt, candidate, provider task id, artifact id, QC score), and an `errorSnapshot` listing every candidate failure that was tried.
+- A candidate that fails or is rejected advances to the next one; a task only fails after every candidate is exhausted or the attempt budget runs out.
+
+Rules that are still design:
+
+- A task with first-frame or character references may use only I2V/R2V capabilities; T2V is never an automatic fallback for reference tasks. Today the video stage always resolves the `video_t2v` slot because no reference inputs are planned yet.
+- One row per attempt, each carrying its own configuration version. Attempts are currently re-queued jobs that overwrite the same task row, and `capabilitySnapshot` is reserved but unused.
 
 ## Model capability configuration center
 
@@ -127,24 +139,45 @@ API surface: `GET /providers/catalogs`, `GET|POST|PATCH|DELETE /providers/connec
 
 The web Model Center page exposes the same chain in order — connections and probes, slot bindings, resolution preview, then catalogs — in both English and Chinese.
 
+## Generation pipeline
+
+Planning (`POST /episodes/:episodeId/generations`, permission `generation:trigger`):
+
+1. The API stage maps to one capability slot: `SCRIPT → script_text`, `STORYBOARD → storyboard_text`, `IMAGE → image_gen`, `VIDEO → video_t2v`, `AUDIO → tts_voice`. `IMAGE` is persisted as the schema stage `FIRST_FRAME` and mapped back on the way out.
+2. `IMAGE` and `VIDEO` plan one task per storyboard (optionally restricted by `storyboardIds`, which must all belong to the episode); the other stages plan a single episode-level task. The prompt is the storyboard title and description, or the episode title.
+3. Candidates come from `resolve` for that slot and project: project scope before organization scope, priority descending, deduplicated by capability, dropping unverified capabilities and disabled connections. An empty list is a `409` — nothing is queued that could not run.
+4. A `GenerationBatch` and its `GenerationTask` rows are written in one transaction. Each task carries the idempotency key `${episodeId}:${stage}:${entityId}`, which is unique, so re-triggering the same stage of the same episode returns the existing batch with `200` instead of queueing duplicate work.
+5. One `run-task` job per task is enqueued, then an audit event records the trigger.
+
+Execution (`apps/worker/src/run-task.ts`):
+
+- A cancelled task is dropped before any provider call. Otherwise the task goes `RUNNING` with its attempt number and the batch status is resynchronised.
+- Candidates are tried in order. For each one the connection and capability are re-read and re-checked, the API key is decrypted, the adapter submits the planned request, and the worker polls to a settled state (250 ms interval, 30 s deadline).
+- The result is materialized into bytes: a `mock://` URL is synthesized locally with FFmpeg, an `http(s)` URL is downloaded, and a text result is encoded as UTF-8.
+- The artifact is stored under `tenant/project/episode/stage/task/v<attempt>.<ext>` and recorded as an immutable `MediaArtifact` with checksum, mime type, dimensions or duration, and the provider response as metadata.
+- The quality gate scores the artifact and writes a `QualityCheck` row (`APPROVED` at or above the 0.7 threshold, otherwise `NEEDS_REVIEW`). A rejection re-queues the same task with `attempt + 1` up to three attempts, then fails the task.
+- On success the worker writes a `UsageLedger` entry (input prompt length, output byte count) and stamps the task `SUCCEEDED` with the winning provider, model, and response snapshot.
+- Every candidate failure is collected into `errorSnapshot`, so a failed task explains the whole fallback chain rather than only the last error.
+
+Batch status is derived, never set directly: `syncBatchStatus` recounts the tasks after every transition and rolls up to `RUNNING` while anything is queued or running, `BLOCKED` if anything failed, `NEEDS_REVIEW` if cancellations are mixed with successes, `CANCELLED` if nothing ran, and `COMPLETED` otherwise.
+
+Cancellation (`POST /generations/tasks/:taskId/cancel`) is only allowed while a task is still `QUEUED`; a running task is left alone because its provider call has already been paid for.
+
+Composition (`POST /episodes/:episodeId/compositions`) records a `Composition` with a manifest of the episode's storyboard ids and enqueues `compose-episode`. The worker takes the newest succeeded video artifact of every storyboard in the manifest, concatenates them with the FFmpeg concat demuxer, stores the result as a `COMPOSITION` artifact, and marks the composition `COMPLETED`; any missing segment or FFmpeg failure marks it `BLOCKED` and logs stderr.
+
+Read surface: `GET /episodes/:episodeId/generations` returns every batch with its tasks, artifacts, and latest quality check, and `GET /artifacts/:artifactId/content` streams the bytes. Both are tenant-scoped and require `read`.
+
 ## Queue design
 
-BullMQ queues:
+Implemented: one BullMQ queue, `studio-pipeline`, carrying two job kinds — `run-task` and `compose-episode`. Job ids are deterministic (`run-<taskId>-<attempt>` and `compose-<compositionId>`) so a duplicate enqueue is a no-op and a rework attempt never collides with its predecessor. BullMQ retries a crashed job twice with exponential backoff; application-level retries (candidate fallback, quality-gate rework) are expressed as new payloads, not as BullMQ retries, because each one has to be visible in the task's attempt count.
 
-- `source-analysis`
-- `script-generation`
-- `asset-generation`
-- `storyboard-generation`
-- `image-generation`
-- `video-generation`
-- `audio-generation`
-- `quality-check`
-- `composition`
-- `delivery`
-
-Jobs are idempotent by deterministic job key. Queues support concurrency limits per tenant, provider, model, and capability. Retries distinguish transient errors, entitlement errors, validation errors, and content failures.
+Planned: the per-stage topology the schema anticipates — `source-analysis`, `script-generation`, `asset-generation`, `storyboard-generation`, `image-generation`, `video-generation`, `audio-generation`, `quality-check`, `composition`, `delivery` — with concurrency limits per tenant, provider, model, and capability, and retry classification that distinguishes transient, entitlement, validation, and content failures.
 
 ## Quality gates
+
+Implemented: every generated artifact is scored by a `fake-qc` check — a deterministic hash of the task id and attempt number, so a given attempt always gets the same verdict and tests can rely on it. The score is compared against the 0.7 threshold and stored as a `QualityCheck` row referencing the artifact, which means the rework history of a task survives in the database. `STUDIO_QC_MODE` forces the outcome (`pass`, `fail`) for demos and tests; the default `random` mode exercises both paths. This is a placeholder for the real audits below, not a quality judgement about the media.
+
+Designed, not yet built:
 
 - Source audit: event order, time, location, characters, props, dialogue, required beats, ending
 - Script audit: source coverage and prohibited additions
@@ -159,7 +192,7 @@ A stage may be marked complete only with recorded check results. Partial output 
 
 ## Artifact traceability
 
-Every artifact must be reachable in both directions:
+The full chain the design requires, in both directions:
 
 project → episode → storyboard/asset → generation batch → task attempt → artifact → quality checks
 
@@ -167,11 +200,15 @@ and:
 
 artifact → task attempt → model/configuration → source prompt/input versions → storyboard/asset → episode/project/organization.
 
-Each artifact has tenant ID, project ID, episode ID, storyboard or asset ID, stage, version, prompt/input snapshot, model, provider, configuration version, task ID, object-storage key, checksum, dimensions, duration, and timestamps.
+Implemented today: `MediaArtifact → GenerationTask → GenerationBatch → Episode → Project → Organization` are real relations, the batch also links the storyboards it planned against, and `QualityCheck` points at the artifact it scored. The object key itself encodes tenant, project, episode, stage, entity, and version. The artifact stores checksum, mime type, dimensions or duration, and the raw provider response as metadata; the task stores the planned request snapshot, the winning provider and model, and a response snapshot naming the attempt, candidate, provider task id, and artifact id.
+
+Missing until the upstream content stages exist: source prompt and input version references (source document, script version, asset version) and a configuration version per attempt.
 
 ## Storage
 
-The application stores metadata in PostgreSQL and binary data in S3-compatible storage. Object keys are generated from tenant/project/episode/stage/entity/version and never from user-provided filenames. Local development uses MinIO with the same S3 interface.
+Metadata lives in PostgreSQL; bytes live on a local disk root named by `STUDIO_ARTIFACTS_DIR`. The worker writes into it and the API streams out of it, so both processes must resolve the same absolute path — `pnpm dev` pins it, and the Docker Compose deployment shares a named volume. Object keys are generated from tenant/project/episode/stage/entity/version and never from user-provided filenames, and `DiskStorage` rejects any key that escapes the root.
+
+The planned production backend is S3-compatible object storage (MinIO locally) behind the same `Storage` interface; the S3 settings in `packages/config` are read for that migration and are not used by the disk implementation.
 
 ## Security
 
@@ -183,7 +220,10 @@ Implemented:
 - Sessions stored in the database as SHA-256 token hashes with a 7-day TTL, revoked on logout, organization switch, and membership removal
 - Role-based authorization (`OWNER > ADMIN > EDITOR > REVIEWER > VIEWER`) checked by `requirePermission` at every route boundary; every query is scoped by `organizationId`
 - Provider errors pass through `sanitizeError`, which keeps only code, message, and request id, truncated to 500 characters
-- Audit events for authentication, membership, provider, and binding actions
+- Audit events for authentication, membership, provider, binding, generation, and composition actions
+- Provider API keys are decrypted only inside the worker, for the duration of one candidate call; the plaintext never reaches the database, the API response, or a log line
+- Artifact bytes are served only through `GET /artifacts/:artifactId/content`, which is tenant-scoped and requires a session; the web app fetches them with the bearer token and hands revocable blob URLs to the media elements, which cannot send headers themselves
+- Object keys are validated against traversal before any filesystem access
 - Login and registration are rate limited
 
 Planned:
@@ -206,13 +246,21 @@ Met by the current codebase:
 - `GET /bindings/resolve` returns project-scope candidates before organization-scope ones, by priority, deduplicated and filtered
 - Two tenants cannot read or mutate each other's records
 - Every provider and binding mutation leaves an audit entry
+- Triggering a stage plans one batch with one task per target and enqueues exactly one job per task
+- Triggering a stage with no verified candidate for its slot is rejected with `409` and queues nothing
+- Re-triggering the same stage of the same episode returns the existing batch instead of duplicating work
+- A candidate failure is preserved on the task and the worker advances to the next verified candidate
+- A rejected artifact is reworked up to three attempts and then fails the task, with a `QualityCheck` row per attempt
+- Batch status is derived from its tasks after every transition, including cancellation
+- Only a queued task can be cancelled; a viewer cannot trigger, cancel, or compose
+- An artifact streams with its stored mime type and length, and a missing file is a `404`
+- Composition concatenates the newest succeeded video of every storyboard in the manifest and blocks when one is missing
 
-Pending the generation pipeline:
+Pending:
 
 - A source document can be versioned and audited
 - The system can produce approved script, asset, and storyboard versions
 - A reference video task cannot select T2V
-- A failed model attempt preserves its error and can select only compatible verified alternatives
-- A completed artifact can be traced to its storyboard, prompt, model, task, and source version
+- A completed artifact can be traced back to its source prompt and input versions
 - A delivery manifest identifies missing, blocked, and approved segments
 - Docker Compose starts web, API, worker, PostgreSQL, Redis, and MinIO

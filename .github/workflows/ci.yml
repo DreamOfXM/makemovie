@@ -8,6 +8,18 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,6 +29,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+
+      # The worker synthesizes mock media and composes episodes with the real
+      # binary, so the tests fail loudly rather than silently skipping it.
+      - name: Ensure FFmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -1
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -34,3 +56,4 @@ jobs:
         run: pnpm test
         env:
           NODE_ENV: test
+          REDIS_URL: redis://127.0.0.1:6380
