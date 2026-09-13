@@ -1,9 +1,11 @@
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import type { ModelCapability } from '@studio/domain'
 import {
+  buildCredentialProbeRequest,
   buildPollRequest,
   buildSubmitRequest,
   createAdapter,
+  DashScopeAdapter,
   getCatalog,
   isKnownProvider,
   listCatalogs,
@@ -174,6 +176,77 @@ describe('dashscope request building', () => {
     expect(req.url).toBe(`${base}/api/v1/tasks/task-123`)
     expect(req.method).toBe('GET')
     expect(req.headers.Authorization).toBe('Bearer sk-test')
+  })
+
+  it('builds a credential probe against the text endpoint for any capability', () => {
+    const req = buildCredentialProbeRequest(`${base}/`, 'sk-test')
+    expect(req.url).toBe(`${base}/api/v1/services/aigc/text-generation/generation`)
+    expect(req.body).toMatchObject({ model: 'qwen-turbo', parameters: { max_tokens: 1 } })
+    expect(req.headers['X-DashScope-Async']).toBeUndefined()
+  })
+})
+
+describe('dashscope adapter probe', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function adapter(apiKey = 'sk-test'): DashScopeAdapter {
+    return new DashScopeAdapter({ apiKey, baseUrl: 'https://dashscope.aliyuncs.com' })
+  }
+
+  /** The catalog the way a connection materialises it: every model, defaults filled in. */
+  function catalogCapabilities(): ModelCapability[] {
+    const catalog = getCatalog('dashscope')!
+    return catalog.models.map(model => ({
+      provider: catalog.provider,
+      model: model.model,
+      modality: model.modality,
+      acceptsFirstFrame: model.acceptsFirstFrame ?? false,
+      acceptsReferenceImages: model.acceptsReferenceImages ?? false,
+      maxReferenceImages: model.maxReferenceImages ?? 0,
+    }))
+  }
+
+  it('probes every catalog model, including ones with no dashscope endpoint', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    const capabilities = catalogCapabilities()
+    const results = await Promise.all(capabilities.map(item => adapter().probe(item)))
+    expect(results.every(result => result.ok)).toBe(true)
+    expect(results[0].message).toContain(capabilities[0].model)
+  })
+
+  it('verifies the shared credential once, not once per capability', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    const prober = adapter()
+    await Promise.all(catalogCapabilities().map(item => prober.probe(item)))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toContain('/text-generation/generation')
+  })
+
+  it('reports the provider error for every capability when the key is rejected', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ code: 'InvalidApiKey', message: 'bad key', request_id: 'r-1' }),
+    })
+    const results = await Promise.all(catalogCapabilities().map(item => adapter().probe(item)))
+    expect(results.every(result => !result.ok && result.status === 401)).toBe(true)
+    expect(results[0].message).toBe('InvalidApiKey | bad key | request_id=r-1')
+  })
+
+  it('survives an unreachable endpoint', async () => {
+    fetchMock.mockRejectedValue(new Error('fetch failed'))
+    const result = await adapter().probe(capability({ modality: 'i2v', acceptsFirstFrame: true }))
+    expect(result).toEqual({ ok: false, status: 0, message: 'fetch failed' })
   })
 })
 

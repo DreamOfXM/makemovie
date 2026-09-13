@@ -82,6 +82,22 @@ export function buildPollRequest(baseUrl: string, apiKey: string, taskId: string
   }
 }
 
+/**
+ * Always the text endpoint, whatever capability is being probed: the call proves
+ * the connection's API key, not entitlement for a specific model. Routing it
+ * through buildSubmitRequest instead would throw for i2v and for the modalities
+ * this adapter has no endpoint for.
+ */
+export function buildCredentialProbeRequest(baseUrl: string, apiKey: string): DashScopeHttpRequest {
+  const base = baseUrl.replace(/\/+$/, '')
+  return {
+    url: `${base}${TEXT_PATH}`,
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: { model: 'qwen-turbo', input: { messages: [{ role: 'user', content: 'ping' }] }, parameters: { max_tokens: 1 } },
+  }
+}
+
 function extractArtifactUrl(output: Record<string, unknown>): string | undefined {
   if (typeof output.video_url === 'string') return output.video_url
   const results = output.results
@@ -105,24 +121,29 @@ let syncCounter = 0
 export class DashScopeAdapter implements ProviderAdapter {
   provider = 'dashscope'
 
+  /** Memoised per adapter instance, which lives for exactly one probe run. */
+  private credential?: Promise<ProbeResult>
+
   constructor(private readonly options: AdapterOptions) {}
 
   async probe(capability: ModelCapability): Promise<ProbeResult> {
     // Credential probe: a minimal text call verifies the API key. It does not
     // prove entitlement for `capability.model`; per-model entitlement is
     // established by the first real submission and recorded separately.
-    const httpRequest = buildSubmitRequest(this.options.baseUrl, this.options.apiKey, capability, {
-      model: 'qwen-turbo',
-      input: { messages: [{ role: 'user', content: 'ping' }] },
-      parameters: { max_tokens: 1 },
-    })
+    this.credential ??= this.checkCredential()
+    const result = await this.credential
+    return result.ok ? { ...result, message: `probe ok for ${capability.model}` } : result
+  }
+
+  private async checkCredential(): Promise<ProbeResult> {
+    const httpRequest = buildCredentialProbeRequest(this.options.baseUrl, this.options.apiKey)
     try {
       const response = await fetch(httpRequest.url, {
         method: httpRequest.method,
         headers: httpRequest.headers,
         body: JSON.stringify(httpRequest.body),
       })
-      if (response.ok) return { ok: true, status: response.status, message: `probe ok for ${capability.model}` }
+      if (response.ok) return { ok: true, status: response.status, message: 'probe ok' }
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
       return { ok: false, status: response.status, message: sanitizeError(body ?? response.statusText) }
     } catch (error) {
