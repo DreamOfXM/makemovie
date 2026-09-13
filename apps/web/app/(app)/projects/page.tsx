@@ -49,6 +49,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
+import { GenerationsPanel } from '@/components/generations/generations-panel'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
 type StoryboardDialogState = { mode: 'create'; nextNumber: number } | { mode: 'edit'; storyboard: Storyboard } | null
@@ -287,7 +288,7 @@ export default function ProjectsPage() {
                         </TableCell>
                         <TableCell>
                           <Badge variant="secondary">
-                            {t('projects.episodeCount', { count: episode.storyboards?.length ?? 0 })}
+                            {t('projects.storyboardCount', { count: episode.storyboards?.length ?? 0 })}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground">{formatDateTime(episode.createdAt, locale)}</TableCell>
@@ -398,6 +399,8 @@ export default function ProjectsPage() {
               </Table>
             )}
           </Card>
+
+          <GenerationsPanel episodeId={selectedEpisode?.id ?? null} />
         </div>
       </div>
 

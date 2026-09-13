@@ -194,6 +194,75 @@ export interface Membership {
   role: Role
 }
 
+/* -------------------------------------------------------------------------- */
+/* Generation pipeline                                                         */
+/* -------------------------------------------------------------------------- */
+
+export const generationStages = ['SCRIPT', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+export type GenerationStage = (typeof generationStages)[number]
+
+export type GenerationTaskStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED'
+
+export interface GenerationQc {
+  kind: string
+  score: number
+  status: string
+}
+
+export interface GenerationArtifact {
+  id: string
+  mimeType: string
+  objectKey: string
+  width: number | null
+  height: number | null
+  durationMs: number | null
+  downloadUrl: string
+}
+
+export interface GenerationTask {
+  id: string
+  stage: GenerationStage
+  status: GenerationTaskStatus
+  attempts: number
+  provider: string | null
+  model: string | null
+  error: string | null
+  createdAt: string
+  updatedAt: string
+  artifacts: GenerationArtifact[]
+  qc: GenerationQc | null
+}
+
+export interface GenerationBatch {
+  id: string
+  stage: GenerationStage
+  status: string
+  plannedCount: number
+  createdAt: string
+  tasks: GenerationTask[]
+}
+
+export interface EpisodeComposition {
+  id: string
+  status: string
+  artifact: GenerationArtifact | null
+}
+
+export interface GenerationsResponse {
+  batches: GenerationBatch[]
+  composition: EpisodeComposition | null
+}
+
+/**
+ * Artifact `downloadUrl` is relative to the API origin (it streams from
+ * `GET /artifacts/:id/content`); previews and download links need the absolute
+ * URL built with the same base `request()` uses.
+ */
+export function artifactHref(downloadUrl: string): string {
+  if (/^https?:\/\//i.test(downloadUrl)) return downloadUrl
+  return `${apiBase}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
+}
+
 export interface MeResponse {
   user: { id: string; email: string; name: string | null; locale: string }
   organization: { id: string; role: Role }
