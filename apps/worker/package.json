@@ -1,0 +1,1 @@
+{"name":"@studio/worker","version":"0.1.0","private":true,"type":"module","scripts":{"build":"tsc -p tsconfig.json","typecheck":"tsc -p tsconfig.json --noEmit","dev":"tsx watch src/main.ts"},"dependencies":{"@studio/domain":"workspace:*","bullmq":"^5.30.0","ioredis":"^5.4.1"},"devDependencies":{"tsx":"^4.19.2","typescript":"^5.7.3"}}

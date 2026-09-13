@@ -1,0 +1,303 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  EDITOR
+  REVIEWER
+  VIEWER
+}
+
+enum WorkflowStatus {
+  DRAFT
+  READY
+  RUNNING
+  NEEDS_REVIEW
+  APPROVED
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+
+enum Stage {
+  SOURCE_AUDIT
+  SCRIPT
+  ASSET
+  STORYBOARD
+  FIRST_FRAME
+  VIDEO
+  AUDIO
+  COMPOSITION
+  DELIVERY
+}
+
+enum TaskStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  CANCELLED
+}
+
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  passwordHash String
+  createdAt DateTime @default(now())
+  memberships OrganizationMember[]
+  auditEvents AuditEvent[]
+}
+
+model Organization {
+  id String @id @default(cuid())
+  name String
+  slug String @unique
+  createdAt DateTime @default(now())
+  memberships OrganizationMember[]
+  projects Project[]
+  providerConnections ProviderConnection[]
+  auditEvents AuditEvent[]
+}
+
+model OrganizationMember {
+  organizationId String
+  userId String
+  role MemberRole @default(VIEWER)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([organizationId, userId])
+}
+
+model Project {
+  id String @id @default(cuid())
+  organizationId String
+  name String
+  status WorkflowStatus @default(DRAFT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  episodes Episode[]
+  providerConnections ProviderConnection[]
+}
+
+model Episode {
+  id String @id @default(cuid())
+  projectId String
+  number Int
+  title String
+  status WorkflowStatus @default(DRAFT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceVersions SourceDocumentVersion[]
+  scriptVersions ScriptVersion[]
+  assets Asset[]
+  storyboards Storyboard[]
+  batches GenerationBatch[]
+  compositions Composition[]
+  deliveries Delivery[]
+  @@unique([projectId, number])
+}
+
+model SourceDocumentVersion {
+  id String @id @default(cuid())
+  episodeId String
+  version Int
+  content String
+  checksum String
+  status WorkflowStatus @default(DRAFT)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  auditChecks QualityCheck[]
+  @@unique([episodeId, version])
+}
+
+model ScriptVersion {
+  id String @id @default(cuid())
+  episodeId String
+  version Int
+  content String
+  checksum String
+  status WorkflowStatus @default(DRAFT)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  storyboards Storyboard[]
+  @@unique([episodeId, version])
+}
+
+model Asset {
+  id String @id @default(cuid())
+  episodeId String
+  kind String
+  name String
+  status WorkflowStatus @default(DRAFT)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  versions AssetVersion[]
+  storyboardLinks StoryboardAsset[]
+  @@unique([episodeId, kind, name])
+}
+
+model AssetVersion {
+  id String @id @default(cuid())
+  assetId String
+  version Int
+  description String
+  promptSnapshot String?
+  artifactId String?
+  status WorkflowStatus @default(DRAFT)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+  @@unique([assetId, version])
+}
+
+model Storyboard {
+  id String @id @default(cuid())
+  episodeId String
+  scriptVersionId String?
+  number Int
+  title String
+  durationMs Int
+  description String
+  sourceExcerpt String
+  continuityIn String
+  continuityOut String
+  status WorkflowStatus @default(DRAFT)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  scriptVersion ScriptVersion? @relation(fields: [scriptVersionId], references: [id])
+  assets StoryboardAsset[]
+  batches GenerationBatch[]
+  qualityChecks QualityCheck[]
+  @@unique([episodeId, number])
+}
+
+model StoryboardAsset {
+  storyboardId String
+  assetId String
+  role String
+  storyboard Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  @@id([storyboardId, assetId])
+}
+
+model GenerationBatch {
+  id String @id @default(cuid())
+  episodeId String
+  stage Stage
+  status WorkflowStatus @default(DRAFT)
+  plannedCount Int
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  storyboards Storyboard[]
+  tasks GenerationTask[]
+  qualityChecks QualityCheck[]
+}
+
+model GenerationTask {
+  id String @id @default(cuid())
+  batchId String
+  stage Stage
+  status TaskStatus @default(QUEUED)
+  provider String?
+  model String?
+  capabilitySnapshot String?
+  requestSnapshot String?
+  responseSnapshot String?
+  errorSnapshot String?
+  attempts Int @default(0)
+  batch GenerationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  artifacts MediaArtifact[]
+  @@index([batchId, status])
+}
+
+model MediaArtifact {
+  id String @id @default(cuid())
+  taskId String?
+  objectKey String
+  checksum String
+  mimeType String
+  version Int
+  metadata String?
+  task GenerationTask? @relation(fields: [taskId], references: [id])
+  assetVersions AssetVersion[]
+  qualityChecks QualityCheck[]
+  @@unique([objectKey, version])
+}
+
+model QualityCheck {
+  id String @id @default(cuid())
+  status WorkflowStatus
+  kind String
+  score Float?
+  report String
+  sourceDocumentVersionId String?
+  storyboardId String?
+  batchId String?
+  artifactId String?
+  sourceDocumentVersion SourceDocumentVersion? @relation(fields: [sourceDocumentVersionId], references: [id])
+  storyboard Storyboard? @relation(fields: [storyboardId], references: [id])
+  batch GenerationBatch? @relation(fields: [batchId], references: [id])
+  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+}
+
+model Composition {
+  id String @id @default(cuid())
+  episodeId String
+  status WorkflowStatus @default(DRAFT)
+  manifest String
+  artifactId String?
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
+
+model Delivery {
+  id String @id @default(cuid())
+  episodeId String
+  status WorkflowStatus @default(DRAFT)
+  manifest String
+  artifactId String?
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
+
+model ProviderConnection {
+  id String @id @default(cuid())
+  organizationId String
+  projectId String?
+  provider String
+  encryptedSecret String
+  baseUrl String
+  enabled Boolean @default(true)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  capabilities ModelCapability[]
+}
+
+model ModelCapability {
+  id String @id @default(cuid())
+  connectionId String
+  model String
+  modality String
+  acceptsFirstFrame Boolean @default(false)
+  acceptsReferenceImages Boolean @default(false)
+  maxReferenceImages Int @default(0)
+  entitlementVerifiedAt DateTime?
+  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  @@unique([connectionId, model])
+}
+
+model AuditEvent {
+  id String @id @default(cuid())
+  organizationId String
+  userId String?
+  action String
+  entityType String
+  entityId String
+  payload String
+  createdAt DateTime @default(now())
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id])
+  @@index([organizationId, createdAt])
+}
