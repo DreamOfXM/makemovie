@@ -1,0 +1,47 @@
+import Fastify, { type FastifyInstance } from 'fastify'
+import cors from '@fastify/cors'
+import rateLimit from '@fastify/rate-limit'
+import { loadConfig, type AppConfig } from '@studio/config'
+import { PrismaClient } from '@studio/db'
+import './types.js'
+import { authRoutes } from './routes/auth.js'
+import { projectRoutes } from './routes/projects.js'
+import { episodeRoutes } from './routes/episodes.js'
+import { memberRoutes } from './routes/members.js'
+import { auditRoutes } from './routes/audit.js'
+import { providerRoutes } from './routes/providers.js'
+import { bindingRoutes } from './routes/bindings.js'
+
+export interface BuildAppOptions {
+  config?: AppConfig
+  db?: PrismaClient
+  logger?: boolean
+}
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  const config = options.config ?? loadConfig()
+  const db = options.db ?? new PrismaClient({ datasources: { db: { url: config.databaseUrl } } })
+
+  const app = Fastify({ logger: options.logger ?? true })
+  app.decorate('db', db)
+  app.decorate('config', config)
+
+  await app.register(cors, { origin: config.corsOrigins, credentials: true })
+  await app.register(rateLimit, { max: 300, timeWindow: '1 minute' })
+
+  app.get('/health', async () => ({ status: 'ok', service: 'api' }))
+
+  await app.register(authRoutes, { prefix: '/auth' })
+  await app.register(projectRoutes)
+  await app.register(episodeRoutes)
+  await app.register(memberRoutes)
+  await app.register(auditRoutes)
+  await app.register(providerRoutes)
+  await app.register(bindingRoutes)
+
+  app.addHook('onClose', async () => {
+    await db.$disconnect()
+  })
+
+  return app
+}
