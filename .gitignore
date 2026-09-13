@@ -7,3 +7,5 @@ out
 *.log
 .DS_Store
 .turbo
+*.tsbuildinfo
+coverage

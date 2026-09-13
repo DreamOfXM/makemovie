@@ -7,9 +7,19 @@ services:
       POSTGRES_PASSWORD: studio
     ports: ["5433:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio -d studio"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
   redis:
     image: redis:7-alpine
     ports: ["6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -18,6 +28,11 @@ services:
       MINIO_ROOT_PASSWORD: studio-password
     ports: ["9000:9000", "9001:9001"]
     volumes: ["minio_data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
   api:
     build:
       context: .
@@ -25,16 +40,29 @@ services:
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
+      # dev-only default; in production set a random 64-hex master key
+      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3010}
       PORT: 4010
     ports: ["4010:4010"]
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
   worker:
     build:
       context: .
       dockerfile: infra/worker.Dockerfile
     environment:
+      DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
-    depends_on: [redis]
+      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
   web:
     build:
       context: .

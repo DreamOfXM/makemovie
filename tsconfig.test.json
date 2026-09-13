@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "incremental": false
+  },
+  "include": [
+    "apps/api/src",
+    "apps/api/test",
+    "packages/config/src",
+    "packages/config/test",
+    "packages/domain/src",
+    "packages/domain/test",
+    "packages/providers/src",
+    "packages/providers/test",
+    "packages/security/src",
+    "packages/security/test"
+  ]
+}
