@@ -182,6 +182,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.noneHint': 'Storyboards are numbered shots inside an episode.',
     'storyboards.selectEpisode': 'Select an episode first.',
     'storyboards.shot': 'Shot {number}',
+    'storyboards.firstFrame': 'First frame',
+    'storyboards.video': 'Video clip',
 
     'generations.title': 'Generation pipeline',
     'generations.subtitle': 'Trigger a stage, watch tasks run, and compose the finished episode.',
@@ -644,6 +646,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.noneHint': '分镜是剧集内带序号的镜头。',
     'storyboards.selectEpisode': '请先选择一集。',
     'storyboards.shot': '第 {number} 镜',
+    'storyboards.firstFrame': '首帧',
+    'storyboards.video': '视频片段',
 
     'generations.title': '生成流水线',
     'generations.subtitle': '按阶段触发生成，跟踪任务执行，并对整集进行合成。',

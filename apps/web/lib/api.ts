@@ -176,6 +176,8 @@ export interface Storyboard {
   continuityIn: string
   continuityOut: string
   status: DbWorkflowStatus
+  firstFrame?: GenerationArtifact | null
+  video?: GenerationArtifact | null
 }
 
 export interface AuditEvent {

@@ -53,6 +53,7 @@ import { GenerationsPanel } from '@/components/generations/generations-panel'
 import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
+import { StoryboardCard } from '@/components/storyboards/storyboard-card'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
 type StoryboardDialogState = { mode: 'create'; nextNumber: number } | { mode: 'edit'; storyboard: Storyboard } | null
@@ -88,6 +89,20 @@ export default function ProjectsPage() {
   const selectedProject = projects.data.find(item => item.id === projectId) ?? null
   const selectedEpisode = episodes.data.find(item => item.id === episodeId) ?? null
   const storyboards = selectedEpisode?.storyboards ?? []
+
+  // The enriched endpoint carries each storyboard's generated first frame / video, which
+  // the episode embed does not. Refresh it while an episode is open so media shows up
+  // as generations complete.
+  const loadStoryboards = useCallback(
+    () => (episodeId ? api<Storyboard[]>(`/episodes/${episodeId}/storyboards`) : Promise.resolve<Storyboard[]>([])),
+    [api, episodeId],
+  )
+  const storyboardsMedia = useAsync<Storyboard[]>(episodeId ? loadStoryboards : null, [])
+  useEffect(() => {
+    if (!episodeId) return
+    const timer = setInterval(storyboardsMedia.reload, 3000)
+    return () => clearInterval(timer)
+  }, [episodeId, storyboardsMedia.reload])
   const nextEpisodeNumber = useMemo(
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
     [episodes.data],
@@ -350,56 +365,17 @@ export default function ProjectsPage() {
                 />
               </CardContent>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-14">#</TableHead>
-                    <TableHead>{t('storyboards.titleLabel')}</TableHead>
-                    <TableHead className="w-20">{t('storyboards.duration')}</TableHead>
-                    <TableHead className="w-40">{t('common.status')}</TableHead>
-                    <TableHead className="w-28 text-right">{t('common.actions')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {storyboards.map(storyboard => {
-                    const status = toWorkflowStatus(storyboard.status)
-                    return (
-                      <TableRow key={storyboard.id}>
-                        <TableCell className="text-muted-foreground font-mono">{storyboard.number}</TableCell>
-                        <TableCell>
-                          <p className="font-medium">{storyboard.title}</p>
-                          <p className="text-muted-foreground max-w-prose truncate text-xs">{storyboard.description}</p>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">{formatDuration(storyboard.durationMs)}</TableCell>
-                        <TableCell>
-                          <StatusBadge status={status} label={t(`status.${status}`)} />
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={t('storyboards.editTitle')}
-                              disabled={!can('storyboard:write')}
-                              onClick={() => setStoryboardDialog({ mode: 'edit', storyboard })}
-                            >
-                              <PencilIcon />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={t('storyboards.changeStatus')}
-                              onClick={() => setStatusTarget(storyboard)}
-                            >
-                              <WorkflowIcon />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
+              <CardContent className="space-y-4">
+                {(storyboardsMedia.data.length > 0 ? storyboardsMedia.data : storyboards).map(storyboard => (
+                  <StoryboardCard
+                    key={storyboard.id}
+                    storyboard={storyboard}
+                    canWrite={can('storyboard:write')}
+                    onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
+                    onChangeStatus={() => setStatusTarget(storyboard)}
+                  />
+                ))}
+              </CardContent>
             )}
           </Card>
 
@@ -442,6 +418,7 @@ export default function ProjectsPage() {
         onDone={(mode, number) => {
           setStoryboardDialog(null)
           episodes.reload()
+          storyboardsMedia.reload()
           toast.success(mode === 'edit' ? t('storyboards.updated') : t('storyboards.created', { number }))
         }}
       />
@@ -452,6 +429,7 @@ export default function ProjectsPage() {
         onDone={status => {
           setStatusTarget(null)
           episodes.reload()
+          storyboardsMedia.reload()
           toast.success(t('storyboards.statusChanged', { status: t(`status.${status}`) }))
         }}
       />
