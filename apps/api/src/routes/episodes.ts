@@ -42,6 +42,24 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
   return { firstFrame, video }
 }
 
+interface StoryboardAssetDto {
+  id: string
+  kind: string
+  name: string
+  status: string
+  role: string
+}
+
+type StoryboardAssetLink = { role: string; asset: { id: string; kind: string; name: string; status: string } }
+
+function toStoryboardAssetDto(link: StoryboardAssetLink): StoryboardAssetDto {
+  return { id: link.asset.id, kind: link.asset.kind, name: link.asset.name, status: link.asset.status, role: link.role }
+}
+
+async function findStoryboardInOrg(db: PrismaClient, storyboardId: string, organizationId: string) {
+  return db.storyboard.findFirst({ where: { id: storyboardId, episode: { project: { organizationId } } } })
+}
+
 function statusAction(target: WorkflowStatus): Action {
   return target === 'approved' || target === 'blocked' ? 'review:decide' : 'storyboard:write'
 }
@@ -207,6 +225,80 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         payload: { from, to, reason: reason ?? null },
       })
       return updated
+    },
+  )
+
+  app.get<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/assets',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+      if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+      const links = await app.db.storyboardAsset.findMany({
+        where: { storyboardId: storyboard.id },
+        include: { asset: { select: { id: true, kind: true, name: true, status: true } } },
+        orderBy: { assetId: 'asc' },
+      })
+      return { assets: links.map(toStoryboardAssetDto) }
+    },
+  )
+
+  app.put<{
+    Params: { storyboardId: string }
+    Body: { assets?: { assetId?: unknown; role?: unknown }[] }
+  }>(
+    '/storyboards/:storyboardId/assets',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+      if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+
+      const entries = request.body?.assets
+      if (!Array.isArray(entries)) return reply.code(400).send({ error: 'assets must be an array of { assetId, role }' })
+      // A Map deduplicates repeated assetIds; the last occurrence wins.
+      const wanted = new Map<string, string>()
+      for (const entry of entries) {
+        const assetId = entry?.assetId
+        if (typeof assetId !== 'string' || !assetId.trim()) return reply.code(400).send({ error: 'each asset requires a non-empty assetId' })
+        if (entry.role !== undefined && typeof entry.role !== 'string') return reply.code(400).send({ error: 'role must be a string' })
+        wanted.set(assetId, (entry.role as string | undefined) ?? '')
+      }
+
+      if (wanted.size > 0) {
+        const found = await app.db.asset.findMany({
+          where: { id: { in: [...wanted.keys()] }, episodeId: storyboard.episodeId },
+          select: { id: true },
+        })
+        if (found.length !== wanted.size) {
+          const valid = new Set(found.map(asset => asset.id))
+          const invalid = [...wanted.keys()].find(id => !valid.has(id))
+          return reply.code(400).send({ error: `asset ${invalid} does not belong to this episode` })
+        }
+      }
+
+      await app.db.$transaction([
+        app.db.storyboardAsset.deleteMany({ where: { storyboardId: storyboard.id } }),
+        app.db.storyboardAsset.createMany({
+          data: [...wanted.entries()].map(([assetId, role]) => ({ storyboardId: storyboard.id, assetId, role })),
+        }),
+      ])
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'storyboard.assets',
+        entityType: 'Storyboard',
+        entityId: storyboard.id,
+        payload: { count: wanted.size, assets: [...wanted.entries()].map(([assetId, role]) => ({ assetId, role })) },
+      })
+
+      const links = await app.db.storyboardAsset.findMany({
+        where: { storyboardId: storyboard.id },
+        include: { asset: { select: { id: true, kind: true, name: true, status: true } } },
+        orderBy: { assetId: 'asc' },
+      })
+      return { assets: links.map(toStoryboardAssetDto) }
     },
   )
 }

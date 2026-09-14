@@ -12,7 +12,7 @@ import {
   WorkflowIcon,
 } from 'lucide-react'
 import { canTransition, minRoleFor, workflowStatuses, type WorkflowStatus } from '@studio/domain'
-import { toWorkflowStatus, type Episode, type Project, type Storyboard } from '@/lib/api'
+import { toWorkflowStatus, type AssetsResponse, type Episode, type Project, type Storyboard } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -108,6 +108,28 @@ export default function ProjectsPage() {
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
     [episodes.data],
   )
+
+  const loadEpisodeAssets = useCallback(
+    () =>
+      episodeId
+        ? api<AssetsResponse>(`/episodes/${episodeId}/assets`)
+        : Promise.resolve<AssetsResponse>({ assets: [] }),
+    [api, episodeId],
+  )
+  const episodeAssets = useAsync<AssetsResponse>(episodeId ? loadEpisodeAssets : null, { assets: [] })
+
+  async function bindStoryboardAssets(storyboardId: string, assets: { assetId: string; role: string }[]) {
+    try {
+      await api(`/storyboards/${storyboardId}/assets`, { method: 'PUT', body: JSON.stringify({ assets }) })
+      toast.success(t('storyboards.assetsUpdated'))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      episodes.reload()
+      storyboardsMedia.reload()
+      episodeAssets.reload()
+    }
+  }
 
   useEffect(() => {
     if (!projectId && projects.data.length > 0) setProjectId(projects.data[0].id)
@@ -382,6 +404,8 @@ export default function ProjectsPage() {
                     key={storyboard.id}
                     storyboard={storyboard}
                     canWrite={can('storyboard:write')}
+                    episodeAssets={episodeAssets.data.assets}
+                    onBindAssets={bindStoryboardAssets}
                     onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
                     onChangeStatus={() => setStatusTarget(storyboard)}
                   />

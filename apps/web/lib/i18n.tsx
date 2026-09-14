@@ -204,6 +204,11 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.shot': 'Shot {number}',
     'storyboards.firstFrame': 'First frame',
     'storyboards.video': 'Video clip',
+    'storyboards.assets': 'Assets in shot',
+    'storyboards.noAssets': 'No assets bound yet.',
+    'storyboards.assetsHint': 'Tap an asset to bind or unbind it.',
+    'storyboards.assetsUpdated': 'Storyboard assets updated',
+    'storyboards.noEpisodeAssets': 'Create assets in the Assets step, then bind them to shots.',
 
     'generations.title': 'Generation pipeline',
     'generations.subtitle': 'Trigger a stage, watch tasks run, and compose the finished episode.',
@@ -690,6 +695,11 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.shot': '第 {number} 镜',
     'storyboards.firstFrame': '首帧',
     'storyboards.video': '视频片段',
+    'storyboards.assets': '出场素材',
+    'storyboards.noAssets': '尚未绑定素材。',
+    'storyboards.assetsHint': '点击素材即可绑定或解绑。',
+    'storyboards.assetsUpdated': '分镜素材已更新',
+    'storyboards.noEpisodeAssets': '请先在「素材」步骤创建素材，再绑定到镜头。',
 
     'generations.title': '生成流水线',
     'generations.subtitle': '按阶段触发生成，跟踪任务执行，并对整集进行合成。',

@@ -164,6 +164,20 @@ export interface Episode {
   storyboards?: Storyboard[]
 }
 
+export interface StoryboardAssetLink {
+  storyboardId: string
+  assetId: string
+  role: string
+}
+
+export interface StoryboardAssetDto {
+  id: string
+  kind: string
+  name: string
+  status: string
+  role: string
+}
+
 export interface Storyboard {
   id: string
   episodeId: string
@@ -176,6 +190,7 @@ export interface Storyboard {
   continuityIn: string
   continuityOut: string
   status: DbWorkflowStatus
+  assets?: StoryboardAssetLink[]
   firstFrame?: GenerationArtifact | null
   video?: GenerationArtifact | null
 }

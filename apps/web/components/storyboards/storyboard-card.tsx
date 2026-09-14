@@ -2,8 +2,8 @@
 
 import { useState } from 'react'
 import { FilmIcon, PencilIcon, WorkflowIcon } from 'lucide-react'
-import { toWorkflowStatus, type GenerationArtifact, type Storyboard } from '@/lib/api'
-import { useI18n } from '@/lib/i18n'
+import { toWorkflowStatus, type Asset, type GenerationArtifact, type Storyboard } from '@/lib/api'
+import { translateEnum, useI18n } from '@/lib/i18n'
 import { cn, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -16,6 +16,8 @@ import { useArtifactUrl } from '@/components/generations/generations-panel'
 interface StoryboardCardProps {
   storyboard: Storyboard
   canWrite: boolean
+  episodeAssets: Asset[]
+  onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
   onEdit(): void
   onChangeStatus(): void
 }
@@ -25,9 +27,25 @@ interface StoryboardCardProps {
  * from, and the generated first frame / video inline, rather than a one-line
  * row in a table.
  */
-export function StoryboardCard({ storyboard, canWrite, onEdit, onChangeStatus }: StoryboardCardProps) {
+export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAssets, onEdit, onChangeStatus }: StoryboardCardProps) {
   const { t } = useI18n()
   const status = toWorkflowStatus(storyboard.status)
+  const [savingAsset, setSavingAsset] = useState<string | null>(null)
+
+  const links = storyboard.assets ?? []
+  const boundIds = new Set(links.map(link => link.assetId))
+
+  async function toggleAsset(assetId: string) {
+    const next = boundIds.has(assetId)
+      ? links.filter(link => link.assetId !== assetId)
+      : [...links, { storyboardId: storyboard.id, assetId, role: 'appears' }]
+    setSavingAsset(assetId)
+    try {
+      await onBindAssets(storyboard.id, next.map(link => ({ assetId: link.assetId, role: link.role })))
+    } finally {
+      setSavingAsset(null)
+    }
+  }
 
   return (
     <Card>
@@ -62,6 +80,54 @@ export function StoryboardCard({ storyboard, canWrite, onEdit, onChangeStatus }:
             )}
           </div>
         )}
+
+        <div>
+          <p className="text-muted-foreground mb-1 text-xs font-medium">{t('storyboards.assets')}</p>
+          {!canWrite ? (
+            boundIds.size === 0 ? (
+              <p className="text-muted-foreground text-xs">{t('storyboards.noAssets')}</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {links.map(link => {
+                  const asset = episodeAssets.find(item => item.id === link.assetId)
+                  return (
+                    <Badge key={link.assetId} variant="secondary">
+                      {asset ? `${translateEnum(t, 'assets.kind', asset.kind)} · ${asset.name}` : link.assetId}
+                    </Badge>
+                  )
+                })}
+              </div>
+            )
+          ) : episodeAssets.length === 0 ? (
+            <p className="text-muted-foreground text-xs">{t('storyboards.noEpisodeAssets')}</p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {episodeAssets.map(asset => {
+                const bound = boundIds.has(asset.id)
+                return (
+                  <button
+                    key={asset.id}
+                    type="button"
+                    aria-pressed={bound}
+                    aria-label={`${translateEnum(t, 'assets.kind', asset.kind)} ${asset.name}`}
+                    disabled={savingAsset !== null}
+                    onClick={() => void toggleAsset(asset.id)}
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium transition-colors',
+                      bound
+                        ? 'border-transparent bg-primary text-primary-foreground'
+                        : 'border-dashed text-muted-foreground hover:bg-accent hover:text-foreground',
+                      savingAsset === asset.id && 'opacity-60',
+                    )}
+                  >
+                    {savingAsset === asset.id ? t('common.loading') : `${translateEnum(t, 'assets.kind', asset.kind)} · ${asset.name}`}
+                  </button>
+                )
+              })}
+              <span className="text-muted-foreground text-xs">{t('storyboards.assetsHint')}</span>
+            </div>
+          )}
+        </div>
 
         <div>
           <p className="text-muted-foreground mb-1 text-xs font-medium">{t('storyboards.description')}</p>
