@@ -89,7 +89,6 @@ export default function ProjectsPage() {
 
   const selectedProject = projects.data.find(item => item.id === projectId) ?? null
   const selectedEpisode = episodes.data.find(item => item.id === episodeId) ?? null
-  const storyboards = selectedEpisode?.storyboards ?? []
 
   // The enriched endpoint carries each storyboard's generated first frame / video, which
   // the episode embed does not. Refresh it while an episode is open so media shows up
@@ -104,6 +103,14 @@ export default function ProjectsPage() {
     const timer = setInterval(storyboardsMedia.reload, 3000)
     return () => clearInterval(timer)
   }, [episodeId, storyboardsMedia.reload])
+
+  // One list for the count, the empty state, and the cards. The episode embed is only
+  // reloaded on an explicit refresh, so consulting it alone would hide shots the worker
+  // wrote after an advance — the polled endpoint wins as soon as it has anything.
+  const storyboards = useMemo(
+    () => (storyboardsMedia.data.length > 0 ? storyboardsMedia.data : (selectedEpisode?.storyboards ?? [])),
+    [storyboardsMedia.data, selectedEpisode],
+  )
   const nextEpisodeNumber = useMemo(
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
     [episodes.data],
@@ -338,7 +345,9 @@ export default function ProjectsPage() {
                         </TableCell>
                         <TableCell>
                           <Badge variant="secondary">
-                            {t('projects.storyboardCount', { count: episode.storyboards?.length ?? 0 })}
+                            {t('projects.storyboardCount', {
+                              count: episode.id === episodeId ? storyboards.length : (episode.storyboards?.length ?? 0),
+                            })}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground">{formatDateTime(episode.createdAt, locale)}</TableCell>
@@ -412,7 +421,7 @@ export default function ProjectsPage() {
               </CardContent>
             ) : (
               <CardContent className="space-y-4">
-                {(storyboardsMedia.data.length > 0 ? storyboardsMedia.data : storyboards).map(storyboard => (
+                {storyboards.map(storyboard => (
                   <StoryboardCard
                     key={storyboard.id}
                     storyboard={storyboard}

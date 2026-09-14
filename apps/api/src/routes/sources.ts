@@ -170,6 +170,19 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  app.get<{ Params: { episodeId: string; version: string } }>(
+    '/episodes/:episodeId/script-versions/:version',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const version = await findScriptVersion(app.db, episode.id, request.params.version)
+      if (!version) return reply.code(404).send({ error: 'Script version not found' })
+      return { version: toVersionDto(version) }
+    },
+  )
+
   app.post<{ Params: { episodeId: string }; Body: ScriptBody }>(
     '/episodes/:episodeId/script-versions',
     { preHandler: requirePermission('episode:write') },

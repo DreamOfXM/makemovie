@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
-import { BookTextIcon, FileTextIcon, RefreshCwIcon, ScrollTextIcon, UploadIcon } from 'lucide-react'
+import { BookTextIcon, FileTextIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, UploadIcon } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -17,7 +17,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
-import { GuardedButton } from '@/components/permission'
+import { GuardedButton, usePermission } from '@/components/permission'
 
 /** Summary row shared by GET source-versions and GET script-versions. */
 export interface VersionSummary {
@@ -28,8 +28,11 @@ export interface VersionSummary {
   contentLength: number
 }
 
+/** Single-version endpoints include the text the list summaries omit. */
+type VersionDetail = VersionSummary & { content: string }
+
 interface ScriptApproveResponse {
-  version: VersionSummary & { content: string }
+  version: VersionDetail
   storyboardsUpdated: number
 }
 
@@ -224,8 +227,11 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
             emptyTitle={t('sources.noSources')}
             emptyHint={t('sources.noSourcesHint')}
             emptyIcon={<FileTextIcon />}
+            kind="source"
+            episodeId={episodeId}
+            onSaved={reloadAll}
             renderActions={version => (
-              <div className="flex justify-end gap-1">
+              <>
                 {version.status !== 'APPROVED' && (
                   <GuardedButton
                     action="episode:write"
@@ -249,7 +255,7 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
                     {busy === `derive-${version.version}` ? t('sources.deriving') : t('sources.derive')}
                   </GuardedButton>
                 )}
-              </div>
+              </>
             )}
           />
 
@@ -262,19 +268,20 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
             emptyTitle={t('sources.noScripts')}
             emptyHint={t('sources.noScriptsHint')}
             emptyIcon={<ScrollTextIcon />}
+            kind="script"
+            episodeId={episodeId}
+            onSaved={reloadAll}
             renderActions={version =>
               version.status !== 'APPROVED' ? (
-                <div className="flex justify-end">
-                  <GuardedButton
-                    action="episode:write"
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy === `approve-script-${version.version}`}
-                    onClick={() => void approveScript(version)}
-                  >
-                    {busy === `approve-script-${version.version}` ? t('sources.approving') : t('sources.approve')}
-                  </GuardedButton>
-                </div>
+                <GuardedButton
+                  action="episode:write"
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy === `approve-script-${version.version}`}
+                  onClick={() => void approveScript(version)}
+                >
+                  {busy === `approve-script-${version.version}` ? t('sources.approving') : t('sources.approve')}
+                </GuardedButton>
               ) : null
             }
           />
@@ -293,7 +300,12 @@ interface VersionTableProps {
   emptyTitle: string
   emptyHint: string
   emptyIcon: ReactNode
+  /** Selects the endpoint family the full text is read from and written back to. */
+  kind: 'source' | 'script'
+  episodeId: string
   renderActions(version: VersionSummary): ReactNode
+  /** Called after an in-place edit lands so the parent list picks up the new status. */
+  onSaved(): void
 }
 
 function VersionTable({
@@ -305,9 +317,66 @@ function VersionTable({
   emptyTitle,
   emptyHint,
   emptyIcon,
+  kind,
+  episodeId,
   renderActions,
+  onSaved,
 }: VersionTableProps) {
   const { t } = useI18n()
+  const { api } = useSession()
+  const { can } = usePermission()
+
+  // The list is deliberately content-free, so the text is fetched when a row is
+  // expanded rather than up front — a source document can be 200k characters.
+  const [openVersion, setOpenVersion] = useState<number | null>(null)
+  const [detail, setDetail] = useState<VersionDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  // Non-null only while editing; the pristine text stays in `detail` for cancel.
+  const [draft, setDraft] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const path = kind === 'source' ? 'source-versions' : 'script-versions'
+  const editable = kind === 'script' && can('episode:write')
+
+  async function toggleView(version: VersionSummary) {
+    setDraft(null)
+    if (openVersion === version.version) {
+      setOpenVersion(null)
+      setDetail(null)
+      return
+    }
+    setOpenVersion(version.version)
+    setDetail(null)
+    setDetailLoading(true)
+    try {
+      const result = await api<{ version: VersionDetail }>(`/episodes/${episodeId}/${path}/${version.version}`)
+      setDetail(result.version)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      setOpenVersion(null)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  async function saveEdit() {
+    if (draft === null || detail === null) return
+    setSaving(true)
+    try {
+      const result = await api<{ version: VersionDetail }>(`/episodes/${episodeId}/${path}/${detail.version}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ content: draft }),
+      })
+      toast.success(t('sources.saved', { version: result.version.version }))
+      setDetail(result.version)
+      setDraft(null)
+      onSaved()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <Card className="gap-4 py-4">
@@ -335,18 +404,63 @@ function VersionTable({
           </TableHeader>
           <TableBody>
             {versions.map(version => (
-              <TableRow key={version.id}>
-                <TableCell>
-                  <p className="font-medium">v{version.version}</p>
-                  <p className="text-muted-foreground font-mono text-xs" title={version.checksum}>
-                    {t('sources.chars', { count: version.contentLength })} · {version.checksum.slice(0, 12)}
-                  </p>
-                </TableCell>
-                <TableCell>
-                  <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />
-                </TableCell>
-                <TableCell className="text-right">{renderActions(version)}</TableCell>
-              </TableRow>
+              <Fragment key={version.id}>
+                <TableRow>
+                  <TableCell>
+                    <p className="font-medium">v{version.version}</p>
+                    <p className="text-muted-foreground font-mono text-xs" title={version.checksum}>
+                      {t('sources.chars', { count: version.contentLength })} · {version.checksum.slice(0, 12)}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button variant="ghost" size="sm" onClick={() => void toggleView(version)} disabled={detailLoading && openVersion === version.version}>
+                        {openVersion === version.version ? t('sources.hide') : t('sources.view')}
+                      </Button>
+                      {renderActions(version)}
+                    </div>
+                  </TableCell>
+                </TableRow>
+                {openVersion === version.version && (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={3} className="bg-muted/40 py-3">
+                      {detailLoading ? (
+                        <p className="text-muted-foreground text-xs">{t('common.loading')}</p>
+                      ) : detail === null ? null : draft === null ? (
+                        <div className="space-y-2">
+                          {editable && (
+                            <div className="flex justify-end">
+                              <Button variant="outline" size="sm" onClick={() => setDraft(detail.content)}>
+                                <PencilIcon />
+                                {t('sources.edit')}
+                              </Button>
+                            </div>
+                          )}
+                          <pre className="bg-background max-h-96 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">
+                            {detail.content}
+                          </pre>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <Textarea rows={14} value={draft} onChange={event => setDraft(event.target.value)} />
+                          <p className="text-muted-foreground text-xs">{t('sources.editHint')}</p>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="ghost" size="sm" disabled={saving} onClick={() => setDraft(null)}>
+                              {t('common.cancel')}
+                            </Button>
+                            <Button size="sm" disabled={saving || !draft.trim()} onClick={() => void saveEdit()}>
+                              {saving ? t('sources.saving') : t('common.save')}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Fragment>
             ))}
           </TableBody>
         </Table>

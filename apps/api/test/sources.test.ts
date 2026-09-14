@@ -269,6 +269,27 @@ describe('script versions', () => {
     }
   })
 
+  it('returns one script version with its content and 404s on an unknown version', async () => {
+    // The list above carries no text, so reading a single version is what makes
+    // an AI-written script reviewable before a human approves it.
+    const res = await env.app.inject({ method: 'GET', url: `${scriptUrl}/1`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().version).toEqual({
+      id: scriptV1Id,
+      version: 1,
+      checksum: sha256(sourceContentV1),
+      status: 'APPROVED',
+      contentLength: sourceContentV1.length,
+      content: sourceContentV1,
+    })
+
+    expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/abc`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: '/episodes/does-not-exist/script-versions/1', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    // Version numbers are episode-scoped, so a rival's episode stays invisible.
+    expect((await env.app.inject({ method: 'GET', url: `/episodes/${rivalEpisodeId}/script-versions/1`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+  })
+
   it('moves the storyboards to the newest approved script version', async () => {
     const res = await env.app.inject({ method: 'POST', url: `${scriptUrl}/2/approve`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
@@ -294,6 +315,11 @@ describe('script versions', () => {
     const blank = await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/2`, headers: authHeaders(editorToken), payload: { content: '   ' } })
     expect(blank.statusCode).toBe(400)
     expect((await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/99`, headers: authHeaders(editorToken), payload: { content: edited } })).statusCode).toBe(404)
+
+    const readBack = await env.app.inject({ method: 'GET', url: `${scriptUrl}/2`, headers: authHeaders(viewerToken) })
+    expect(readBack.statusCode).toBe(200)
+    expect(readBack.json().version.content).toBe(edited)
+    expect(readBack.json().version.status).toBe('DRAFT')
   })
 
   it('records the source and script events in the audit trail', async () => {

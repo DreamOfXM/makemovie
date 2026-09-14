@@ -222,3 +222,35 @@ describe('audit trail', () => {
     expect((filtered.json().events as unknown[]).every(event => (event as { action: string }).action === 'project.create')).toBe(true)
   })
 })
+
+describe('cors', () => {
+  // @fastify/cors defaults to GET,HEAD,POST. Without the write verbs the browser
+  // preflight fails and every edit in the console surfaces as "Failed to fetch".
+  const preflight = (origin: string, method: string) =>
+    app.inject({
+      method: 'OPTIONS',
+      url: '/projects',
+      headers: {
+        origin,
+        'access-control-request-method': method,
+        'access-control-request-headers': 'authorization,content-type',
+      },
+    })
+
+  it('allows the write verbs the console edits through', async () => {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      const res = await preflight('http://localhost:3010', method)
+      expect(res.statusCode).toBe(204)
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3010')
+      const allowed = String(res.headers['access-control-allow-methods'])
+        .split(',')
+        .map(value => value.trim())
+      expect(allowed).toContain(method)
+    }
+  })
+
+  it('does not echo an origin outside the allowlist', async () => {
+    const res = await preflight('http://not-allowed.example', 'PATCH')
+    expect(res.headers['access-control-allow-origin']).not.toBe('http://not-allowed.example')
+  })
+})

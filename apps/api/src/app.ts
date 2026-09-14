@@ -35,7 +35,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.decorate('config', config)
   app.decorate('storage', storage)
 
-  await app.register(cors, { origin: config.corsOrigins, credentials: true })
+  // @fastify/cors defaults to GET,HEAD,POST, which fails the preflight for every
+  // PATCH/PUT/DELETE route — the whole editable surface of the console.
+  await app.register(cors, {
+    origin: config.corsOrigins,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  })
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' })
 
   app.get('/health', async () => ({ status: 'ok', service: 'api' }))
