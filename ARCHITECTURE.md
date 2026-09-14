@@ -164,6 +164,8 @@ Execution (`apps/worker/src/run-task.ts`):
 - On success the worker writes a `UsageLedger` entry (input prompt length, output byte count) and stamps the task `SUCCEEDED` with the winning provider, model, and response snapshot. For an `ASSET`-stage task it then appends the next `AssetVersion` for the asset named in the task's request snapshot, pointing at the stored artifact and left `DRAFT` — a passed quality check is not a human approval of the likeness.
 - Every candidate failure is collected into `errorSnapshot`, so a failed task explains the whole fallback chain rather than only the last error.
 
+Live-provider verification: the DashScope adapter's Qwen-Image path has been run against the live Bailian API and produced real images — the `ASSET` flow above ran end-to-end on `qwen-image-3.0`, which answers synchronously on the multimodal endpoint. The other DashScope paths (the async wanx image endpoint, video generation, and the VLM audit) are in the catalog but have not been run live; only Qwen-Image image generation is proven.
+
 Batch status is derived, never set directly: `syncBatchStatus` recounts the tasks after every transition and rolls up to `RUNNING` while anything is queued or running, `BLOCKED` if anything failed, `NEEDS_REVIEW` if cancellations are mixed with successes, `CANCELLED` if nothing ran, and `COMPLETED` otherwise.
 
 Cancellation (`POST /generations/tasks/:taskId/cancel`) is only allowed while a task is still `QUEUED`; a running task is left alone because its provider call has already been paid for.
@@ -212,7 +214,7 @@ The frame is taken from the middle of the clip rather than the start because a f
 
 What `mode=model` has not been shown to do:
 
-- **It has never run against a live provider.** No credentials were available. The DashScope multimodal endpoint, the request shape, and the response extraction are written from documentation and carry `// UNVERIFIED` in `packages/providers/src/dashscope.ts`; they may well be wrong on first contact with the real API.
+- **The audit itself has never run against a live provider.** The DashScope multimodal endpoint and its `messages` request shape are now proven live — the Qwen-Image generation path uses that same endpoint and has produced real images — but no `qwen-vl` model was available, so the audit direction specifically (a base64 frame in, a JSON verdict out) is still written from documentation and unverified.
 - **The threshold is inherited, not measured.** 0.7 came from the hash placeholder. No calibration run has established what a vision model's score distribution actually looks like.
 - **It is not reproducible.** The same frame asked twice can score differently, which is why `mode=model` is never a CI default.
 - **One frame cannot see motion.** Stutter, drift, and a character changing clothes mid-shot are invisible to it, as is every continuity defect between shots. Video audit here is a still-image proxy and is recorded as one.
