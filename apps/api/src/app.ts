@@ -3,7 +3,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { loadConfig, type AppConfig } from '@studio/config'
 import { PrismaClient } from '@studio/db'
-import { DiskStorage, type Storage } from '@studio/media'
+import { storageFrom, type Storage } from '@studio/media'
 import './types.js'
 import { authRoutes } from './routes/auth.js'
 import { projectRoutes } from './routes/projects.js'
@@ -27,7 +27,7 @@ export interface BuildAppOptions {
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = options.config ?? loadConfig()
   const db = options.db ?? new PrismaClient({ datasources: { db: { url: config.databaseUrl } } })
-  const storage = options.storage ?? new DiskStorage(config.artifactsDir)
+  const storage = options.storage ?? storageFrom(config)
 
   const app = Fastify({ logger: options.logger ?? true })
   app.decorate('db', db)
@@ -52,6 +52,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(deliveryRoutes)
 
   app.addHook('onClose', async () => {
+    await storage.close()
     await db.$disconnect()
   })
 

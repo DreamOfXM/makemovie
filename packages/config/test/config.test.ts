@@ -33,4 +33,13 @@ describe('loadConfig', () => {
   it('rejects a non-positive session TTL', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, SESSION_TTL_MS: '0' })).toThrow(/SESSION_TTL_MS/)
   })
+
+  it('defaults the storage backend to disk so the s3 settings stay inert', () => {
+    expect(loadConfig({ DATABASE_URL: DB }).storageBackend).toBe('disk')
+  })
+
+  it('accepts s3 and rejects anything else', () => {
+    expect(loadConfig({ DATABASE_URL: DB, STORAGE_BACKEND: 's3' }).storageBackend).toBe('s3')
+    expect(() => loadConfig({ DATABASE_URL: DB, STORAGE_BACKEND: 'gcs' })).toThrow(/STORAGE_BACKEND must be one of disk\|s3/)
+  })
 })

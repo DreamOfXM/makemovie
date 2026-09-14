@@ -1,4 +1,5 @@
 import { loadConfig } from '@studio/config'
+import type { StorageOptions } from '@studio/media'
 
 export type QcMode = 'random' | 'pass' | 'fail' | 'model'
 
@@ -6,7 +7,8 @@ export interface WorkerConfig {
   databaseUrl: string
   redisUrl: string
   masterKey: string
-  artifactsDir: string
+  /** The shared config satisfies this; the worker only reads storage settings from it. */
+  storage: StorageOptions
   qcMode: QcMode
 }
 
@@ -16,7 +18,7 @@ export function loadWorkerConfig(env: Record<string, string | undefined> = proce
     databaseUrl: shared.databaseUrl,
     redisUrl: shared.redisUrl,
     masterKey: shared.masterKey,
-    artifactsDir: shared.artifactsDir,
+    storage: shared,
     qcMode: qcModeFrom(env.STUDIO_QC_MODE),
   }
 }

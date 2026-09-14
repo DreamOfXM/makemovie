@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 import { promisify } from 'node:util'
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 const run = promisify(execFile)
 
@@ -49,6 +50,11 @@ export interface Storage {
    * missing object is an expected outcome here, not a fault.
    */
   open(key: string): Promise<StorageStream | null>
+  /**
+   * Releases whatever the backend holds open. An S3 client keeps a live socket agent
+   * that will otherwise hold the process up; the disk backend has nothing to release.
+   */
+  close(): Promise<void>
 }
 
 export function sha256(data: Uint8Array): string {
@@ -105,6 +111,123 @@ export class DiskStorage implements Storage {
     }
     return { body: createReadStream(target), sizeBytes }
   }
+
+  async close(): Promise<void> {
+    // Nothing is held open between calls; each one opens and closes its own handle.
+  }
+}
+
+export interface S3Options {
+  endpoint: string
+  bucket: string
+  region: string
+  accessKey: string
+  secretKey: string
+}
+
+/**
+ * The two commands used here signal absence differently: `GetObject` answers
+ * `NoSuchKey` with an XML body, `HeadObject` answers a bare 404 with none and the SDK
+ * names that `NotFound`. The status code is checked as well because it is the one part
+ * that does not depend on how a particular gateway shapes its error body.
+ *
+ * UNVERIFIED against a real service — no credentials and no MinIO are available here.
+ * `test/s3-storage.test.ts` drives a real `S3Client` against an in-process server that
+ * answers the documented responses, so request shaping, length extraction and absence
+ * handling are covered. That server ignores the `Authorization` header, so whether a
+ * real endpoint accepts our signature is not.
+ */
+function isAbsentObject(error: unknown): boolean {
+  const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } }
+  return failure?.name === 'NoSuchKey' || failure?.name === 'NotFound' || failure?.$metadata?.httpStatusCode === 404
+}
+
+export class S3Storage implements Storage {
+  private readonly client: S3Client
+  private readonly bucket: string
+
+  constructor(options: S3Options) {
+    this.bucket = options.bucket
+    this.client = new S3Client({
+      endpoint: options.endpoint,
+      region: options.region,
+      credentials: { accessKeyId: options.accessKey, secretAccessKey: options.secretKey },
+      // MinIO and most S3-compatible gateways have no wildcard DNS for bucket
+      // subdomains, so the bucket belongs in the path rather than the host.
+      forcePathStyle: true,
+      // Otherwise the SDK signs uploads as aws-chunked in order to attach a checksum,
+      // putting transfer framing on the wire in place of the caller's bytes and
+      // breaking gateways that do not implement it.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
+    })
+  }
+
+  async put(key: string, data: Uint8Array, mimeType: string): Promise<StoredObject> {
+    await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: mimeType }))
+    return { key, checksum: sha256(data), sizeBytes: data.byteLength, mimeType }
+  }
+
+  async read(key: string): Promise<Uint8Array> {
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }))
+    return await response.Body!.transformToByteArray()
+  }
+
+  async exists(key: string): Promise<boolean> {
+    try {
+      await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }))
+      return true
+    } catch (error) {
+      if (isAbsentObject(error)) return false
+      throw error
+    }
+  }
+
+  async open(key: string): Promise<StorageStream | null> {
+    let response
+    try {
+      response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }))
+    } catch (error) {
+      if (isAbsentObject(error)) return null
+      throw error
+    }
+    // A 200 carrying no length means something between us and the service rewrote the
+    // response. Reporting 0 would serve an empty body and hide that as a blank artifact.
+    const sizeBytes = response.ContentLength
+    if (sizeBytes === undefined) throw new Error(`s3: GetObject for ${key} reported no ContentLength`)
+    // GetObject answers with the length beside the body, so no HeadObject is needed.
+    return { body: response.Body as unknown as Readable, sizeBytes }
+  }
+
+  async close(): Promise<void> {
+    this.client.destroy()
+  }
+}
+
+export interface StorageOptions {
+  storageBackend: 'disk' | 's3'
+  artifactsDir: string
+  s3Endpoint: string
+  s3Bucket: string
+  s3Region: string
+  s3AccessKey: string
+  s3SecretKey: string
+}
+
+/**
+ * Builds the one backend both processes use, so neither grows its own switch. Options
+ * are structural rather than `AppConfig` — which satisfies them — to keep this package
+ * from depending on `@studio/config`.
+ */
+export function storageFrom(options: StorageOptions): Storage {
+  if (options.storageBackend !== 's3') return new DiskStorage(options.artifactsDir)
+  return new S3Storage({
+    endpoint: options.s3Endpoint,
+    bucket: options.s3Bucket,
+    region: options.s3Region,
+    accessKey: options.s3AccessKey,
+    secretKey: options.s3SecretKey,
+  })
 }
 
 export interface ComposeResult {

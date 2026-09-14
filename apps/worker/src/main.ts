@@ -1,7 +1,7 @@
 import { Worker } from 'bullmq'
 import { PrismaClient } from '@studio/db'
 import { PIPELINE_QUEUE, createPipelineQueue, enqueue, type PipelinePayload } from '@studio/jobs'
-import { DiskStorage, FfmpegComposer } from '@studio/media'
+import { FfmpegComposer, storageFrom } from '@studio/media'
 import { composeEpisode } from './compose.js'
 import { loadWorkerConfig } from './config.js'
 import type { PipelineDeps } from './deps.js'
@@ -14,7 +14,7 @@ const queue = createPipelineQueue({ url: config.redisUrl })
 
 const deps: PipelineDeps = {
   db,
-  storage: new DiskStorage(config.artifactsDir),
+  storage: storageFrom(config.storage),
   composer: new FfmpegComposer(),
   masterKey: config.masterKey,
   qcMode: config.qcMode,
@@ -43,6 +43,7 @@ process.stdout.write('worker ready\n')
 async function shutdown(): Promise<void> {
   await worker.close()
   await queue.close()
+  await deps.storage.close()
   await db.$disconnect()
 }
 
