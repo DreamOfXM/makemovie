@@ -6,6 +6,7 @@ import type { RunTaskCandidate, RunTaskPayload } from '@studio/jobs'
 import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media'
 import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
+import { recordAssetVersion } from './asset-version.js'
 import type { PipelineDeps } from './deps.js'
 import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
@@ -193,6 +194,7 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
         }),
       },
     })
+    await recordAssetVersion(deps.db, task, artifact.id, promptOf(request))
     return { status: 'succeeded' }
   } finally {
     await rm(workdir, { recursive: true, force: true })

@@ -126,6 +126,68 @@ describe('run-task', () => {
   })
 })
 
+describe('asset versions', () => {
+  const asset = { kind: 'character', name: 'Lin Wan', description: 'a resilient young woman in a red dress' }
+
+  it('records the first version when an ASSET task succeeds', async () => {
+    const prompt = 'character Lin Wan: a resilient young woman in a red dress'
+    const seed = await env.seed({ model: 'mock-image', modality: 'image', stage: 'ASSET', asset, prompt })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    const response = JSON.parse(task.responseSnapshot!) as { artifactId: string }
+
+    const versions = await env.db.assetVersion.findMany({ where: { assetId: seed.assetId! } })
+    expect(versions).toHaveLength(1)
+    expect(versions[0]).toMatchObject({
+      assetId: seed.assetId!,
+      version: 1,
+      status: 'DRAFT',
+      description: prompt,
+      promptSnapshot: prompt,
+      artifactId: response.artifactId,
+    })
+  })
+
+  it('appends the next version when the asset already has one', async () => {
+    const seed = await env.seed({ model: 'mock-image', modality: 'image', stage: 'ASSET', asset })
+    await env.db.assetVersion.create({ data: { assetId: seed.assetId!, version: 1, description: 'first sketch' } })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+
+    const versions = await env.db.assetVersion.findMany({ where: { assetId: seed.assetId! }, orderBy: { version: 'asc' } })
+    expect(versions).toHaveLength(2)
+    expect(versions[0]).toMatchObject({ version: 1, description: 'first sketch' })
+    expect(versions[1]).toMatchObject({ version: 2, status: 'DRAFT' })
+  })
+
+  it('records nothing for a non-ASSET task', async () => {
+    const seed = await env.seed({ model: 'mock-image', modality: 'image', stage: 'FIRST_FRAME' })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    expect(await env.db.assetVersion.count({ where: { asset: { episodeId: seed.episodeId } } })).toBe(0)
+  })
+
+  it('still succeeds when the ASSET snapshot carries no assetId', async () => {
+    const seed = await env.seed({
+      model: 'mock-image',
+      modality: 'image',
+      stage: 'ASSET',
+      requestSnapshot: JSON.stringify({ model: 'mock-image', input: { prompt: 'a character study' }, parameters: {} }),
+    })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    expect(await env.db.assetVersion.count({ where: { asset: { episodeId: seed.episodeId } } })).toBe(0)
+  })
+})
+
 describe('model-driven visual audit', () => {
   function modelDeps(checker?: QualityChecker) {
     return env.deps({

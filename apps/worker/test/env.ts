@@ -47,12 +47,14 @@ export interface SeedInput {
   prompt?: string
   requestSnapshot?: string | null
   storyboards?: number
+  asset?: { kind: string; name: string; description: string }
 }
 
 export interface Seed {
   organizationId: string
   projectId: string
   episodeId: string
+  assetId?: string
   storyboardIds: string[]
   connectionId: string
   capabilityId: string
@@ -126,6 +128,11 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
       const organization = await db.organization.create({ data: { name: `Org ${suffix}`, slug: `org-${suffix}` } })
       const project = await db.project.create({ data: { organizationId: organization.id, name: `Project ${suffix}` } })
       const episode = await db.episode.create({ data: { projectId: project.id, number: 1, title: 'Episode 1' } })
+      const asset = input.asset
+        ? await db.asset.create({
+            data: { episodeId: episode.id, kind: input.asset.kind, name: input.asset.name, description: input.asset.description, status: 'DRAFT' },
+          })
+        : undefined
 
       const storyboardCount = input.storyboards ?? 1
       const storyboards = []
@@ -170,13 +177,16 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
         },
       })
       const prompt = input.prompt ?? 'a rainy night market, neon reflections'
+      const defaultSnapshot = asset
+        ? { model, input: { prompt }, parameters: {}, assetId: asset.id }
+        : { model, input: { prompt }, parameters: {} }
       const task = await db.generationTask.create({
         data: {
           organizationId: organization.id,
           batchId: batch.id,
           stage,
           status: 'QUEUED',
-          requestSnapshot: input.requestSnapshot === undefined ? JSON.stringify({ model, input: { prompt }, parameters: {} }) : input.requestSnapshot,
+          requestSnapshot: input.requestSnapshot === undefined ? JSON.stringify(defaultSnapshot) : input.requestSnapshot,
         },
       })
 
@@ -184,6 +194,7 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
         organizationId: organization.id,
         projectId: project.id,
         episodeId: episode.id,
+        assetId: asset?.id,
         storyboardIds: storyboards.map(storyboard => storyboard.id),
         connectionId: connection.id,
         capabilityId: capability.id,
