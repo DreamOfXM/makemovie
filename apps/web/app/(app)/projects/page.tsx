@@ -51,6 +51,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
 import { SourcesPanel } from '@/components/sources/sources-panel'
+import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
@@ -401,6 +402,8 @@ export default function ProjectsPage() {
               </Table>
             )}
           </Card>
+
+          <AssetsPanel episodeId={selectedEpisode?.id ?? null} />
 
           <GenerationsPanel episodeId={selectedEpisode?.id ?? null} />
 

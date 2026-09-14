@@ -203,7 +203,7 @@ export interface Membership {
 /* Generation pipeline                                                         */
 /* -------------------------------------------------------------------------- */
 
-export const generationStages = ['SCRIPT', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
 export type GenerationStage = (typeof generationStages)[number]
 
 export type GenerationTaskStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED'
@@ -266,6 +266,31 @@ export interface GenerationsResponse {
 export function artifactHref(downloadUrl: string): string {
   if (/^https?:\/\//i.test(downloadUrl)) return downloadUrl
   return `${apiBase}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
+}
+
+/* -------------------------------------------------------------------------- */
+/* Episode assets                                                              */
+/* -------------------------------------------------------------------------- */
+
+export interface AssetVersion {
+  id: string
+  version: number
+  description: string
+  status: string
+  artifact: GenerationArtifact | null
+}
+
+export interface Asset {
+  id: string
+  kind: string
+  name: string
+  description: string
+  status: string
+  versions: AssetVersion[]
+}
+
+export interface AssetsResponse {
+  assets: Asset[]
 }
 
 export interface MeResponse {

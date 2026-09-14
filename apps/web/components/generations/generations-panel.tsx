@@ -325,7 +325,7 @@ function BatchCard({ batch, cancellingId, onCancel }: BatchCardProps) {
  * Media elements cannot send the bearer token, so artifacts are fetched with the
  * session header and exposed as revocable blob URLs.
  */
-function useArtifactUrl(downloadUrl: string | null): string | null {
+export function useArtifactUrl(downloadUrl: string | null): string | null {
   const { token } = useSession()
   const [url, setUrl] = useState<string | null>(null)
 
@@ -357,7 +357,7 @@ function useArtifactUrl(downloadUrl: string | null): string | null {
   return url
 }
 
-function ArtifactPreview({ artifact }: { artifact: GenerationArtifact }) {
+export function ArtifactPreview({ artifact }: { artifact: GenerationArtifact }) {
   const { t } = useI18n()
   const href = useArtifactUrl(artifact.downloadUrl)
 
