@@ -390,111 +390,114 @@ export default function ProjectsPage() {
           </Card>
 
           {selectedEpisode ? (
-            <>
-          <EpisodeStepper
-            episodeId={selectedEpisode.id}
-            storyboardCount={storyboards.length}
-            onAdvanced={refreshAfterAdvance}
-          />
-          <div id="step-source" className="scroll-mt-4">
-            <SourcesPanel episodeId={selectedEpisode.id} />
-          </div>
-          <div id="step-assets" className="scroll-mt-4">
-            <AssetsPanel episodeId={selectedEpisode.id} />
-          </div>
-          <div id="step-storyboards" className="scroll-mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex flex-wrap items-center gap-2">
-                <ClapperboardIcon className="text-muted-foreground size-4" />
-                {t('storyboards.title')}
-                {storyboards.length > 0 && (
-                  <Badge variant="tinted" className="font-normal">
-                    {t('storyboards.revision', { revision: storyboardRevision })}
-                  </Badge>
-                )}
-              </CardTitle>
-              <CardDescription>
-                {selectedEpisode
-                  ? `${t('projects.episode')} ${selectedEpisode.number} · ${selectedEpisode.title} · ${t(
-                      'projects.storyboardCount',
-                      { count: storyboards.length },
-                    )}`
-                  : t('projects.detailHint')}
-              </CardDescription>
-              {selectedEpisode && (
-                <CardAction>
-                  <GuardedButton
-                    action="storyboard:write"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
-                  >
-                    <PlusIcon />
-                    {t('storyboards.new')}
-                  </GuardedButton>
-                </CardAction>
-              )}
-            </CardHeader>
-
-            {!selectedEpisode ? (
-              <CardContent>
-                <EmptyState icon={<ClapperboardIcon />} title={t('storyboards.selectEpisode')} />
-              </CardContent>
-            ) : allStoryboards.length === 0 ? (
-              <CardContent>
-                <EmptyState
-                  icon={<ClapperboardIcon />}
-                  title={t('storyboards.none')}
-                  description={t('storyboards.noneHint')}
-                  action={
-                    can('storyboard:write') ? (
-                      <Button size="sm" onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: 1 })}>
-                        <PlusIcon />
-                        {t('storyboards.new')}
-                      </Button>
-                    ) : undefined
-                  }
+            <div className="grid gap-6 2xl:grid-cols-[minmax(0,12rem)_minmax(0,1fr)] 2xl:items-start">
+              <div className="2xl:sticky 2xl:top-20">
+                <EpisodeStepper
+                  episodeId={selectedEpisode.id}
+                  storyboardCount={storyboards.length}
+                  onAdvanced={refreshAfterAdvance}
                 />
-              </CardContent>
-            ) : (
-              <CardContent className="space-y-4">
-                {storyboards.length === 0 ? (
-                  <p className="text-muted-foreground text-sm">{t('storyboards.noLiveShots')}</p>
-                ) : (
-                  storyboards.map(storyboard => (
-                    <StoryboardCard
-                      key={storyboard.id}
-                      storyboard={storyboard}
-                      canWrite={can('storyboard:write')}
-                      episodeAssets={episodeAssets.data.assets}
-                      onBindAssets={bindStoryboardAssets}
-                      onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
-                      onChangeStatus={() => setStatusTarget(storyboard)}
-                    />
-                  ))
-                )}
-                <StoryboardHistory
-                  shots={supersededStoryboards}
-                  canWrite={can('storyboard:write')}
-                  episodeAssets={episodeAssets.data.assets}
-                  onBindAssets={bindStoryboardAssets}
-                  onEdit={storyboard => setStoryboardDialog({ mode: 'edit', storyboard })}
-                  onChangeStatus={storyboard => setStatusTarget(storyboard)}
-                />
-              </CardContent>
-            )}
-          </Card>
+              </div>
+              <div className="min-w-0 space-y-6">
+                <div id="step-source" className="scroll-mt-4">
+                  <SourcesPanel episodeId={selectedEpisode.id} />
+                </div>
+                <div id="step-assets" className="scroll-mt-4">
+                  <AssetsPanel episodeId={selectedEpisode.id} />
+                </div>
+                <div id="step-storyboards" className="scroll-mt-4">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex flex-wrap items-center gap-2">
+                        <ClapperboardIcon className="text-muted-foreground size-4" />
+                        {t('storyboards.title')}
+                        {storyboards.length > 0 && (
+                          <Badge variant="tinted" className="font-normal">
+                            {t('storyboards.revision', { revision: storyboardRevision })}
+                          </Badge>
+                        )}
+                      </CardTitle>
+                      <CardDescription>
+                        {selectedEpisode
+                          ? `${t('projects.episode')} ${selectedEpisode.number} · ${selectedEpisode.title} · ${t(
+                              'projects.storyboardCount',
+                              { count: storyboards.length },
+                            )}`
+                          : t('projects.detailHint')}
+                      </CardDescription>
+                      {selectedEpisode && (
+                        <CardAction>
+                          <GuardedButton
+                            action="storyboard:write"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
+                          >
+                            <PlusIcon />
+                            {t('storyboards.new')}
+                          </GuardedButton>
+                        </CardAction>
+                      )}
+                    </CardHeader>
 
-          </div>
+                    {!selectedEpisode ? (
+                      <CardContent>
+                        <EmptyState icon={<ClapperboardIcon />} title={t('storyboards.selectEpisode')} />
+                      </CardContent>
+                    ) : allStoryboards.length === 0 ? (
+                      <CardContent>
+                        <EmptyState
+                          icon={<ClapperboardIcon />}
+                          title={t('storyboards.none')}
+                          description={t('storyboards.noneHint')}
+                          action={
+                            can('storyboard:write') ? (
+                              <Button size="sm" onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: 1 })}>
+                                <PlusIcon />
+                                {t('storyboards.new')}
+                              </Button>
+                            ) : undefined
+                          }
+                        />
+                      </CardContent>
+                    ) : (
+                      <CardContent className="space-y-4">
+                        {storyboards.length === 0 ? (
+                          <p className="text-muted-foreground text-sm">{t('storyboards.noLiveShots')}</p>
+                        ) : (
+                          storyboards.map(storyboard => (
+                            <StoryboardCard
+                              key={storyboard.id}
+                              storyboard={storyboard}
+                              canWrite={can('storyboard:write')}
+                              episodeAssets={episodeAssets.data.assets}
+                              onBindAssets={bindStoryboardAssets}
+                              onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
+                              onChangeStatus={() => setStatusTarget(storyboard)}
+                            />
+                          ))
+                        )}
+                        <StoryboardHistory
+                          shots={supersededStoryboards}
+                          canWrite={can('storyboard:write')}
+                          episodeAssets={episodeAssets.data.assets}
+                          onBindAssets={bindStoryboardAssets}
+                          onEdit={storyboard => setStoryboardDialog({ mode: 'edit', storyboard })}
+                          onChangeStatus={storyboard => setStatusTarget(storyboard)}
+                        />
+                      </CardContent>
+                    )}
+                  </Card>
+                </div>
 
-          <div id="step-generation" className="scroll-mt-4">
-            <GenerationsPanel episodeId={selectedEpisode.id} reloadToken={generationsToken} />
-          </div>
-          <div id="step-delivery" className="scroll-mt-4">
-            <DeliveryPanel episodeId={selectedEpisode.id} />
-          </div>
-            </>
+                <div id="step-generation" className="scroll-mt-4">
+                  <GenerationsPanel episodeId={selectedEpisode.id} reloadToken={generationsToken} />
+                </div>
+                <div id="step-delivery" className="scroll-mt-4">
+                  <DeliveryPanel episodeId={selectedEpisode.id} />
+                </div>
+              </div>
+            </div>
           ) : (
             <Card>
               <CardContent className="py-14">

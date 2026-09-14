@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
 import { ArrowRightIcon, CheckIcon, LoaderCircleIcon, SparklesIcon } from 'lucide-react'
 import { ApiError, type GenerationBatch, type GenerationStage } from '@/lib/api'
@@ -132,22 +132,22 @@ export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: Episo
 
   return (
     <Card>
-      <CardContent className="py-4">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+      <CardContent className="py-4 2xl:py-3">
+        <div className="flex flex-wrap items-start justify-between gap-4 2xl:block">
           <div className="min-w-0 flex-1">
             {loading ? (
               <Skeleton className="h-9 w-full" />
             ) : (
               <>
-                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
+                <ol className="flex flex-wrap items-center gap-x-1.5 gap-y-2 2xl:flex-col 2xl:items-stretch 2xl:gap-0">
                   {steps.map((step, index) => (
-                    <Fragment key={step.key}>
-                      {index > 0 && <ArrowRightIcon className="text-muted-foreground/40 size-3.5 shrink-0" />}
+                    <li key={step.key} className="flex items-center gap-x-1.5 2xl:block">
+                      {index > 0 && <ArrowRightIcon className="text-muted-foreground/40 size-3.5 shrink-0 2xl:hidden" />}
                       <button
                         type="button"
                         onClick={() => scrollTo(step.key)}
                         className={cn(
-                          'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors',
+                          'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors 2xl:w-full 2xl:justify-start',
                           step.status === 'done' && 'border-transparent bg-muted text-foreground',
                           step.status === 'current' && 'border-primary/40 bg-primary/10 text-primary',
                           step.status === 'todo' && 'border-border text-muted-foreground',
@@ -158,11 +158,14 @@ export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: Episo
                         </span>
                         {t(`stepper.step.${step.key}`)}
                       </button>
-                    </Fragment>
+                      {index < steps.length - 1 && (
+                        <span aria-hidden className="bg-border ml-[17px] hidden h-2.5 w-px 2xl:block" />
+                      )}
+                    </li>
                   ))}
-                </div>
+                </ol>
                 {nextStep && (
-                  <p className="text-muted-foreground mt-3 text-sm">
+                  <p className="text-muted-foreground mt-3 text-sm 2xl:border-border 2xl:border-t 2xl:pt-3">
                     {t('stepper.nextLabel')}
                     <span className="text-foreground font-medium">{t(`stepper.next.${nextStep}`)}</span>
                   </p>
@@ -170,7 +173,12 @@ export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: Episo
               </>
             )}
           </div>
-          <GuardedButton action="generation:trigger" disabled={advancing} onClick={() => void advance()}>
+          <GuardedButton
+            action="generation:trigger"
+            className="2xl:mt-3 2xl:w-full"
+            disabled={advancing}
+            onClick={() => void advance()}
+          >
             {advancing ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
             {advancing ? t('stepper.advancing') : t('stepper.advance')}
           </GuardedButton>
