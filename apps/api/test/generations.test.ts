@@ -628,3 +628,24 @@ describe('AI content stage gating', () => {
     expect(snapshot.input.prompt).toContain('the approved script')
   })
 })
+
+describe('run-pipeline', () => {
+  it('refuses when nothing is runnable and advances to SCRIPT once a source is approved', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Pipeline Drama' } })
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
+    const episodeId = episode.json().id as string
+
+    const nothing = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(nothing.statusCode).toBe(409)
+    expect(nothing.json().error).toBe('pipeline:nothingRunnable')
+
+    await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: 'a source document' } })
+    await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/source-versions/1/approve`, headers: authHeaders(editorToken), payload: {} })
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().stage).toBe('SCRIPT')
+    expect((res.json().batch as BatchDto).stage).toBe('SCRIPT')
+  })
+})

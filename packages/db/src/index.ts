@@ -102,3 +102,37 @@ export async function resolveSlotCandidates(
   }
   return candidates
 }
+
+/** The generation stages in pipeline order (the API stage vocabulary). */
+export const PIPELINE_STAGES = ['SCRIPT', 'STORYBOARD', 'ASSET', 'IMAGE', 'VIDEO'] as const
+export type PipelineStage = (typeof PIPELINE_STAGES)[number]
+
+/**
+ * The next generation stage whose prerequisites are satisfied and which has not
+ * yet been run for this episode, or null when nothing is currently runnable.
+ * Prerequisites: SCRIPT needs an approved source, STORYBOARD an approved script,
+ * ASSET at least one authored asset, IMAGE/VIDEO at least one storyboard. This is
+ * what lets the pipeline advance one step at a time without a human re-triggering
+ * each stage.
+ */
+export async function nextRunnableStage(db: PrismaClient, episodeId: string): Promise<PipelineStage | null> {
+  const [approvedSource, approvedScript, assetCount, storyboardCount, batches] = await Promise.all([
+    db.sourceDocumentVersion.findFirst({ where: { episodeId, status: 'APPROVED' }, select: { id: true } }),
+    db.scriptVersion.findFirst({ where: { episodeId, status: 'APPROVED' }, select: { id: true } }),
+    db.asset.count({ where: { episodeId } }),
+    db.storyboard.count({ where: { episodeId } }),
+    db.generationBatch.findMany({ where: { episodeId }, select: { stage: true } }),
+  ])
+  const run = new Set(batches.map(batch => batch.stage))
+
+  for (const stage of PIPELINE_STAGES) {
+    if (run.has(stage as never)) continue
+    const ready =
+      stage === 'SCRIPT' ? approvedSource !== null
+      : stage === 'STORYBOARD' ? approvedScript !== null
+      : stage === 'ASSET' ? assetCount > 0
+      : storyboardCount > 0
+    if (ready) return stage
+  }
+  return null
+}
