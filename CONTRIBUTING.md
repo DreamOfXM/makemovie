@@ -39,7 +39,7 @@ pnpm --filter @studio/api exec vitest run -t 'resolve'
 
 `apps/api/test/env.ts` starts an embedded PostgreSQL on a random free port above 55400, applies the real migrations with `prisma migrate deploy`, builds the Fastify app with `logger: false`, and returns helpers (`register`, `authHeaders`, `stop`). Use it for any test that touches the database — do not mock Prisma.
 
-Vitest strips types without checking them, and each package's `tsconfig.json` only includes `src`. `pnpm typecheck` therefore ends with `tsc -p tsconfig.test.json`, which typechecks API and package test files together. Add new test directories to that config's `include` list.
+Vitest strips types without checking them, and each package's `tsconfig.json` only includes `src`. `pnpm typecheck` therefore ends with `tsc -p tsconfig.test.json`, which typechecks every test directory in the repo. Add a new one to that config's `include` list — a test file that is missing from it runs green while carrying type errors, because nothing else looks at it.
 
 ## Conventions
 
@@ -62,6 +62,8 @@ Provider API keys go through `encryptSecret(plaintext, masterKey)` / `decryptSec
 ### Generation pipeline
 
 - Never assign `GenerationBatch.status` directly. Call `syncBatchStatus(db, batchId)` from `@studio/db` after any task transition; the batch status is derived from its task counts.
+- Judge artifacts through the `QualityChecker` seam in `apps/worker/src/qc.ts`, never by writing a `QualityCheck` row from somewhere else. A checker returns `pass`, `rework`, or `unjudged`; `run-task` owns the row so the threshold, mode, and candidate are recorded identically whichever checker ran. `unjudged` means the audit broke, not that the content is bad — it must fail the task and must never fall through to a different checker, because a score nobody produced looks exactly like a judgment that happened.
+- `STUDIO_QC_MODE=model` costs one vision-model call per artifact and is not reproducible: the same frame can score differently on a second run. Keep it out of CI and out of any test default. Tests that need a rejection should supply a stub checker rather than turning the mode on.
 - The API streams artifacts from, and the worker writes them into, `app.config.artifactsDir` (`STUDIO_ARTIFACTS_DIR`). Both processes must resolve the same **absolute** path — a relative default resolves against each package directory and silently splits the media in two.
 - Artifact bytes reach the browser only through `GET /artifacts/:artifactId/content`, which needs the session bearer token. Media elements cannot send headers, so the web app fetches the bytes and hands `URL.createObjectURL` results to the element, revoking them on unmount. Do not paste the URL into an `src` attribute.
 

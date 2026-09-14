@@ -14,6 +14,7 @@ Working today:
 - **Model capability center**: provider catalogs, encrypted API keys, entitlement probes, and capability-slot bindings with ordered fallback resolution
 - **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it
 - **Generation pipeline**: per-stage batches (script, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
+- **Model-driven visual audit** (`STUDIO_QC_MODE=model`): images are judged by the model bound to the `visual_audit` slot and videos by one frame extracted mid-clip. The default gate is still a deterministic hash placeholder that names itself `fake-qc`. Text and audio are **not** audited — they fail the task rather than pretend to pass
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
 - **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
 - Episode workflow status with validated transitions and an audit trail
@@ -80,13 +81,15 @@ Use the **Mock Provider** to explore the whole flow without any API key.
 | `STUDIO_MASTER_KEY` | all-zero dev key | 64-hex AES-256-GCM key for provider secrets; required in production |
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ |
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | generated-media root; the worker writes here and the API streams from here, so both processes need the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume) |
-| `STUDIO_QC_MODE` | `random` | worker quality gate: `pass` accepts every artifact, `fail` rejects every one, `random` scores a hash of the task and attempt against the 0.7 threshold |
-| `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO defaults | object storage |
+| `STUDIO_QC_MODE` | `random` | worker quality gate: `pass` accepts every artifact, `fail` rejects every one, `random` scores a hash of the task and attempt against the 0.7 threshold, `model` asks the bound `visual_audit` model to judge it |
+| `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO defaults | read for the planned S3-compatible backend; the current implementation writes to `STUDIO_ARTIFACTS_DIR` and ignores them |
 | `CORS_ORIGIN` | `http://localhost:3010` | comma-separated allowed origins |
 | `SESSION_TTL_MS` | 7 days | session lifetime |
 | `PORT` | `4010` | API port |
 
 Production refuses the all-zero development master key.
+
+`STUDIO_QC_MODE=model` needs a `vlm` capability probed and bound to the `visual_audit` slot in **Model Center**, and it costs one vision-model call per artifact. Without a verified binding the worker fails the task and records a `QualityCheck` with a null score — it does not fall back to the hash, because a score nobody produced would look like a judgment that happened. The live multimodal request has never been run against a real provider: it is written from documentation, is marked `// UNVERIFIED` in `packages/providers/src/dashscope.ts`, and the 0.7 threshold is inherited from the placeholder rather than measured. See **Quality gates** in `ARCHITECTURE.md`.
 
 ## Tests
 
@@ -94,7 +97,7 @@ Production refuses the all-zero development master key.
 pnpm test
 ```
 
-API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, and composition, and shell out to a real `ffmpeg`.
+API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, the model-driven visual audit (a missing or unverified auditor, a rejected artifact, an approved image and an approved video frame, and a provider fault), and composition, and shell out to a real `ffmpeg`. No test calls a live multimodal provider; the auditor in the tests is the mock, which answers a fixed score it has not earned by looking at anything.
 
 ## Documentation
 

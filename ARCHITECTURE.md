@@ -1,6 +1,6 @@
 # Short Drama Studio
 
-> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, and acceptance-gated delivery manifests are implemented and covered by tests. The remaining upstream content stages (asset versions, storyboard authoring gates), the enforcement of upstream approvals on generation triggers, and the deep content audits remain design; section-level status is called out inline.
+> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, and acceptance-gated delivery manifests are implemented and covered by tests. Quality control has two checkers: a deterministic hash placeholder that is still the default, and a model-driven visual audit of images and single video frames that is implemented but has never been run against a live provider. The remaining upstream content stages (asset versions, storyboard authoring gates), the enforcement of upstream approvals on generation triggers, and the deep content audits remain design; section-level status is called out inline.
 
 ## Goal
 
@@ -22,6 +22,7 @@ Shipped:
 - Model capability configuration center with encrypted provider credentials and entitlement probes
 - Provider adapters for Alibaba Bailian (DashScope) and a credential-free mock provider
 - Generation pipeline: stage batches, BullMQ queue on Redis, worker with ordered candidate fallback, quality gate with rework attempts, immutable artifacts, usage ledger entries
+- Model-driven visual audit of image artifacts and single video frames behind `STUDIO_QC_MODE=model`, which fails the task rather than degrading when no auditor can judge
 - FFmpeg composition of an episode's succeeded video artifacts, plus mock media synthesis for credential-free runs
 - Source document and script versioning: checksummed uploads with duplicate detection, approval gating, and storyboards re-pointed at the approved script version
 - Acceptance-gated delivery packaging with versioned JSON manifests, acceptance, and reasoned rejection
@@ -157,7 +158,7 @@ Execution (`apps/worker/src/run-task.ts`):
 - Candidates are tried in order. For each one the connection and capability are re-read and re-checked, the API key is decrypted, the adapter submits the planned request, and the worker polls to a settled state (250 ms interval, 30 s deadline).
 - The result is materialized into bytes: a `mock://` URL is synthesized locally with FFmpeg, an `http(s)` URL is downloaded, and a text result is encoded as UTF-8.
 - The artifact is stored under `tenant/project/episode/stage/task/v<attempt>.<ext>` and recorded as an immutable `MediaArtifact` with checksum, mime type, dimensions or duration, and the provider response as metadata.
-- The quality gate scores the artifact and writes a `QualityCheck` row (`APPROVED` at or above the 0.7 threshold, otherwise `NEEDS_REVIEW`). A rejection re-queues the same task with `attempt + 1` up to three attempts, then fails the task.
+- A `QualityChecker` then judges the stored artifact and writes a `QualityCheck` row: `APPROVED` at or above the 0.7 threshold, `NEEDS_REVIEW` with a score below it, or `NEEDS_REVIEW` with a **null** score when the checker could not judge at all. A rejection re-queues the same task with `attempt + 1` up to three attempts, then fails it; an unjudged artifact fails it immediately and queues nothing (see **Quality gates**).
 - On success the worker writes a `UsageLedger` entry (input prompt length, output byte count) and stamps the task `SUCCEEDED` with the winning provider, model, and response snapshot.
 - Every candidate failure is collected into `errorSnapshot`, so a failed task explains the whole fallback chain rather than only the last error.
 
@@ -183,7 +184,37 @@ Source and script versioning, approval, and delivery packaging are deliberately 
 
 ## Quality gates
 
-Implemented: every generated artifact is scored by a `fake-qc` check — a deterministic hash of the task id and attempt number, so a given attempt always gets the same verdict and tests can rely on it. The score is compared against the 0.7 threshold and stored as a `QualityCheck` row referencing the artifact, which means the rework history of a task survives in the database. `STUDIO_QC_MODE` forces the outcome (`pass`, `fail`) for demos and tests; the default `random` mode exercises both paths. This is a placeholder for the real audits below, not a quality judgement about the media.
+After the artifact is stored and before it can be accepted, a `QualityChecker` (`apps/worker/src/qc.ts`) judges it and returns one of three verdicts. The checker only decides; `run-task` owns the record, so the score, the 0.7 threshold, the mode, and the winning candidate land in `QualityCheck.report` the same way whichever checker ran.
+
+- `pass` → `QualityCheck.status = APPROVED`, the usage ledger entry is written, the task succeeds.
+- `rework` → `NEEDS_REVIEW` with a score, and the same task is re-queued with `attempt + 1`, up to three attempts, then fails with `<kind>: threshold not met after 3 attempts`.
+- `unjudged` → `NEEDS_REVIEW` with a **null** score, and the task fails immediately with `<kind>: <reason>`. Nothing is re-queued.
+
+The third verdict is the one that carries the design. An auditor that could not judge has reported a fault in the audit, not a defect in the content, so the pipeline neither regenerates — that would pay for an artifact nobody rejected — nor falls back to the other checker, which would pretend a judgment happened. `HashQualityChecker` refuses to be constructed under `STUDIO_QC_MODE=model` for the same reason: a missing checker must not silently become a hash score.
+
+Two checkers ship.
+
+**`HashQualityChecker`** — the default, `kind: 'fake-qc'`. It scores a SHA-256 of the task id and attempt number against the threshold. Deterministic, so a given attempt always gets the same verdict and tests can rely on it; `STUDIO_QC_MODE` forces the outcome (`pass` accepts everything, `fail` rejects everything, `random` exercises both paths). It is a placeholder, not a quality judgement about the media, and it names itself as `fake-qc` in the row it writes.
+
+**`ModelQualityChecker`** — `STUDIO_QC_MODE=model`, `kind: 'visual-audit'`. It sends the artifact to the model bound to the `visual_audit` slot and asks for `{"score": <0..1>, "reasons": [...]}`. Candidates come from the same `resolveSlotCandidates` the planner uses, so an unverified capability or a disabled connection is not an auditor. The answer is parsed defensively: prose and code fences around the JSON are tolerated, but a score that is not a finite number in `[0, 1]` is rejected rather than clamped, because a clamped guess would still look like a judgment.
+
+| Modality | Audited | How |
+| --- | --- | --- |
+| `image` | yes | the artifact bytes are sent as-is |
+| `t2v`, `i2v`, `r2v` | partially | one JPEG frame extracted mid-clip by FFmpeg (`frameArgs` in `packages/media`) |
+| `text`, `tts`, `music` | **no** | no visual surface; returns `unjudged` and the task fails |
+
+The frame is taken from the middle of the clip rather than the start because a first frame is usually a fade-in, and it is scaled to at most 1024 px wide without ever upscaling.
+
+What `mode=model` has not been shown to do:
+
+- **It has never run against a live provider.** No credentials were available. The DashScope multimodal endpoint, the request shape, and the response extraction are written from documentation and carry `// UNVERIFIED` in `packages/providers/src/dashscope.ts`; they may well be wrong on first contact with the real API.
+- **The threshold is inherited, not measured.** 0.7 came from the hash placeholder. No calibration run has established what a vision model's score distribution actually looks like.
+- **It is not reproducible.** The same frame asked twice can score differently, which is why `mode=model` is never a CI default.
+- **One frame cannot see motion.** Stutter, drift, and a character changing clothes mid-shot are invisible to it, as is every continuity defect between shots. Video audit here is a still-image proxy and is recorded as one.
+- **Audio is never heard.** A video artifact is judged on a silent frame.
+- **Base64 payload limits are untested.** A 1024 px JPEG inlined into a request body may exceed a provider's cap.
+- **The failure is loud but not free.** `mode=model` pays for generation before it discovers that no auditor is bound.
 
 Designed, not yet built:
 
@@ -192,7 +223,7 @@ Designed, not yet built:
 - Asset audit: identity references, deduplication, ownership, version
 - Storyboard audit: duration budget, source excerpt, continuity in/out, asset bindings
 - Generation audit: request capability compatibility, reference inputs, artifact ownership
-- Visual audit: identity, scene, action, prop, lighting, continuity
+- Visual audit beyond a single frame: identity across shots, scene, action, prop, lighting, continuity — the slot is bound and one frame is really judged, but nothing yet compares two shots or two attempts
 - Audio audit: dialogue presence, duration, loudness, sync, music and effects tracks
 - Delivery audit: normalized media and reproducible export (complete coverage, the manifest, and checksums ship with delivery packaging)
 
@@ -259,6 +290,8 @@ Met by the current codebase:
 - Re-triggering the same stage of the same episode returns the existing batch instead of duplicating work
 - A candidate failure is preserved on the task and the worker advances to the next verified candidate
 - A rejected artifact is reworked up to three attempts and then fails the task, with a `QualityCheck` row per attempt
+- `STUDIO_QC_MODE=model` with no verified `visual_audit` binding fails the task, records a `QualityCheck` with a null score, and queues no further attempt
+- `STUDIO_QC_MODE=model` with a bound auditor approves an image artifact outright and a video artifact judged from one FFmpeg-extracted frame
 - Batch status is derived from its tasks after every transition, including cancellation
 - Only a queued task can be cancelled; a viewer cannot trigger, cancel, or compose
 - An artifact streams with its stored mime type and length, and a missing file is a `404`
@@ -271,6 +304,8 @@ Met by the current codebase:
 Pending:
 
 - Source and script content passes its content audits (event order, coverage, prohibited additions)
+- Text and audio artifacts pass a real content audit; under `mode=model` they are returned unjudged and the task fails
+- The visual audit has run against a live multimodal provider, and the 0.7 threshold is calibrated to what one actually scores
 - The system can produce approved asset and storyboard versions
 - A reference video task cannot select T2V
 - A completed artifact can be traced back to asset versions and a per-attempt configuration version
