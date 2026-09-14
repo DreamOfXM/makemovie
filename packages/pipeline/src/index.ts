@@ -131,6 +131,11 @@ export async function nextRunnableStage(db: PrismaClient, episodeId: string): Pr
  * batch and its tasks, and queues a run-task job per task. Idempotent on
  * `${episodeId}:${stage}:${entityId}` — re-triggering a stage that already ran
  * returns the existing batch instead of duplicating work.
+ *
+ * `regenerate` re-runs a stage that already produced a batch (after a human edits
+ * the upstream it was generated from). It appends a revision suffix so the new run
+ * gets fresh keys instead of colliding with the prior batch, which stays intact for
+ * traceability. Regenerating a stage that never ran is just its first run.
  */
 export async function triggerStage(
   store: PipelineStore,
@@ -138,7 +143,7 @@ export async function triggerStage(
   userId: string | null,
   episodeId: string,
   stage: GenerationStage,
-  options: { storyboardIds?: string[] } = {},
+  options: { storyboardIds?: string[]; regenerate?: boolean } = {},
 ): Promise<TriggerResult> {
   const { db } = store
   const episode = await db.episode.findFirst({
@@ -193,7 +198,14 @@ export async function triggerStage(
   if (candidates.length === 0) return { ok: false, code: 409, error: `no verified candidates for slot ${slot}` }
 
   const dbStage = stageDbValues[stage]
-  const idempotencyKeys = targets.map(target => `${episode.id}:${stage}:${target.entityId}`)
+  // A regenerate re-runs a stage that already has a batch, so it needs keys that do
+  // not collide with the prior run. The revision is appended as a fourth segment,
+  // leaving `split(':')[2]` (the entity id) intact for storyboard-media resolution.
+  const revision = options.regenerate
+    ? await db.generationBatch.count({ where: { episodeId: episode.id, stage: dbStage } })
+    : 0
+  const suffix = revision > 0 ? `:r${revision}` : ''
+  const idempotencyKeys = targets.map(target => `${episode.id}:${stage}:${target.entityId}${suffix}`)
   try {
     const batch = await db.generationBatch.create({
       data: {
@@ -222,7 +234,7 @@ export async function triggerStage(
     for (const task of batch.tasks) {
       await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: candidates.map(toRunTaskCandidate) })
     }
-    await audit(db, { organizationId, userId, action: 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount } })
+    await audit(db, { organizationId, userId, action: options.regenerate ? 'generation.regenerate' : 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount, revision } })
     return { ok: true, batchId: batch.id, created: true }
   } catch (error) {
     if (!isPrismaUniqueViolation(error)) throw error

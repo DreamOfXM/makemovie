@@ -22,15 +22,17 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
 }
 
-// A task's idempotency key is `${episodeId}:${stage}:${entityId}`, and for the per-storyboard
-// IMAGE/VIDEO stages the entity is the storyboard, so the third segment maps a succeeded task
-// back to its storyboard. Returns the latest succeeded first-frame and video artifact per storyboard.
+// A task's idempotency key is `${episodeId}:${stage}:${entityId}` (a regenerate appends
+// a `:rN` revision segment), and for the per-storyboard IMAGE/VIDEO stages the entity is
+// the storyboard, so the third segment maps a succeeded task back to its storyboard. Tasks
+// are walked oldest-to-newest so the latest revision overwrites any stale one in the map.
 async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }> {
   const firstFrame = new Map<string, ArtifactDto>()
   const video = new Map<string, ArtifactDto>()
   const tasks = await db.generationTask.findMany({
     where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO'] }, status: 'SUCCEEDED' },
     include: { artifacts: { orderBy: { version: 'desc' }, take: 1 } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
   for (const task of tasks) {
     const storyboardId = task.idempotencyKey?.split(':')[2]

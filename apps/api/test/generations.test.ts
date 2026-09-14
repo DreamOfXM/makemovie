@@ -598,6 +598,43 @@ describe('storyboard media', () => {
     expect(bare.firstFrame).toBeNull()
     expect(bare.video).toBeNull()
   })
+
+  it('prefers the latest revision when a storyboard has been regenerated', async () => {
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 8, title: 'Revision EP' } })
+    expect(episode.statusCode).toBe(201)
+    const revisionEpisodeId = episode.json().id as string
+    const created = await env.app.inject({
+      method: 'POST', url: `/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'Rev SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(created.statusCode).toBe(201)
+    const sbId = created.json().id as string
+
+    // A regenerate is a separate batch whose task key carries an ':r1' revision
+    // suffix; both tasks resolve to the same storyboard via split(':')[2]. The
+    // base is stamped older so the newest revision must win in the media map.
+    const baseBatch = await env.db.generationBatch.create({ data: { organizationId, episodeId: revisionEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
+    const baseTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: baseBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}`, createdAt: new Date('2024-01-01T00:00:00Z') },
+    })
+    const baseArtifact = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: baseTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/rev/ff-base.png`, checksum: 'rev-base', mimeType: 'image/png', version: 1, width: 320, height: 240 },
+    })
+    const regenBatch = await env.db.generationBatch.create({ data: { organizationId, episodeId: revisionEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
+    const regenTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: regenBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}:r1`, createdAt: new Date('2024-06-01T00:00:00Z') },
+    })
+    const regenArtifact = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: regenTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/rev/ff-regen.png`, checksum: 'rev-regen', mimeType: 'image/png', version: 1, width: 320, height: 240 },
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    const rows = res.json() as Array<{ id: string; firstFrame: ArtifactDto | null }>
+    const row = rows.find(candidate => candidate.id === sbId)!
+    expect(row.firstFrame).toMatchObject({ id: regenArtifact.id, downloadUrl: `/artifacts/${regenArtifact.id}/content` })
+    expect(row.firstFrame?.id).not.toBe(baseArtifact.id)
+  })
 })
 
 describe('AI content stage gating', () => {
@@ -693,5 +730,60 @@ describe('run-pipeline', () => {
     const res = await env.app.inject({ method: 'POST', url: `/episodes/${advanceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('VIDEO')
+  })
+})
+
+describe('regenerate', () => {
+  it('creates a new revision batch with suffixed keys, leaves the base intact, and audits distinctly', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Regenerate Drama' } })
+    expect(project.statusCode).toBe(201)
+    const regenProjectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${regenProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Regen EP' } })
+    expect(episode.statusCode).toBe(201)
+    const regenEpisodeId = episode.json().id as string
+    // SCRIPT is gated on an approved source.
+    await env.db.sourceDocumentVersion.create({ data: { episodeId: regenEpisodeId, version: 1, content: 'a source', checksum: 'regen-src', status: 'APPROVED' } })
+
+    // Base run: no revision suffix.
+    const base = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    expect(base.statusCode).toBe(201)
+    const baseBatch = base.json().batch as BatchDto
+    const baseTask = await env.db.generationTask.findUniqueOrThrow({ where: { id: baseBatch.tasks[0].id } })
+    expect(baseTask.idempotencyKey).toBe(`${regenEpisodeId}:SCRIPT:${regenEpisodeId}`)
+
+    // First regenerate: revision 1 → ':r1', a brand-new batch and task.
+    const regen = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
+    expect(regen.statusCode).toBe(201)
+    const regenBatch = regen.json().batch as BatchDto
+    expect(regenBatch.id).not.toBe(baseBatch.id)
+    const regenTask = await env.db.generationTask.findUniqueOrThrow({ where: { id: regenBatch.tasks[0].id } })
+    expect(regenTask.idempotencyKey).toBe(`${regenEpisodeId}:SCRIPT:${regenEpisodeId}:r1`)
+    // A regenerate is enqueued exactly like a first trigger.
+    expect(await queue.getJob(`run-${regenTask.id}-1`)).toBeTruthy()
+
+    // The base batch is untouched: same key, still exactly one task.
+    const baseAfter = await env.db.generationTask.findUniqueOrThrow({ where: { id: baseTask.id } })
+    expect(baseAfter.idempotencyKey).toBe(`${regenEpisodeId}:SCRIPT:${regenEpisodeId}`)
+    expect(await env.db.generationTask.count({ where: { batchId: baseBatch.id } })).toBe(1)
+
+    // A second regenerate increments the revision instead of colliding with ':r1'.
+    const regen2 = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
+    expect(regen2.statusCode).toBe(201)
+    const regen2Batch = regen2.json().batch as BatchDto
+    const regen2Task = await env.db.generationTask.findUniqueOrThrow({ where: { id: regen2Batch.tasks[0].id } })
+    expect(regen2Task.idempotencyKey).toBe(`${regenEpisodeId}:SCRIPT:${regenEpisodeId}:r2`)
+
+    // Three distinct SCRIPT batches: the base plus two revisions.
+    expect(await env.db.generationBatch.count({ where: { episodeId: regenEpisodeId, stage: 'SCRIPT' } })).toBe(3)
+
+    // Regenerating is audited as generation.regenerate, carrying the revision;
+    // the plain trigger is not.
+    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
+    expect(audit.statusCode).toBe(200)
+    const events = audit.json().events as { entityId: string; payload: { stage: string; revision: number } }[]
+    const byBatch = new Map(events.map(event => [event.entityId, event]))
+    expect(byBatch.get(regenBatch.id)?.payload).toMatchObject({ stage: 'SCRIPT', revision: 1 })
+    expect(byBatch.get(regen2Batch.id)?.payload).toMatchObject({ stage: 'SCRIPT', revision: 2 })
+    expect(byBatch.has(baseBatch.id)).toBe(false)
   })
 })

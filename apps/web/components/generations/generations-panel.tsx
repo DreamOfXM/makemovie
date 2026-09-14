@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { ClapperboardIcon, DownloadIcon, FilmIcon, RefreshCwIcon, SparklesIcon, XCircleIcon } from 'lucide-react'
+import { ClapperboardIcon, DownloadIcon, FilmIcon, RefreshCwIcon, RotateCwIcon, SparklesIcon, XCircleIcon } from 'lucide-react'
 import {
   artifactHref,
   generationStages,
@@ -60,6 +60,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0 }: GenerationsPane
 
   const [stage, setStage] = useState<GenerationStage>('SCRIPT')
   const [triggering, setTriggering] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
   const [composing, setComposing] = useState(false)
   const [cancellingId, setCancellingId] = useState<string | null>(null)
 
@@ -105,6 +106,22 @@ export function GenerationsPanel({ episodeId, reloadToken = 0 }: GenerationsPane
       toast.error(error instanceof Error ? error.message : t('error.generic'))
     } finally {
       setTriggering(false)
+    }
+  }
+
+  // Re-runs the selected stage as a new revision after its upstream was edited;
+  // the prior batch stays for traceability and the newest one wins on display.
+  async function regenerate() {
+    if (!episodeId) return
+    setRegenerating(true)
+    try {
+      await api(`/episodes/${episodeId}/generations`, { method: 'POST', body: JSON.stringify({ stage, regenerate: true }) })
+      toast.success(t('generations.regenerated', { stage: translateEnum(t, 'generations.stage', stage) }))
+      reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setRegenerating(false)
     }
   }
 
@@ -166,6 +183,17 @@ export function GenerationsPanel({ episodeId, reloadToken = 0 }: GenerationsPane
               >
                 <SparklesIcon />
                 {triggering ? t('generations.triggering') : t('generations.trigger')}
+              </GuardedButton>
+              <GuardedButton
+                action="generation:trigger"
+                size="sm"
+                variant="outline"
+                disabled={regenerating}
+                onClick={() => void regenerate()}
+                title={t('generations.regenerateHint')}
+              >
+                <RotateCwIcon />
+                {regenerating ? t('generations.regenerating') : t('generations.regenerate')}
               </GuardedButton>
               <GuardedButton
                 action="generation:trigger"

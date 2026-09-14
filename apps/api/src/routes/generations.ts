@@ -50,6 +50,7 @@ type BatchRow = GenerationBatch & { tasks: TaskRow[] }
 interface GenerationBody {
   stage?: string
   storyboardIds?: string[]
+  regenerate?: boolean
 }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
@@ -134,7 +135,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const stage = request.body?.stage
       if (!isGenerationStage(stage)) return reply.code(400).send({ error: `stage must be one of: ${generationStages.join(', ')}` })
-      const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, { storyboardIds: request.body?.storyboardIds })
+      const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, { storyboardIds: request.body?.storyboardIds, regenerate: request.body?.regenerate === true })
       if (!result.ok) return reply.code(result.code).send({ error: result.error })
       return reply.code(result.created ? 201 : 200).send({ batch: await toBatchDto(app.db, result.batchId) })
     },
