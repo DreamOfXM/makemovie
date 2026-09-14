@@ -143,6 +143,7 @@ model Asset {
   episodeId String
   kind String
   name String
+  description String
   status WorkflowStatus @default(DRAFT)
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   versions AssetVersion[]
