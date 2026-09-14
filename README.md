@@ -12,8 +12,10 @@ Working today:
 - Multi-tenant organizations, projects, episodes, and role-based access control (OWNER / ADMIN / EDITOR / REVIEWER / VIEWER)
 - Database-backed sessions with Argon2id password hashing and per-organization switching
 - **Model capability center**: provider catalogs, encrypted API keys, entitlement probes, and capability-slot bindings with ordered fallback resolution
+- **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it
 - **Generation pipeline**: per-stage batches (script, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
+- **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
 - Episode workflow status with validated transitions and an audit trail
 - Member management with session revocation on removal
 - Web UI with English/Chinese switching
@@ -22,13 +24,12 @@ Working today:
 
 Designed, not yet built:
 
-- Source document versioning and upstream-approval gating for the script, asset, and storyboard stages
-- Acceptance review and delivery manifests
+- Asset versions, storyboard authoring gates, and enforcement of upstream approvals on generation triggers
 
 ## Monorepo
 
-- `apps/api` — Fastify API (auth, projects, episodes, members, providers, bindings, generations, artifact streaming, audit)
-- `apps/web` — Next.js app (projects, generation panel, model center, members; i18n en/zh)
+- `apps/api` — Fastify API (auth, projects, episodes, members, providers, bindings, generations, source/script versions, deliveries, artifact streaming, audit)
+- `apps/web` — Next.js app (projects, generation panel, sources & scripts, deliveries, model center, members; i18n en/zh)
 - `apps/worker` — BullMQ consumer running generation tasks, quality gates, and composition
 - `packages/domain` — state machines, RBAC matrix, capability slots and bind rules
 - `packages/db` — Prisma schema, migrations, and batch status rollup
@@ -64,6 +65,8 @@ Open http://localhost:3010, create a workspace, then configure models in **Model
 3. Bind verified models to capability slots (script, storyboard, image, video T2V/I2V/R2V, voice, music, visual audit). Project-level bindings override organization-level ones; `Resolve candidates` shows the ordered fallback list the pipeline will use.
 4. Open a project, select an episode, and use the **Generation** panel: pick a stage and **Trigger generation**. Each task runs through the resolved candidates, is quality-gated (up to three attempts), and its artifacts become previewable in the panel while it polls for status.
 5. **Compose episode** concatenates the newest succeeded video artifact of every storyboard into a single deliverable.
+6. In the **Sources & scripts** panel, upload the source document, approve it, then derive a script version from the approved source and approve that — approving a script re-points every storyboard of the episode at it, so downstream stages trace one writing.
+7. In the **Deliveries** panel, package the episode into a delivery manifest — packaging is refused with reasons until the composition has completed and every storyboard has a succeeded video — then inspect or download the manifest, and accept it or reject it with a reason.
 
 Triggering a stage twice returns the existing batch instead of queueing duplicate work, so a retry needs a new episode.
 
@@ -91,7 +94,7 @@ Production refuses the all-zero development master key.
 pnpm test
 ```
 
-API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, and artifact streaming end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, and composition, and shell out to a real `ffmpeg`.
+API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, and composition, and shell out to a real `ffmpeg`.
 
 ## Documentation
 

@@ -15,7 +15,7 @@ Short Drama Studio is a pnpm monorepo. This guide covers setup, the conventions 
 ```bash
 pnpm install
 pnpm --filter @studio/db generate   # Prisma client
-pnpm build                          # compiles @studio/providers, api, worker
+pnpm build                          # compiles @studio/providers, api, worker, web
 ```
 
 Run the app:
@@ -25,6 +25,8 @@ docker compose up -d postgres redis minio
 pnpm --filter @studio/db exec prisma migrate deploy
 pnpm dev                            # api :4010, web :3010, worker
 ```
+
+Never run `pnpm build` while `pnpm dev` is up. The recursive build includes `next build`, which clobbers `apps/web/.next` — the same directory the dev server serves from — so the running dev server starts 404ing its own chunks and the browser sits stuck on "Restoring your session…". If that happens, stop the dev stack, delete `apps/web/.next`, and restart `pnpm dev`.
 
 ## Testing
 
@@ -69,7 +71,7 @@ Provider API keys go through `encryptSecret(plaintext, masterKey)` / `decryptSec
 
 ### Web i18n
 
-`apps/web/lib/i18n.tsx` holds the English and Chinese dictionaries. Every user-facing string goes through `t('key')`, and a new key must be added to **both** dictionaries. No hardcoded labels in components.
+`apps/web/lib/i18n.tsx` holds the English and Chinese dictionaries. Every user-facing string goes through `t('key')`, and a new key must be added to **both** dictionaries. No hardcoded labels in components. Count strings use the built-in plural subset — `'{count, plural, one {# planned task} other {# planned tasks}}'` — which is expanded before plain `{name}` interpolation; `#` becomes the value and `one` only ever matches exactly 1.
 
 ### Migrations
 

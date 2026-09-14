@@ -1,6 +1,6 @@
 # Short Drama Studio
 
-> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center) and the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition) are implemented and covered by tests. The upstream content stages (source documents, script and asset versions, storyboard authoring gates), the acceptance audits, and delivery remain design; section-level status is called out inline.
+> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, and acceptance-gated delivery manifests are implemented and covered by tests. The remaining upstream content stages (asset versions, storyboard authoring gates), the enforcement of upstream approvals on generation triggers, and the deep content audits remain design; section-level status is called out inline.
 
 ## Goal
 
@@ -23,6 +23,8 @@ Shipped:
 - Provider adapters for Alibaba Bailian (DashScope) and a credential-free mock provider
 - Generation pipeline: stage batches, BullMQ queue on Redis, worker with ordered candidate fallback, quality gate with rework attempts, immutable artifacts, usage ledger entries
 - FFmpeg composition of an episode's succeeded video artifacts, plus mock media synthesis for credential-free runs
+- Source document and script versioning: checksummed uploads with duplicate detection, approval gating, and storyboards re-pointed at the approved script version
+- Acceptance-gated delivery packaging with versioned JSON manifests, acceptance, and reasoned rejection
 - Local disk artifact storage shared by the API and the worker, streamed over an authenticated endpoint
 - Docker Compose deployment (compose file and API/worker/web Dockerfiles present; end-to-end startup not yet verified)
 - Apache-2.0 licensing
@@ -31,15 +33,15 @@ Planned:
 
 - OAuth and SSO extension points
 - S3-compatible object storage behind the same `Storage` interface; MinIO for local deployment
-- Source document, script version, and asset stages with upstream-approval gating
-- Acceptance audits and delivery manifests
+- Asset versions and storyboard authoring gates, plus enforcement of upstream approvals on generation triggers
+- Delivery audits beyond the manifest: normalized media and reproducible export
 - Per-tenant, per-provider, and per-model concurrency limits
 - Additional provider adapters (OpenAI-compatible APIs, Volcengine)
 
 ## Monorepo
 
-- `apps/web`: Next.js application (projects, generation panel, model center, members; English/Chinese UI)
-- `apps/api`: Fastify API (auth, projects, episodes, members, providers, bindings, generations, artifact streaming, audit)
+- `apps/web`: Next.js application (projects, generation panel, sources & scripts, deliveries, model center, members; English/Chinese UI)
+- `apps/api`: Fastify API (auth, projects, episodes, members, providers, bindings, generations, source/script versions, deliveries, artifact streaming, audit)
 - `apps/worker`: BullMQ consumer running generation tasks and episode composition
 - `packages/domain`: domain entities, capability slots, state machines, validation
 - `packages/db`: Prisma schema, migrations, the generated client, and the batch status rollup
@@ -62,6 +64,8 @@ Tenant isolation is mandatory on every aggregate. Exercised by the API and worke
 - Project
 - Episode
 - Storyboard
+- SourceDocumentVersion
+- ScriptVersion
 - ProviderConnection
 - ModelCapability
 - CapabilityBinding
@@ -70,16 +74,14 @@ Tenant isolation is mandatory on every aggregate. Exercised by the API and worke
 - MediaArtifact
 - QualityCheck
 - Composition
+- Delivery
 - AuditEvent
 - UsageLedger
 
-Defined in the schema and migrations, waiting on the upstream content stages and delivery:
+Defined in the schema and migrations, waiting on the asset stage:
 
-- SourceDocumentVersion
-- ScriptVersion
 - Asset and AssetVersion
 - StoryboardVersion and StoryboardAsset
-- Delivery
 
 All generated artifacts are immutable. A new generation creates a new artifact version and never overwrites an existing file or prompt.
 
@@ -98,7 +100,7 @@ Each stage has explicit states:
 
 Transitions require validated inputs and produce an audit event. A downstream job cannot start unless its upstream stage is approved.
 
-Episode and storyboard transitions are implemented that way — validated by `packages/domain`, written through the API, and audited. The upstream-approval gate is not yet enforced on generation: a stage can be triggered as soon as its slot has a verified candidate, because the script and asset stages that would approve it do not exist yet.
+Episode and storyboard transitions are implemented that way — validated by `packages/domain`, written through the API, and audited. Source and script versions now run the same approval flow upstream: a script version can only be derived from an `APPROVED` source version, and approving a script makes it the episode's current writing. The gate is not yet enforced on generation: a stage can be triggered as soon as its slot has a verified candidate, without an approved script or asset stage in between.
 
 ## Model capability policy
 
@@ -167,11 +169,17 @@ Composition (`POST /episodes/:episodeId/compositions`) records a `Composition` w
 
 Read surface: `GET /episodes/:episodeId/generations` returns every batch with its tasks, artifacts, and latest quality check, and `GET /artifacts/:artifactId/content` streams the bytes. Both are tenant-scoped and require `read`.
 
+Upstream versions (`apps/api/src/routes/sources.ts`): source documents and scripts are versioned per episode, unique on `(episodeId, version)`, and deliberately carry no timestamp columns — the version number is the ordering key and lists come back newest-first. `POST /episodes/:episodeId/source-versions` stores the uploaded `content` verbatim (at most 200,000 characters) with a server-computed SHA-256 checksum; re-uploading content whose checksum equals the latest version's is a `409 sources:duplicate`. Approval flips a version to `APPROVED` once (`409 sources:alreadyApproved` on a repeat). `POST /episodes/:episodeId/script-versions` derives a script version by copying content and checksum from an `APPROVED` source version named by `sourceVersion` (`409 sources:sourceNotApproved` otherwise), and approving a script version re-points every storyboard of the episode at it through `storyboard.updateMany`, returning `storyboardsUpdated` so downstream stages trace exactly one script version. List endpoints return summaries without content, keeping the list cheap; the single-version endpoint includes it. Reads require `read`, writes require `episode:write` (EDITOR minimum), and every write is audited (`source.upload`, `source.approve`, `script.derive`, `script.approve`).
+
+Delivery (`apps/api/src/routes/deliveries.ts`): `POST /episodes/:episodeId/deliveries` packages a delivery behind an acceptance gate — there must be a `COMPLETED` composition with a non-null master `artifactId`, and every storyboard of the episode must have a succeeded VIDEO-stage artifact. This is deliberately the same rule the compose worker uses to pick a clip, so an episode that cannot be composed cannot be delivered; when the gate fails the response is `409 delivery:notReady` with a human-readable `reasons` array naming each missing piece. The manifest is a versioned JSON document (`schemaVersion` 1) stored as a string on `Delivery.manifest`: `packagedAt`, episode identity, the latest source and script version refs `{version, checksum, status}`, per-storyboard artifacts (`stage`, `objectKey`, `checksum`, `mimeType`, `version`, dimensions, duration), the composition master, and a `quality` summary whose counts come from one `groupBy` over `QualityCheck` reaching the episode through any of its four relations (storyboard, batch, source document version, or artifact task batch) and whose `threshold` restates the same 0.7 bar the worker judges artifacts against. `POST /deliveries/:id/accept` sets `APPROVED` and stamps `acceptance.acceptedAt` into the manifest; `POST /deliveries/:id/reject` requires a non-blank `reason` and sets `NEEDS_REVIEW`; an accepted delivery is immutable — both verbs then answer `409 delivery:alreadyAccepted`. Deliveries carry no timestamp columns either, so lists order newest-first by cuid id. `GET /episodes/:episodeId/deliveries` and `GET /deliveries/:id/manifest` are the reads. Writes require `episode:write` and are audited (`delivery.create`, `delivery.accept`, `delivery.reject`); every route looks the episode or delivery up through `project.organizationId`, so a cross-tenant id is a 404, never a 403. The web project page mounts a **Sources & scripts** panel and a **Deliveries** panel under the generation panel: write actions are `episode:write`-guarded and render disabled for viewers while reads stay enabled, the `delivery:notReady` reasons surface as a warning alert, the duplicate-checksum 409 becomes an inline field error, and the manifest download goes through the authenticated API client and hands the browser a revocable blob URL — a raw API URL is never placed in the DOM.
+
 ## Queue design
 
 Implemented: one BullMQ queue, `studio-pipeline`, carrying two job kinds — `run-task` and `compose-episode`. Job ids are deterministic (`run-<taskId>-<attempt>` and `compose-<compositionId>`) so a duplicate enqueue is a no-op and a rework attempt never collides with its predecessor. BullMQ retries a crashed job twice with exponential backoff; application-level retries (candidate fallback, quality-gate rework) are expressed as new payloads, not as BullMQ retries, because each one has to be visible in the task's attempt count.
 
 Planned: the per-stage topology the schema anticipates — `source-analysis`, `script-generation`, `asset-generation`, `storyboard-generation`, `image-generation`, `video-generation`, `audio-generation`, `quality-check`, `composition`, `delivery` — with concurrency limits per tenant, provider, model, and capability, and retry classification that distinguishes transient, entitlement, validation, and content failures.
+
+Source and script versioning, approval, and delivery packaging are deliberately not on this list: they shipped as synchronous API writes because they only move small text and metadata. What still needs a queue behind those names is the model-driven work — analyzing a source document, writing a script from it, and the normalized-media export a delivery audit would require.
 
 ## Quality gates
 
@@ -186,7 +194,7 @@ Designed, not yet built:
 - Generation audit: request capability compatibility, reference inputs, artifact ownership
 - Visual audit: identity, scene, action, prop, lighting, continuity
 - Audio audit: dialogue presence, duration, loudness, sync, music and effects tracks
-- Delivery audit: complete coverage, normalized media, manifest, checksums, and reproducible export
+- Delivery audit: normalized media and reproducible export (complete coverage, the manifest, and checksums ship with delivery packaging)
 
 A stage may be marked complete only with recorded check results. Partial output is explicitly reported as partial.
 
@@ -202,7 +210,7 @@ artifact → task attempt → model/configuration → source prompt/input versio
 
 Implemented today: `MediaArtifact → GenerationTask → GenerationBatch → Episode → Project → Organization` are real relations, the batch also links the storyboards it planned against, and `QualityCheck` points at the artifact it scored. The object key itself encodes tenant, project, episode, stage, entity, and version. The artifact stores checksum, mime type, dimensions or duration, and the raw provider response as metadata; the task stores the planned request snapshot, the winning provider and model, and a response snapshot naming the attempt, candidate, provider task id, and artifact id.
 
-Missing until the upstream content stages exist: source prompt and input version references (source document, script version, asset version) and a configuration version per attempt.
+Input version references are real down to the script: storyboards carry `scriptVersionId`, re-pointed at every script approval, so an artifact traces back through its batch and storyboard to the exact approved script content and checksum, and the delivery manifest names the source and script versions beside every artifact checksum. Missing until the asset stage exists: asset version references and a configuration version per attempt.
 
 ## Storage
 
@@ -255,12 +263,16 @@ Met by the current codebase:
 - Only a queued task can be cancelled; a viewer cannot trigger, cancel, or compose
 - An artifact streams with its stored mime type and length, and a missing file is a `404`
 - Composition concatenates the newest succeeded video of every storyboard in the manifest and blocks when one is missing
+- A source upload is deduplicated by checksum, a script can only be derived from an approved source, and approving a script re-points every storyboard of the episode at it
+- Delivery packaging is refused with reasons while no composition has completed or any storyboard lacks a succeeded video — the same rule the compose worker applies
+- A delivery manifest names the source and script versions with checksums, every storyboard artifact, the composition master, and the quality counts against the 0.7 threshold
+- An accepted delivery is immutable, and rejecting one requires a reason
 
 Pending:
 
-- A source document can be versioned and audited
-- The system can produce approved script, asset, and storyboard versions
+- Source and script content passes its content audits (event order, coverage, prohibited additions)
+- The system can produce approved asset and storyboard versions
 - A reference video task cannot select T2V
-- A completed artifact can be traced back to its source prompt and input versions
-- A delivery manifest identifies missing, blocked, and approved segments
+- A completed artifact can be traced back to asset versions and a per-attempt configuration version
+- Delivery audits verify normalized media and reproducible export
 - Docker Compose starts web, API, worker, PostgreSQL, Redis, and MinIO
