@@ -49,8 +49,6 @@ export interface Storage {
    * missing object is an expected outcome here, not a fault.
    */
   open(key: string): Promise<StorageStream | null>
-  /** Absolute on-disk location, for tools (ffmpeg) that need a real file. */
-  localPath(key: string): string
 }
 
 export function sha256(data: Uint8Array): string {
@@ -66,7 +64,9 @@ export class DiskStorage implements Storage {
     this.root = root
   }
 
-  localPath(key: string): string {
+  // Private: a filesystem path is an implementation detail no object-store backend can
+  // offer. The traversal guard stays, because every public method resolves through it.
+  private resolve(key: string): string {
     const resolved = path.resolve(this.root, key)
     const root = path.resolve(this.root)
     if (resolved !== root && !resolved.startsWith(root + path.sep)) {
@@ -76,19 +76,19 @@ export class DiskStorage implements Storage {
   }
 
   async put(key: string, data: Uint8Array, mimeType: string): Promise<StoredObject> {
-    const target = this.localPath(key)
+    const target = this.resolve(key)
     await mkdir(path.dirname(target), { recursive: true })
     await writeFile(target, data)
     return { key, checksum: sha256(data), sizeBytes: data.byteLength, mimeType }
   }
 
   async read(key: string): Promise<Uint8Array> {
-    return new Uint8Array(await readFile(this.localPath(key)))
+    return new Uint8Array(await readFile(this.resolve(key)))
   }
 
   async exists(key: string): Promise<boolean> {
     try {
-      await access(this.localPath(key))
+      await access(this.resolve(key))
       return true
     } catch {
       return false
@@ -96,7 +96,7 @@ export class DiskStorage implements Storage {
   }
 
   async open(key: string): Promise<StorageStream | null> {
-    const target = this.localPath(key)
+    const target = this.resolve(key)
     let sizeBytes: number
     try {
       sizeBytes = (await stat(target)).size

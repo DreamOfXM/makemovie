@@ -10,7 +10,7 @@ import type { Queue } from 'bullmq'
 import EmbeddedPostgres from 'embedded-postgres'
 import { PrismaClient, type Stage } from '@studio/db'
 import { createPipelineQueue, enqueue, type ComposeEpisodePayload, type PipelinePayload, type RunTaskCandidate, type RunTaskPayload } from '@studio/jobs'
-import { DiskStorage, FfmpegComposer, buildObjectKey, synthesizeMockMedia } from '@studio/media'
+import { DiskStorage, FfmpegComposer, buildObjectKey, synthesizeMockMedia, type Storage } from '@studio/media'
 import { encryptSecret } from '@studio/security'
 import type { PipelineDeps } from '../src/deps.js'
 
@@ -64,8 +64,7 @@ export interface Seed {
 export interface WorkerTestEnv {
   db: PrismaClient
   queue: Queue<PipelinePayload>
-  storage: DiskStorage
-  artifactsDir: string
+  storage: Storage
   deps(overrides?: Partial<PipelineDeps>): PipelineDeps
   seed(input?: SeedInput): Promise<Seed>
   runPayload(seed: Seed, attempt?: number): RunTaskPayload
@@ -108,7 +107,6 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
     db,
     queue,
     storage,
-    artifactsDir,
     deps(overrides = {}) {
       return {
         db,

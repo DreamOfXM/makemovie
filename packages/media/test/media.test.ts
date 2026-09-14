@@ -49,8 +49,8 @@ describe('disk storage', () => {
     expect(await storage.open('org-1/proj-1/ep-1/VIDEO/task-1/v9.mp4')).toBeNull()
   })
 
-  it('rejects keys that escape the storage root', () => {
-    expect(() => storage.localPath('../../etc/passwd')).toThrow(/escapes storage root/)
+  it('rejects keys that escape the storage root', async () => {
+    await expect(storage.put('../../etc/passwd', new Uint8Array([1]), 'text/plain')).rejects.toThrow(/escapes storage root/)
   })
 })
 

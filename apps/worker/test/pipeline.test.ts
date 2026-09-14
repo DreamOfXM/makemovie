@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { MOCK_VLM_VERDICT } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
@@ -54,9 +53,6 @@ describe('run-task', () => {
     expect(artifact.objectKey).toContain(`/${seed.projectId}/${seed.episodeId}/VIDEO/${seed.taskId}/v1.mp4`)
     expect(await env.storage.exists(artifact.objectKey)).toBe(true)
 
-    const localPath = env.storage.localPath(artifact.objectKey)
-    expect(localPath.startsWith(env.artifactsDir)).toBe(true)
-    expect(existsSync(localPath)).toBe(true)
     const bytes = await env.storage.read(artifact.objectKey)
     expect(bytes.byteLength).toBeGreaterThan(1024)
 
