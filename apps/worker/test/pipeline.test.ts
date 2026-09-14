@@ -432,3 +432,72 @@ describe('AI content generation', () => {
     expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
   })
 })
+
+describe('auto-advance', () => {
+  /**
+   * Binds a verified mock image model to the `image_gen` slot so an auto-advance
+   * into IMAGE can resolve a candidate. Like `bindVisualAudit`, the entitlement has
+   * to be verified explicitly — `env.seed` leaves it null and an unverified
+   * capability is filtered out of candidate resolution.
+   */
+  async function bindImageGen(seed: Seed): Promise<void> {
+    const connection = await env.db.providerConnection.create({
+      data: {
+        organizationId: seed.organizationId,
+        provider: 'mock',
+        name: `image-${randomUUID().slice(0, 8)}`,
+        baseUrl: 'mock://local',
+        encryptedSecret: encryptSecret('image-key', MASTER_KEY),
+        capabilities: { create: [{ model: 'mock-image', modality: 'image', entitlementVerifiedAt: new Date() }] },
+      },
+    })
+    const capability = await env.db.modelCapability.findFirstOrThrow({ where: { connectionId: connection.id } })
+    await env.db.capabilityBinding.create({
+      data: { organizationId: seed.organizationId, slot: 'IMAGE_GEN', capabilityId: capability.id, priority: 10 },
+    })
+  }
+
+  it('relays a completed storyboard batch into an IMAGE batch', async () => {
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    // IMAGE is gated on an approved script and resolves its own image_gen candidate.
+    await env.db.scriptVersion.create({ data: { episodeId: seed.episodeId, version: 1, content: 'the approved script', checksum: 'advance-script', status: 'APPROVED' } })
+    await bindImageGen(seed)
+
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+
+    // The storyboard task wrote its shots, which rolled the batch to COMPLETED and
+    // auto-advanced the pipeline into IMAGE.
+    const shots = JSON.parse(MOCK_STORYBOARD_JSON) as unknown[]
+    const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId } })
+    expect(boards).toHaveLength(shots.length)
+
+    const imageBatch = await env.db.generationBatch.findFirstOrThrow({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })
+    expect(imageBatch.plannedCount).toBe(shots.length)
+    expect(imageBatch.status).toBe('RUNNING')
+
+    // One IMAGE run-task job was enqueued per storyboard, each carrying the image candidate.
+    const queued = await env.takeWaitingRunTasks()
+    expect(queued).toHaveLength(shots.length)
+    expect(queued.every(payload => payload.candidates[0]?.model === 'mock-image')).toBe(true)
+
+    // The relay is attributed to the system, not to a user.
+    const advance = await env.db.auditEvent.findFirst({ where: { organizationId: seed.organizationId, action: 'pipeline.autoAdvance' } })
+    expect(advance).toBeTruthy()
+    expect(advance!.entityId).toBe(seed.episodeId)
+  })
+
+  it('does not advance when the next stage is gated on a missing approval', async () => {
+    // No approved script: STORYBOARD still completes, but IMAGE/VIDEO are gated and
+    // SCRIPT has no approved source, so nothing is runnable and nothing is queued.
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+  })
+})

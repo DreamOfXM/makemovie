@@ -4,6 +4,7 @@ import path from 'node:path'
 import { Prisma, syncBatchStatus } from '@studio/db'
 import type { RunTaskCandidate, RunTaskPayload } from '@studio/jobs'
 import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media'
+import { advancePipeline } from '@studio/pipeline'
 import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
 import { recordAssetVersion } from './asset-version.js'
@@ -55,7 +56,8 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
       errors.push(outcome.error)
       continue
     }
-    await syncBatchStatus(deps.db, task.batchId)
+    const status = await syncBatchStatus(deps.db, task.batchId)
+    if (status === 'COMPLETED') await autoAdvance(deps, task)
     return
   }
 
@@ -64,6 +66,19 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
     data: { status: 'FAILED', errorSnapshot: JSON.stringify(errors.length > 0 ? errors : ['no candidates supplied']) },
   })
   await syncBatchStatus(deps.db, task.batchId)
+}
+
+// Relays a fully-succeeded batch into the next stage. System-initiated, so it is
+// attributed to no user and audited as pipeline.autoAdvance. Advancing is best
+// effort: the task that just completed already succeeded and was already paid
+// for, so a failure to start the next stage is logged, not thrown back as a job
+// failure that would re-run this one.
+async function autoAdvance(deps: PipelineDeps, task: TaskRow): Promise<void> {
+  try {
+    await advancePipeline({ db: deps.db, enqueueJob: deps.enqueueJob }, task.organizationId, null, task.batch.episodeId, { auto: true })
+  } catch (error) {
+    process.stderr.write(`auto-advance after batch ${task.batchId} failed: ${errorMessage(error)}\n`)
+  }
 }
 
 async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload: RunTaskPayload, deps: PipelineDeps): Promise<CandidateOutcome> {

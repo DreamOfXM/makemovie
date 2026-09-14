@@ -15,6 +15,7 @@
     "@studio/domain": "workspace:*",
     "@studio/jobs": "workspace:*",
     "@studio/media": "workspace:*",
+    "@studio/pipeline": "workspace:*",
     "@studio/providers": "workspace:*",
     "@studio/security": "workspace:*",
     "bullmq": "^5.30.0",

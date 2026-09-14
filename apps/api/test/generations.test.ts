@@ -185,6 +185,9 @@ describe('generation trigger', () => {
   })
 
   it('fans a storyboard stage out over the requested storyboards only', async () => {
+    // The media gate now requires an approved script before any image/video/audio
+    // is generated, so the shared episode needs one before this VIDEO trigger.
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: 'approved script for media', checksum: 'media-script', status: 'APPROVED' } })
     const res = await env.app.inject({
       method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken),
       payload: { stage: 'VIDEO', storyboardIds: [storyboardIds[1]] },
@@ -394,6 +397,8 @@ describe('generation candidate resolution', () => {
   it('enqueues project scope first, priority descending within a scope, deduplicated by capability', async () => {
     const { projectId, episodeId: freshEpisodeId } = await newEpisode('Resolve Order Drama')
     await addStoryboard(freshEpisodeId)
+    // IMAGE is gated on an approved script.
+    await env.db.scriptVersion.create({ data: { episodeId: freshEpisodeId, version: 1, content: 'a script', checksum: 'resolve-order-script', status: 'APPROVED' } })
     const first = await newConnection('order-first')
     const second = await newConnection('order-second')
     const scoped = await newConnection('order-scoped')
@@ -421,6 +426,8 @@ describe('generation candidate resolution', () => {
   it('refuses a stage whose only candidate lost its connection or its entitlement', async () => {
     const { episodeId: connectionEpisodeId } = await newEpisode('Resolve Disabled Drama')
     await addStoryboard(connectionEpisodeId)
+    // IMAGE and AUDIO are both gated on an approved script.
+    await env.db.scriptVersion.create({ data: { episodeId: connectionEpisodeId, version: 1, content: 'a script', checksum: 'resolve-disabled-script', status: 'APPROVED' } })
     const connection = await newConnection('filter-gen')
     await bindSlot('image_gen', capabilityOf(connection, 'mock-image'))
     await bindSlot('tts_voice', capabilityOf(connection, 'mock-tts'))
@@ -611,6 +618,23 @@ describe('AI content stage gating', () => {
     expect(res.json().error).toBe('generations:noApprovedScript')
   })
 
+  it('refuses media stages without an approved script', async () => {
+    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 23, title: 'No Script Media EP' } })
+    const epId = ep.json().id as string
+    // A storyboard so IMAGE/VIDEO reach the script gate rather than the
+    // "no storyboards to generate" 400.
+    const sb = await env.app.inject({
+      method: 'POST', url: `/episodes/${epId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(sb.statusCode).toBe(201)
+    for (const stage of ['IMAGE', 'VIDEO', 'AUDIO']) {
+      const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+      expect(res.statusCode).toBe(409)
+      expect(res.json().error).toBe('generations:noApprovedScript')
+    }
+  })
+
   it('links generated storyboards to the approved script in the request snapshot', async () => {
     const capability = await env.db.modelCapability.findFirstOrThrow({ where: { model: 'mock-text', connection: { organizationId } } })
     await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id } })
@@ -647,5 +671,27 @@ describe('run-pipeline', () => {
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('SCRIPT')
     expect((res.json().batch as BatchDto).stage).toBe('SCRIPT')
+  })
+
+  it('advances past IMAGE to VIDEO once first frames already ran', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Advance Drama' } })
+    const advanceProjectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${advanceProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
+    const advanceEpisodeId = episode.json().id as string
+    // An approved script and a storyboard make IMAGE and VIDEO eligible; mark
+    // SCRIPT, STORYBOARD and FIRST_FRAME (the DB value for IMAGE) as already run
+    // so the next runnable stage is VIDEO, not a re-run of IMAGE.
+    await env.db.scriptVersion.create({ data: { episodeId: advanceEpisodeId, version: 1, content: 'a script', checksum: 'advance-script', status: 'APPROVED' } })
+    await env.app.inject({
+      method: 'POST', url: `/episodes/${advanceEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    for (const stage of ['SCRIPT', 'STORYBOARD', 'FIRST_FRAME'] as const) {
+      await env.db.generationBatch.create({ data: { organizationId, episodeId: advanceEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
+    }
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${advanceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().stage).toBe('VIDEO')
   })
 })

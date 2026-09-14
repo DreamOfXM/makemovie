@@ -35,6 +35,9 @@ importers:
       '@studio/media':
         specifier: workspace:*
         version: link:../../packages/media
+      '@studio/pipeline':
+        specifier: workspace:*
+        version: link:../../packages/pipeline
       '@studio/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -160,6 +163,9 @@ importers:
       '@studio/media':
         specifier: workspace:*
         version: link:../../packages/media
+      '@studio/pipeline':
+        specifier: workspace:*
+        version: link:../../packages/pipeline
       '@studio/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -251,6 +257,22 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.2)(lightningcss@1.32.0)
+
+  packages/pipeline:
+    dependencies:
+      '@studio/db':
+        specifier: workspace:*
+        version: link:../db
+      '@studio/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@studio/jobs':
+        specifier: workspace:*
+        version: link:../jobs
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
 
   packages/providers:
     dependencies:
