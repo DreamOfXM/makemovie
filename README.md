@@ -12,9 +12,10 @@ Working today:
 - Multi-tenant organizations, projects, episodes, and role-based access control (OWNER / ADMIN / EDITOR / REVIEWER / VIEWER)
 - Database-backed sessions with Argon2id password hashing and per-organization switching
 - **Model capability center**: provider catalogs, encrypted API keys, entitlement probes, and capability-slot bindings with ordered fallback resolution
-- **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it
+- **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it, and a script can be edited by hand (an edit resets it to draft for re-approval)
 - **Episode assets**: author characters, props, and scenes with a description, generate a reference image for each through the bound image model, and approve the version you want — a succeeded generation becomes a draft asset version linked to its artifact
 - **Generation pipeline**: per-stage batches (script, asset, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
+- **AI content generation**: the script and storyboard stages write real generated content back into the episode — the script from the approved source, the storyboard shots from the approved script — each gated on its upstream approval. This is the first phase of a fully automated, human-on-the-loop pipeline
 - **Model-driven visual audit** (`STUDIO_QC_MODE=model`): images are judged by the model bound to the `visual_audit` slot and videos by one frame extracted mid-clip. The default gate is still a deterministic hash placeholder that names itself `fake-qc`. Text and audio are **not** audited — they fail the task rather than pretend to pass
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
 - **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
@@ -27,7 +28,8 @@ Working today:
 
 Designed, not yet built:
 
-- Storyboard authoring gates (binding approved assets to storyboards) and enforcement of upstream approvals on generation triggers
+- Automatic stage orchestration — one-click end-to-end from an approved source through composition — and downstream regeneration when a script or storyboard is edited
+- Storyboard authoring gates (binding approved assets to storyboards) and upstream-approval enforcement for the media (image/video/audio) stages
 
 ## Monorepo
 
