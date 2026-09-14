@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { MOCK_VLM_VERDICT } from '@studio/providers'
+import { MOCK_SCRIPT_TEXT, MOCK_STORYBOARD_JSON, MOCK_VLM_VERDICT } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
 import { composeEpisode } from '../src/compose.js'
 import type { QualityChecker } from '../src/qc.js'
@@ -372,3 +372,63 @@ async function bindVisualAudit(seed: Seed, options: { verified?: boolean; apiKey
     data: { organizationId: seed.organizationId, slot: 'VISUAL_AUDIT', capabilityId: capability.id, priority: 10 },
   })
 }
+
+describe('AI content generation', () => {
+  it('writes an AI-generated script into a new ScriptVersion', async () => {
+    const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'SCRIPT', storyboards: 0 })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+
+    const versions = await env.db.scriptVersion.findMany({ where: { episodeId: seed.episodeId } })
+    expect(versions).toHaveLength(1)
+    expect(versions[0]!.version).toBe(1)
+    expect(versions[0]!.status).toBe('DRAFT')
+    expect(versions[0]!.content).toBe(MOCK_SCRIPT_TEXT)
+  })
+
+  it('does not duplicate a script whose content is unchanged', async () => {
+    const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'SCRIPT', storyboards: 0 })
+    const checksum = createHash('sha256').update(MOCK_SCRIPT_TEXT.trim(), 'utf8').digest('hex')
+    await env.db.scriptVersion.create({
+      data: { episodeId: seed.episodeId, version: 1, content: MOCK_SCRIPT_TEXT, checksum, status: 'APPROVED' },
+    })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect(await env.db.scriptVersion.count({ where: { episodeId: seed.episodeId } })).toBe(1)
+  })
+
+  it('fans an AI shot list out into Storyboard rows linked to the script', async () => {
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    const script = await env.db.scriptVersion.create({
+      data: { episodeId: seed.episodeId, version: 1, content: 'the script', checksum: 'script-checksum', status: 'APPROVED' },
+    })
+    await env.db.generationTask.update({
+      where: { id: seed.taskId },
+      data: { requestSnapshot: JSON.stringify({ model: 'mock-storyboard', input: { prompt: 'break the script into shots' }, parameters: {}, scriptVersionId: script.id }) },
+    })
+
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+
+    const shots = JSON.parse(MOCK_STORYBOARD_JSON) as Array<{ title: string; description: string }>
+    const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId }, orderBy: { number: 'asc' } })
+    expect(boards).toHaveLength(shots.length)
+    expect(boards[0]!.number).toBe(1)
+    expect(boards[0]!.title).toBe(shots[0]!.title)
+    expect(boards[0]!.description).toBe(shots[0]!.description)
+    expect(boards[0]!.scriptVersionId).toBe(script.id)
+    expect(boards[0]!.status).toBe('DRAFT')
+  })
+
+  it('fails the task when the storyboard output is not parseable', async () => {
+    const seed = await env.seed({ model: 'mock-text', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('FAILED')
+    expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
+  })
+})

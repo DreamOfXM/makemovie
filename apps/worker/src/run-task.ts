@@ -7,6 +7,7 @@ import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media
 import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
 import { recordAssetVersion } from './asset-version.js'
+import { recordGeneratedContent } from './content.js'
 import type { PipelineDeps } from './deps.js'
 import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
@@ -165,6 +166,14 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
       }
       await deps.enqueueJob({ ...payload, attempt: payload.attempt + 1 })
       return { status: 'rework' }
+    }
+
+    // Write AI-generated episode content into the domain before the task is
+    // marked succeeded, so an unparseable result fails this attempt (and falls
+    // through to the next candidate) rather than leaving a succeeded task with
+    // nothing to show for it.
+    if (task.stage === 'SCRIPT' || task.stage === 'STORYBOARD') {
+      await recordGeneratedContent(deps.db, task, new TextDecoder().decode(material.bytes))
     }
 
     await deps.db.usageLedger.create({

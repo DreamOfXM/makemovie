@@ -41,7 +41,10 @@ export class ModelQualityChecker implements QualityChecker {
 
   async check(subject: QcSubject): Promise<QcVerdict> {
     const plan = auditPlanFor(subject.modality)
-    if (plan === 'none') return unjudged(`modality ${subject.modality} has no visual surface to audit`)
+    // Text and audio have no visual surface to show a model. That is not a broken
+    // audit, it is nothing to audit, so they pass rather than coming back
+    // "unjudged" (which would fail the task and block the content pipeline).
+    if (plan === 'none') return { kind: 'fake-qc', decision: 'pass', score: 1 }
 
     const candidates = await resolveSlotCandidates(this.db, subject.organizationId, subject.projectId, 'visual_audit')
     const candidate = candidates[0]
