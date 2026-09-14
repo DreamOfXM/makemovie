@@ -13,6 +13,7 @@ import { providerRoutes } from './routes/providers.js'
 import { bindingRoutes } from './routes/bindings.js'
 import { generationRoutes } from './routes/generations.js'
 import { artifactRoutes } from './routes/artifacts.js'
+import { sourceRoutes } from './routes/sources.js'
 
 export interface BuildAppOptions {
   config?: AppConfig
@@ -42,6 +43,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(bindingRoutes)
   await app.register(generationRoutes)
   await app.register(artifactRoutes)
+  await app.register(sourceRoutes)
 
   app.addHook('onClose', async () => {
     await db.$disconnect()
