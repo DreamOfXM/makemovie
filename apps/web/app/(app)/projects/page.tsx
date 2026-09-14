@@ -318,6 +318,8 @@ export default function ProjectsPage() {
             )}
           </Card>
 
+          {selectedEpisode ? (
+            <>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -386,6 +388,18 @@ export default function ProjectsPage() {
           <SourcesPanel episodeId={selectedEpisode?.id ?? null} />
 
           <DeliveryPanel episodeId={selectedEpisode?.id ?? null} />
+            </>
+          ) : (
+            <Card>
+              <CardContent className="py-14">
+                <EmptyState
+                  icon={<FilmIcon />}
+                  title={t('workspace.selectEpisodeTitle')}
+                  description={t('workspace.selectEpisodeHint')}
+                />
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
 

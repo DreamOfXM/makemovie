@@ -128,6 +128,10 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'auth.booting': 'Restoring your session…',
     'auth.welcome': 'Welcome back',
 
+    'workspace.selectEpisodeTitle': 'Select an episode to start creating',
+    'workspace.selectEpisodeHint':
+      'Pick an episode from the list above, or create a new one. Then work through the pipeline: upload a source and approve it, derive the script, design your characters, break the episode into storyboards, generate each shot, and compose the finished episode.',
+
     'projects.title': 'Projects',
     'projects.subtitle': 'Group episodes and storyboards, and override model bindings per project.',
     'projects.new': 'New project',
@@ -591,6 +595,10 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'auth.signingIn': '登录中…',
     'auth.booting': '正在恢复会话…',
     'auth.welcome': '欢迎回来',
+
+    'workspace.selectEpisodeTitle': '选择一集，开始创作',
+    'workspace.selectEpisodeHint':
+      '从上方列表选择一集，或新建一集。然后按流水线推进：上传源文档并审批，派生剧本，设计角色，把剧集拆成分镜，逐镜生成，最后合成整集。',
 
     'projects.title': '项目',
     'projects.subtitle': '组织剧集与分镜，并可按项目覆盖模型绑定。',
