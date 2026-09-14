@@ -1,0 +1,145 @@
+# MakeMovie
+
+**AI 影视生产平台 —— 从一段原文到一份可审计、可交付的成片。**
+
+[English](./README.md) | 中文
+
+Apache-2.0 · 可自托管 · 同一条生产线服务短剧、电影与长视频：
+
+`原文审计 → 剧本 → 资产 → 分镜 → 首帧 → 视频 → 合成 → 验收 → 交付`
+
+MakeMovie 把一段原文——小说节选、故事梗概或剧本——通过自动化、可追溯的生产线变成一集成片。上传原文并审批后，平台自动撰写拍摄剧本、拆解分镜、提取角色/道具/场景、生成参考图、首帧与视频片段、合成整集母版，并打包交付清单。每一步都可查看、可修改，并可追溯到产出它的模型任务；人工审批是"花钱生成"与"上线交付"之间的检查点。
+
+## 功能特性
+
+**平台层**
+
+- 多租户组织、项目与剧集，基于角色的权限控制（OWNER / ADMIN / EDITOR / REVIEWER / VIEWER）
+- 数据库会话：Argon2id 密码哈希、按组织切换；成员管理并在移除时吊销会话
+- 状态流转与特权操作的完整审计日志
+- 中英文可切换的 Web 控制台
+
+**模型能力中心**
+
+- 提供商目录与能力槽位：剧本文本、分镜文本、图像生成、视频（T2V / I2V / R2V）、语音、音乐、视觉审核
+- 提供商 API Key 落盘加密（AES-256-GCM），读取接口永不返回密钥
+- 权限探测：在绑定之前真实验证某个 Key 能调用哪些模型
+- 槽位绑定支持有序回退候选；项目级绑定覆盖组织级绑定
+
+**生产线**
+
+- 源文档与剧本版本管理：校验和、重复检测、显式审批闸门
+- AI 内容生成：剧本由已审批的原文撰写，分镜清单与角色/道具/场景由已审批的剧本提取——每个阶段都以其上游审批为前提
+- 剧集资产：生成参考图、审批作为形象基准、绑定到使用它的分镜
+- 按阶段的生成批次经 BullMQ 派发：触发幂等、候选回退、质量拒绝后自动返工
+- 自动编排：批次完成后自动接力下一阶段，从剧本直到合成母版；**Advance pipeline** 仍可手动推进单步
+- 编辑与重生成：每个阶段的产物都可编辑；重跑产生新修订版，旧修订版保留以供追溯
+- 剧本审批级联：审批编辑后的剧本会自动重拆分镜（新修订版取代旧分镜）、重跑相关媒体并重剪母版
+- FFmpeg 合成：每个分镜使用自己成功的片段，剪出一集成片
+- 验收闸门交付：版本化 JSON 清单，列出每个分镜的产物与校验和，附母版与质量统计
+- 产物存储统一接口：本地磁盘与 S3 兼容对象存储两种后端
+- 可追溯性：每个生成的剧本、分镜、资产与产物都记录产出它的任务、提示词、提供商、模型与质量检查
+
+**质量控制**
+
+- 默认为确定性闸门；可选模型视觉审核（`STUDIO_QC_MODE=model`）：图像直接审核，视频抽取中段单帧审核
+- 文本与音频按设计不审核（没有可看的视觉面），控制台如实标注 **未审核**，而不是展示一个没人打过的分数
+
+## 架构
+
+| 组件 | 职责 |
+| --- | --- |
+| `apps/web` | Next.js 控制台：项目、剧集工作台、生成面板、源文档与剧本、资产、交付、模型中心、成员 |
+| `apps/api` | Fastify API：认证、租户、目录与绑定、生成触发、版本管理、交付、产物串流、审计 |
+| `apps/worker` | BullMQ 消费者：提供商调用、质量闸门、内容回写、合成 |
+| `packages/domain` | 状态机、RBAC 矩阵、能力槽位与绑定规则 |
+| `packages/pipeline` | 编排：阶段闸门、提示词构建、批次、自动推进、重生成、审批级联、合成规划 |
+| `packages/providers` | 提供商目录与适配器（阿里云百炼 / DashScope、mock） |
+| `packages/db` | Prisma schema、迁移、批次状态汇总 |
+| `packages/media` | 对象存储后端、mock 提供商的媒体合成、FFmpeg 合成 |
+| `packages/security` | Argon2id 哈希、令牌哈希、AES-256-GCM 密钥加密 |
+| `packages/jobs` | API 与 worker 共享的队列名与任务载荷契约 |
+| `packages/config` | 类型化环境配置 |
+
+## 环境要求
+
+- Node.js ≥ 22.18（工作区包以 TypeScript 源码经原生类型剥离直接运行）
+- pnpm 9
+- FFmpeg ≥ 6 位于 `PATH`（合成使用）；worker 的 Docker 镜像已内置
+- Docker，用于本地部署的 PostgreSQL / Redis（`STORAGE_BACKEND=s3` 时另需 MinIO）
+
+## 快速开始
+
+```bash
+pnpm install
+pnpm --filter @studio/db generate
+pnpm build
+docker compose up -d                                  # postgres, redis, minio
+pnpm --filter @studio/db exec prisma migrate deploy
+pnpm dev                                              # api :4010 · web :3010 · worker
+```
+
+打开 http://localhost:3010 创建工作台，然后在**模型中心**绑定模型：
+
+1. 添加提供商连接。API Key 以 `STUDIO_MASTER_KEY` 落盘加密。
+2. 运行**权限探测**，验证该 Key 实际可调用哪些模型。
+3. 将已验证的模型绑定到各能力槽位。**Resolve candidates** 展示生产线将使用的有序回退列表。
+
+生产一集：
+
+4. 打开项目、选择剧集，在**源文档与剧本**中粘贴或上传原文并**审批**。审批即启动链路：剧本阶段自动运行，从已审批的原文写出剧本版本。
+5. 阅读生成的剧本（**View** 展开全文），如需修正可直接编辑——保存会重算校验和并回到草稿待重新审批——然后**审批**。这次审批会启动后续全部环节：分镜拆解、资产提取、参考图、首帧、视频片段与合成母版。**生成**面板展示每个阶段的状态，产物落地后即可预览。
+6. 随时介入。**Advance pipeline** 手动推进单步，**Trigger generation** 单跑一个阶段，**Regenerate** 在编辑后以新修订版重跑某阶段，**Compose episode** 按需剪出母版。
+7. 在**交付**中打包剧集。合成未完成或仍有在线分镜缺少成功片段时，打包会被拒绝并给出原因；通过后可查看或下载清单，并记录验收通过或拒绝。
+
+同一阶段重复触发会返回已有批次，不会重复排队；编辑上游后重跑请使用 **Regenerate**。
+
+## 配置
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DATABASE_URL` | — | PostgreSQL 连接串（必填） |
+| `STUDIO_MASTER_KEY` | 开发用密钥 | 64 位十六进制 AES-256-GCM 密钥，加密提供商密钥；生产环境必填且拒绝开发用密钥 |
+| `REDIS_URL` | `redis://localhost:6380` | BullMQ  broker |
+| `STORAGE_BACKEND` | `disk` | `disk` 将产物存于 `STUDIO_ARTIFACTS_DIR`；`s3` 存于 S3 兼容对象存储 |
+| `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | 磁盘后端根目录；API 与 worker 必须共享同一路径（`pnpm dev` 已设置，Docker Compose 以共享卷提供） |
+| `STUDIO_QC_MODE` | `pass` | 质量闸门：`pass` 全部通过，`fail` 全部拒绝，`random` 以任务与尝试次数的哈希对 0.7 阈值打分，`model` 交由绑定的 `visual_audit` 模型判定 |
+| `S3_ENDPOINT` / `S3_BUCKET` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | compose 默认值 | 仅 `STORAGE_BACKEND=s3` 时使用；桶需预先存在 |
+| `CORS_ORIGIN` | `http://localhost:3010` | 逗号分隔的允许来源 |
+| `SESSION_TTL_MS` | 7 天 | 会话有效期 |
+| `PORT` | `4010` | API 端口 |
+
+说明：
+
+- `STORAGE_BACKEND=s3` 时 API 与 worker 的配置必须一致；首次生成前请先建桶（compose 的 MinIO：`mc mb local/studio`）。
+- `STUDIO_QC_MODE=model` 需要已探测并绑定到 `visual_audit` 槽位的视觉模型，每个图像/视频产物消耗一次视觉调用。若无已验证绑定，图像与视频任务会以空分数的质量检查失败，而不是静默回退。
+
+## Mock 提供商
+
+仓库内置 mock 提供商，供测试套件与"无 API Key 体验全流程"使用：把 `mock-*` 模型绑定到槽位，各阶段即以合成产物完成。它只是测试双倍——仓库中不包含任何演示数据集、示例媒体或预置内容。
+
+## 测试
+
+```bash
+pnpm test
+```
+
+API 集成测试启动内嵌 PostgreSQL、应用真实迁移，端到端覆盖认证、RBAC、租户隔离、状态机、审计日志、模型能力中心、生成批次、产物串流、版本管理、资产、编排与验收闸门交付——无需 Docker、无需 API Key。Worker 测试覆盖候选回退、带返工的质量闸门、视觉审核、合成、AI 内容回写与自动推进，并调用真实 `ffmpeg`。Media 测试覆盖两种存储后端。多模态调用由 mock 提供商替身，测试可在任何环境运行。
+
+## 路线图
+
+- 语音、字幕与音乐进入自动链路
+- 深度内容审计：原文覆盖度、剧本覆盖度、跨分镜连续性、音画同步
+- 以真实视觉模型分数校准的审核阈值
+- 单个分镜编辑到其媒体的级联重生成
+- 人工编辑分镜文案的逐次修订历史
+
+## 文档
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — 领域模型、能力策略、状态机、编排、队列设计、质量闸门、存储、安全
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发流程、测试、Pull Request 检查清单
+- [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — 生产线所编码的制作方法论
+
+## 许可证
+
+Apache-2.0
