@@ -226,6 +226,7 @@ interface ResolveCandidate {
   scope: string
   priority: number
   capabilityId: string
+  connectionId: string
   provider: string
   connectionName: string
   model: string
@@ -289,14 +290,17 @@ describe('candidate resolution filtering', () => {
     expect(orgBody.candidates.map(c => [c.scope, c.priority, c.connectionName])).toEqual([['organization', 5, 'filter-main']])
 
     // The console renders every one of these; a refactor must not drop a field.
+    // connectionId is the one addition: the shared resolver returns what the
+    // worker needs too, and the id is already exposed by GET /bindings.
     const [candidate] = scopedBody.candidates
     expect(Object.keys(candidate).sort()).toEqual([
-      'bindingId', 'capabilityId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope',
+      'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope',
     ])
     expect(candidate).toMatchObject({
       scope: 'project',
       priority: 9,
       capabilityId: capId(alt),
+      connectionId: alt.id,
       provider: 'mock',
       connectionName: 'filter-alt',
       model: 'mock-t2v',

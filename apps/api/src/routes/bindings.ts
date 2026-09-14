@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify'
+import { resolveSlotCandidates, toDbSlot } from '@studio/db'
 import { canBind, capabilitySlots, isCapabilitySlot, type CapabilitySlot } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -9,10 +10,6 @@ interface BindingBody {
   projectId?: string | null
   priority?: number
   enabled?: boolean
-}
-
-function toDbSlot(slot: CapabilitySlot): string {
-  return slot.toUpperCase()
 }
 
 function fromDbSlot(value: string): CapabilitySlot {
@@ -31,7 +28,7 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
         where: {
           organizationId: auth.organizationId,
           ...(request.query.projectId ? { projectId: request.query.projectId } : {}),
-          ...(slot ? { slot: toDbSlot(slot) as never } : {}),
+          ...(slot ? { slot: toDbSlot(slot) } : {}),
         },
         orderBy: [{ projectId: 'asc' }, { slot: 'asc' }, { priority: 'desc' }],
         include: { capability: { include: { connection: { select: { id: true, provider: true, name: true, enabled: true } } } } },
@@ -75,7 +72,7 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const duplicate = await app.db.capabilityBinding.findFirst({
-      where: { organizationId: auth.organizationId, projectId, slot: toDbSlot(slot) as never, capabilityId },
+      where: { organizationId: auth.organizationId, projectId, slot: toDbSlot(slot), capabilityId },
     })
     if (duplicate) return reply.code(409).send({ error: 'this capability is already bound to this slot at the same scope' })
 
@@ -83,7 +80,7 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
       data: {
         organizationId: auth.organizationId,
         projectId,
-        slot: toDbSlot(slot) as never,
+        slot: toDbSlot(slot),
         capabilityId,
         priority: request.body?.priority ?? 0,
         enabled: request.body?.enabled ?? true,
@@ -123,9 +120,6 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
-  // Ordered fallback candidates for a slot: project-level bindings win over
-  // organization-level ones; within a scope, higher priority first; duplicates
-  // and unverified/disabled capabilities are dropped.
   app.get<{ Querystring: { slot: string; projectId?: string } }>(
     '/bindings/resolve',
     { preHandler: requirePermission('read') },
@@ -133,35 +127,8 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const slot = request.query.slot
       if (!isCapabilitySlot(slot)) return reply.code(400).send({ error: `slot must be one of: ${capabilitySlots.join(', ')}` })
-      const bindings = await app.db.capabilityBinding.findMany({
-        where: { organizationId: auth.organizationId, slot: toDbSlot(slot) as never, enabled: true },
-        orderBy: { priority: 'desc' },
-        include: { capability: { include: { connection: true } } },
-      })
-      const projectScoped = request.query.projectId
-        ? bindings.filter(b => b.projectId === request.query.projectId)
-        : []
-      const orgScoped = bindings.filter(b => b.projectId === null)
-      const seen = new Set<string>()
-      const candidates = []
-      for (const binding of [...projectScoped, ...orgScoped]) {
-        if (seen.has(binding.capabilityId)) continue
-        if (!binding.capability.entitlementVerifiedAt) continue
-        if (!binding.capability.connection.enabled) continue
-        seen.add(binding.capabilityId)
-        candidates.push({
-          bindingId: binding.id,
-          scope: binding.projectId ? 'project' : 'organization',
-          priority: binding.priority,
-          capabilityId: binding.capability.id,
-          provider: binding.capability.connection.provider,
-          connectionName: binding.capability.connection.name,
-          model: binding.capability.model,
-          displayName: binding.capability.displayName,
-          modality: binding.capability.modality,
-        })
-      }
-      return { slot, projectId: request.query.projectId ?? null, candidates }
+      const projectId = request.query.projectId ?? null
+      return { slot, projectId, candidates: await resolveSlotCandidates(app.db, auth.organizationId, projectId, slot) }
     },
   )
 }

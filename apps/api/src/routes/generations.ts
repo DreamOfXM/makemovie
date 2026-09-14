@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
-import type { CapabilitySlot, Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, Stage, TaskStatus, WorkflowStatus } from '@studio/db'
-import { syncBatchStatus } from '@studio/db'
+import type { Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, SlotCandidate, Stage, TaskStatus, WorkflowStatus } from '@studio/db'
+import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
+import type { CapabilitySlot } from '@studio/domain'
 import { createPipelineQueue, enqueue, type RunTaskCandidate } from '@studio/jobs'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -12,11 +13,11 @@ const generationStages = ['SCRIPT', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as 
 type GenerationStage = (typeof generationStages)[number]
 
 const stageSlots: Record<GenerationStage, CapabilitySlot> = {
-  SCRIPT: 'SCRIPT_TEXT',
-  STORYBOARD: 'STORYBOARD_TEXT',
-  IMAGE: 'IMAGE_GEN',
-  VIDEO: 'VIDEO_T2V',
-  AUDIO: 'TTS_VOICE',
+  SCRIPT: 'script_text',
+  STORYBOARD: 'storyboard_text',
+  IMAGE: 'image_gen',
+  VIDEO: 'video_t2v',
+  AUDIO: 'tts_voice',
 }
 
 // Storyboard imagery is modelled as FIRST_FRAME in the schema; the pipeline API
@@ -95,32 +96,15 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
 }
 
-// Same ordering contract as GET /bindings/resolve: project scope beats
-// organization scope, priority descends, and only verified capabilities on
-// enabled connections survive, deduplicated by capability.
-async function resolveCandidates(db: PrismaClient, organizationId: string, projectId: string, slot: CapabilitySlot): Promise<RunTaskCandidate[]> {
-  const bindings = await db.capabilityBinding.findMany({
-    where: { organizationId, slot, enabled: true },
-    orderBy: { priority: 'desc' },
-    include: { capability: { include: { connection: true } } },
-  })
-  const projectScoped = bindings.filter(binding => binding.projectId === projectId)
-  const orgScoped = bindings.filter(binding => binding.projectId === null)
-  const seen = new Set<string>()
-  const candidates: RunTaskCandidate[] = []
-  for (const binding of [...projectScoped, ...orgScoped]) {
-    if (seen.has(binding.capabilityId)) continue
-    if (!binding.capability.entitlementVerifiedAt) continue
-    if (!binding.capability.connection.enabled) continue
-    seen.add(binding.capabilityId)
-    candidates.push({
-      connectionId: binding.capability.connectionId,
-      capabilityId: binding.capability.id,
-      provider: binding.capability.connection.provider,
-      model: binding.capability.model,
-    })
+// A resolved candidate also carries what the console needs to explain the
+// ordering; the queued job only needs enough to open a provider.
+function toRunTaskCandidate(candidate: SlotCandidate): RunTaskCandidate {
+  return {
+    connectionId: candidate.connectionId,
+    capabilityId: candidate.capabilityId,
+    provider: candidate.provider,
+    model: candidate.model,
   }
-  return candidates
 }
 
 async function latestChecks(db: PrismaClient, tasks: TaskRow[]): Promise<QualityCheck[]> {
@@ -222,8 +206,8 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         : [{ entityId: episode.id, prompt: episode.title }]
 
       const slot = stageSlots[stage]
-      const candidates = await resolveCandidates(app.db, auth.organizationId, episode.projectId, slot)
-      if (candidates.length === 0) return reply.code(409).send({ error: `no verified candidates for slot ${slot.toLowerCase()}` })
+      const candidates = await resolveSlotCandidates(app.db, auth.organizationId, episode.projectId, slot)
+      if (candidates.length === 0) return reply.code(409).send({ error: `no verified candidates for slot ${slot}` })
 
       const dbStage = stageDbValues[stage]
       const idempotencyKeys = targets.map(target => `${episode.id}:${stage}:${target.entityId}`)
@@ -253,7 +237,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         // read DRAFT until the worker happened to pick the first task up.
         await syncBatchStatus(app.db, batch.id)
         for (const task of batch.tasks) {
-          await enqueue(pipeline(), { kind: 'run-task', taskId: task.id, organizationId: auth.organizationId, attempt: 1, candidates })
+          await enqueue(pipeline(), { kind: 'run-task', taskId: task.id, organizationId: auth.organizationId, attempt: 1, candidates: candidates.map(toRunTaskCandidate) })
         }
         await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount } })
         return reply.code(201).send({ batch: await toBatchDto(app.db, batch.id) })
