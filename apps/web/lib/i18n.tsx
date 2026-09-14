@@ -147,6 +147,10 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'stepper.next.generation': 'trigger first-frame and video generation',
     'stepper.next.composition': 'compose the episode into one video',
     'stepper.next.delivery': 'package the delivery and accept it',
+    'stepper.advance': 'Advance pipeline',
+    'stepper.advancing': 'Advancing…',
+    'stepper.advanced': 'Pipeline advanced · {stage} stage started',
+    'stepper.advanceUpToDate': 'Pipeline is up to date, or paused awaiting an approval',
 
     'projects.title': 'Projects',
     'projects.subtitle': 'Group episodes and storyboards, and override model bindings per project.',
@@ -638,6 +642,10 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'stepper.next.generation': '触发首帧与视频生成',
     'stepper.next.composition': '把整集合成为一个视频',
     'stepper.next.delivery': '打包交付并验收',
+    'stepper.advance': '推进流水线',
+    'stepper.advancing': '推进中…',
+    'stepper.advanced': '流水线已推进 · 已进入{stage}阶段',
+    'stepper.advanceUpToDate': '流水线已是最新，或在等待审批',
 
     'projects.title': '项目',
     'projects.subtitle': '组织剧集与分镜，并可按项目覆盖模型绑定。',

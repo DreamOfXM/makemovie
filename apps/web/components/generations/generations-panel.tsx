@@ -50,9 +50,11 @@ function toneFor(status: string): string {
 
 interface GenerationsPanelProps {
   episodeId: string | null
+  /** Bumped by the workspace's one-click advance so a freshly created batch shows up at once. */
+  reloadToken?: number
 }
 
-export function GenerationsPanel({ episodeId }: GenerationsPanelProps) {
+export function GenerationsPanel({ episodeId, reloadToken = 0 }: GenerationsPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
 
@@ -67,7 +69,7 @@ export function GenerationsPanel({ episodeId }: GenerationsPanelProps) {
         ? api<GenerationsResponse>(`/episodes/${episodeId}/generations`)
         : Promise.resolve<GenerationsResponse>(EMPTY),
     // organizationId is not in the path but scopes the session token behind `api`.
-    [api, episodeId, organizationId],
+    [api, episodeId, organizationId, reloadToken],
   )
   const generations = useAsync<GenerationsResponse>(loadGenerations, EMPTY)
   const { reload } = generations

@@ -1,13 +1,16 @@
 'use client'
 
-import { Fragment, useCallback } from 'react'
-import { ArrowRightIcon, CheckIcon } from 'lucide-react'
-import { useI18n } from '@/lib/i18n'
+import { Fragment, useCallback, useState } from 'react'
+import { toast } from 'sonner'
+import { ArrowRightIcon, CheckIcon, LoaderCircleIcon, SparklesIcon } from 'lucide-react'
+import { ApiError, type GenerationBatch, type GenerationStage } from '@/lib/api'
+import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { GuardedButton } from '@/components/permission'
 
 const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'generation', 'composition', 'delivery'] as const
 type StepKey = (typeof STEP_KEYS)[number]
@@ -66,7 +69,7 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
     }
   }, [api, episodeId])
 
-  const { data, loading } = useAsync<ProgressData | null>(episodeId ? load : null, null)
+  const { data, loading, reload } = useAsync<ProgressData | null>(episodeId ? load : null, null)
 
   const done: Record<StepKey, boolean> = {
     source: data?.sourceApproved ?? false,
@@ -83,17 +86,45 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
     status: (done[key] ? 'done' : key === firstIncomplete ? 'current' : 'todo') as StepStatus,
   }))
 
-  return { loading, steps, nextStep: firstIncomplete }
+  return { loading, steps, nextStep: firstIncomplete, reload }
+}
+
+interface RunPipelineResponse {
+  stage: GenerationStage
+  batch: GenerationBatch
 }
 
 interface EpisodeStepperProps {
   episodeId: string
   storyboardCount: number
+  /** Lets the workspace refresh the panels it owns once the pipeline has moved forward. */
+  onAdvanced?(): void
 }
 
-export function EpisodeStepper({ episodeId, storyboardCount }: EpisodeStepperProps) {
+export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: EpisodeStepperProps) {
   const { t } = useI18n()
-  const { loading, steps, nextStep } = useEpisodeProgress(episodeId, storyboardCount)
+  const { api } = useSession()
+  const { loading, steps, nextStep, reload } = useEpisodeProgress(episodeId, storyboardCount)
+  const [advancing, setAdvancing] = useState(false)
+
+  async function advance() {
+    setAdvancing(true)
+    try {
+      const result = await api<RunPipelineResponse>(`/episodes/${episodeId}/run-pipeline`, { method: 'POST' })
+      toast.success(t('stepper.advanced', { stage: translateEnum(t, 'generations.stage', result.stage) }))
+      reload()
+      onAdvanced?.()
+    } catch (error) {
+      // Nothing runnable is a normal state — every stage has run or is waiting on a human approval.
+      if (error instanceof ApiError && error.message === 'pipeline:nothingRunnable') {
+        toast.message(t('stepper.advanceUpToDate'))
+      } else {
+        toast.error(error instanceof Error ? error.message : t('error.generic'))
+      }
+    } finally {
+      setAdvancing(false)
+    }
+  }
 
   function scrollTo(key: StepKey) {
     document.getElementById(STEP_ANCHOR[key])?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -102,40 +133,48 @@ export function EpisodeStepper({ episodeId, storyboardCount }: EpisodeStepperPro
   return (
     <Card>
       <CardContent className="py-4">
-        {loading ? (
-          <Skeleton className="h-9 w-full" />
-        ) : (
-          <>
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
-              {steps.map((step, index) => (
-                <Fragment key={step.key}>
-                  {index > 0 && <ArrowRightIcon className="text-muted-foreground/40 size-3.5 shrink-0" />}
-                  <button
-                    type="button"
-                    onClick={() => scrollTo(step.key)}
-                    className={cn(
-                      'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors',
-                      step.status === 'done' && 'border-transparent bg-muted text-foreground',
-                      step.status === 'current' && 'border-primary/40 bg-primary/10 text-primary',
-                      step.status === 'todo' && 'border-border text-muted-foreground',
-                    )}
-                  >
-                    <span className="flex size-4 items-center justify-center">
-                      {step.status === 'done' ? <CheckIcon className="size-3" /> : index + 1}
-                    </span>
-                    {t(`stepper.step.${step.key}`)}
-                  </button>
-                </Fragment>
-              ))}
-            </div>
-            {nextStep && (
-              <p className="text-muted-foreground mt-3 text-sm">
-                {t('stepper.nextLabel')}
-                <span className="text-foreground font-medium">{t(`stepper.next.${nextStep}`)}</span>
-              </p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            {loading ? (
+              <Skeleton className="h-9 w-full" />
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
+                  {steps.map((step, index) => (
+                    <Fragment key={step.key}>
+                      {index > 0 && <ArrowRightIcon className="text-muted-foreground/40 size-3.5 shrink-0" />}
+                      <button
+                        type="button"
+                        onClick={() => scrollTo(step.key)}
+                        className={cn(
+                          'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors',
+                          step.status === 'done' && 'border-transparent bg-muted text-foreground',
+                          step.status === 'current' && 'border-primary/40 bg-primary/10 text-primary',
+                          step.status === 'todo' && 'border-border text-muted-foreground',
+                        )}
+                      >
+                        <span className="flex size-4 items-center justify-center">
+                          {step.status === 'done' ? <CheckIcon className="size-3" /> : index + 1}
+                        </span>
+                        {t(`stepper.step.${step.key}`)}
+                      </button>
+                    </Fragment>
+                  ))}
+                </div>
+                {nextStep && (
+                  <p className="text-muted-foreground mt-3 text-sm">
+                    {t('stepper.nextLabel')}
+                    <span className="text-foreground font-medium">{t(`stepper.next.${nextStep}`)}</span>
+                  </p>
+                )}
+              </>
             )}
-          </>
-        )}
+          </div>
+          <GuardedButton action="generation:trigger" disabled={advancing} onClick={() => void advance()}>
+            {advancing ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
+            {advancing ? t('stepper.advancing') : t('stepper.advance')}
+          </GuardedButton>
+        </div>
       </CardContent>
     </Card>
   )

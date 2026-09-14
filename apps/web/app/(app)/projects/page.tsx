@@ -118,6 +118,15 @@ export default function ProjectsPage() {
   )
   const episodeAssets = useAsync<AssetsResponse>(episodeId ? loadEpisodeAssets : null, { assets: [] })
 
+  // GenerationsPanel owns its own fetch, so a token bump is the page's handle on it.
+  const [generationsToken, setGenerationsToken] = useState(0)
+  const refreshAfterAdvance = useCallback(() => {
+    episodes.reload()
+    storyboardsMedia.reload()
+    episodeAssets.reload()
+    setGenerationsToken(token => token + 1)
+  }, [episodes.reload, storyboardsMedia.reload, episodeAssets.reload])
+
   async function bindStoryboardAssets(storyboardId: string, assets: { assetId: string; role: string }[]) {
     try {
       await api(`/storyboards/${storyboardId}/assets`, { method: 'PUT', body: JSON.stringify({ assets }) })
@@ -343,7 +352,11 @@ export default function ProjectsPage() {
 
           {selectedEpisode ? (
             <>
-          <EpisodeStepper episodeId={selectedEpisode.id} storyboardCount={storyboards.length} />
+          <EpisodeStepper
+            episodeId={selectedEpisode.id}
+            storyboardCount={storyboards.length}
+            onAdvanced={refreshAfterAdvance}
+          />
           <div id="step-source" className="scroll-mt-4">
             <SourcesPanel episodeId={selectedEpisode.id} />
           </div>
@@ -417,7 +430,7 @@ export default function ProjectsPage() {
           </div>
 
           <div id="step-generation" className="scroll-mt-4">
-            <GenerationsPanel episodeId={selectedEpisode.id} />
+            <GenerationsPanel episodeId={selectedEpisode.id} reloadToken={generationsToken} />
           </div>
           <div id="step-delivery" className="scroll-mt-4">
             <DeliveryPanel episodeId={selectedEpisode.id} />
