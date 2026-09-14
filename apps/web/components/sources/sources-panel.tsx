@@ -218,6 +218,7 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
           <VersionTable
             title={t('sources.sourceVersions')}
             icon={<FileTextIcon className="text-muted-foreground size-4" />}
+            hint={t('sources.sourceVersionsHint')}
             versions={sourceVersions.data}
             loading={sourceVersions.loading}
             emptyTitle={t('sources.noSources')}
@@ -255,6 +256,7 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
           <VersionTable
             title={t('sources.scriptVersions')}
             icon={<ScrollTextIcon className="text-muted-foreground size-4" />}
+            hint={t('sources.scriptVersionsHint')}
             versions={scriptVersions.data}
             loading={scriptVersions.loading}
             emptyTitle={t('sources.noScripts')}
@@ -285,6 +287,7 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
 interface VersionTableProps {
   title: string
   icon: ReactNode
+  hint?: string
   versions: VersionSummary[]
   loading: boolean
   emptyTitle: string
@@ -296,6 +299,7 @@ interface VersionTableProps {
 function VersionTable({
   title,
   icon,
+  hint,
   versions,
   loading,
   emptyTitle,
@@ -312,9 +316,10 @@ function VersionTable({
           {icon}
           {title}
         </CardTitle>
+        {hint && <CardDescription>{hint}</CardDescription>}
       </CardHeader>
       {loading && versions.length === 0 ? (
-        <TableSkeleton rows={2} columns={5} />
+        <TableSkeleton rows={2} columns={3} />
       ) : versions.length === 0 ? (
         <CardContent className="px-4">
           <EmptyState icon={emptyIcon} title={emptyTitle} description={emptyHint} />
@@ -323,25 +328,22 @@ function VersionTable({
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="w-20">{t('sources.version')}</TableHead>
+              <TableHead>{t('sources.version')}</TableHead>
               <TableHead className="w-32">{t('common.status')}</TableHead>
-              <TableHead className="w-36">{t('sources.checksum')}</TableHead>
-              <TableHead className="w-24">{t('sources.length')}</TableHead>
               <TableHead className="text-right">{t('common.actions')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {versions.map(version => (
               <TableRow key={version.id}>
-                <TableCell className="font-medium">v{version.version}</TableCell>
+                <TableCell>
+                  <p className="font-medium">v{version.version}</p>
+                  <p className="text-muted-foreground font-mono text-xs" title={version.checksum}>
+                    {t('sources.chars', { count: version.contentLength })} · {version.checksum.slice(0, 12)}
+                  </p>
+                </TableCell>
                 <TableCell>
                   <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />
-                </TableCell>
-                <TableCell className="text-muted-foreground font-mono text-xs" title={version.checksum}>
-                  {version.checksum.slice(0, 12)}
-                </TableCell>
-                <TableCell className="text-muted-foreground text-xs tabular-nums">
-                  {t('sources.chars', { count: version.contentLength })}
                 </TableCell>
                 <TableCell className="text-right">{renderActions(version)}</TableCell>
               </TableRow>
