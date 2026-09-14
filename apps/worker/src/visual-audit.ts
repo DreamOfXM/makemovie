@@ -106,7 +106,7 @@ export class ModelQualityChecker implements QualityChecker {
 
 export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'none'>): string {
   return [
-    'You are auditing one artifact produced by an automated short-drama pipeline.',
+    'You are auditing one artifact produced by an automated film & video production pipeline.',
     `Stage: ${subject.stage}`,
     `Generation prompt: ${subject.prompt || '(none recorded)'}`,
     plan === 'frame'

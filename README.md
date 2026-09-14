@@ -1,8 +1,8 @@
-# Short Drama Studio
+# MakeMovie
 
-Apache-2.0 | Self-hostable, commercial-ready AI short-drama production platform
+Apache-2.0 | Self-hostable, commercial-ready AI film & video production platform
 
-Full pipeline from source material to audited deliverable:
+One pipeline for short dramas, films, and long-form video — from source material to an audited deliverable:
 `source audit → script → assets → storyboards → first frames → videos → voice/subtitles/music → composition → acceptance → delivery`
 
 ## Features
@@ -124,7 +124,7 @@ API integration tests boot an embedded PostgreSQL, apply real migrations, and ex
 
 - `ARCHITECTURE.md` — domain model, model capability center, state machine, capability policy, generation pipeline and orchestration (auto-advance, regenerate, the script-approval cascade, composition planning), queue design, quality gates, storage, security
 - `CONTRIBUTING.md` — development workflow, testing, and pull-request checklist
-- `docs/skills/short-drama-production/SKILL.md` — the production methodology the pipeline encodes
+- `docs/skills/film-production/SKILL.md` — the production methodology the pipeline encodes
 
 ## License
 

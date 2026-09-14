@@ -11,9 +11,9 @@ export type Locale = 'en' | 'zh'
  */
 const dictionaries: Record<Locale, Record<string, string>> = {
   en: {
-    'app.title': 'Short Drama Studio',
-    'app.tagline': 'AI short-drama production workspace',
-    'app.shortTitle': 'Studio',
+    'app.title': 'MakeMovie',
+    'app.tagline': 'From text to finished cut',
+    'app.shortTitle': 'MM',
 
     'nav.projects': 'Projects',
     'nav.models': 'Model center',
@@ -123,7 +123,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'auth.logout': 'Sign out',
     'auth.org': 'Organization',
     'auth.role': 'Your role',
-    'auth.heroTitle': 'Run an AI short-drama pipeline your whole team can trust',
+    'auth.heroTitle': 'Run an AI film & video pipeline your whole team can trust',
     'auth.heroBody': 'Bind the right model to every capability slot, keep provider keys encrypted, and review each storyboard before it ships.',
     'auth.heroPoint1': 'Model center with probe-verified entitlements',
     'auth.heroPoint2': 'Slot bindings with ordered fallback candidates',
@@ -542,9 +542,9 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'audit.endOfLog': 'End of log',
   },
   zh: {
-    'app.title': '短剧工作室',
-    'app.tagline': 'AI 短剧生产工作台',
-    'app.shortTitle': '工作室',
+    'app.title': 'MakeMovie',
+    'app.tagline': '从一段文字到一部成片',
+    'app.shortTitle': 'MM',
 
     'nav.projects': '项目',
     'nav.models': '模型中心',
@@ -654,7 +654,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'auth.logout': '退出登录',
     'auth.org': '组织',
     'auth.role': '我的角色',
-    'auth.heroTitle': '让全团队都能信任的 AI 短剧生产线',
+    'auth.heroTitle': '让全团队都能信任的 AI 影视生产线',
     'auth.heroBody': '为每个能力槽位绑定合适的模型，密钥全程加密存储，每条分镜上线前都可审核。',
     'auth.heroPoint1': '模型中心：探测后才算已验证的模型权限',
     'auth.heroPoint2': '槽位绑定：有序回退候选一目了然',

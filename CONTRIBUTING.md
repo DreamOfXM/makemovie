@@ -1,6 +1,6 @@
 # Contributing
 
-Short Drama Studio is a pnpm monorepo. This guide covers setup, the conventions the code follows, and what a pull request needs before it can merge.
+MakeMovie is a pnpm monorepo. This guide covers setup, the conventions the code follows, and what a pull request needs before it can merge.
 
 ## Prerequisites
 

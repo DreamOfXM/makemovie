@@ -1,10 +1,10 @@
-# Short Drama Studio
+# MakeMovie
 
 > Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, episode assets with reference-image generation, versioning, approval, and binding to storyboard shots, and acceptance-gated delivery manifests are implemented and covered by tests. The pipeline is AI-driven and runs itself: approving a source starts `SCRIPT`, which writes a real `ScriptVersion`; approving that script starts `STORYBOARD`, which writes the shot list **and** extracts the episode's characters, props and scenes; from there a completed batch relays the next stage on its own — assets → first frames → video → composition — until a composed master exists. An approval is the checkpoint the chain waits at, and opening it continues the chain rather than waiting for a second click; a human can still push one step at a time with **Advance pipeline**. Approving an edited script cascades: the breakdown is regenerated, the new revision supersedes the old shots instead of deleting them, and the media stages re-run for the shots the episode actually uses. Every generated row carries the task that produced it, so any script, shot or asset traces back to its prompt, provider, model and artifact. Quality control has two checkers — a deterministic hash placeholder (the default, which passes outright rather than rejecting media on a number that is not a quality signal) and a model-driven visual audit of images and single video frames that is implemented but has never been run against a live provider. Text and audio are never scored by either: there is no visual surface to stand in for. The remaining work — voice/music in the chain, the deep content audits (source, script, storyboard, audio), a live visual audit with a calibrated threshold, live video generation, and a per-attempt configuration version — is design; section-level status is called out inline.
 
 ## Goal
 
-A self-hostable and commercial-ready AI short-drama production system. It manages the complete path from source material to an audited deliverable:
+A self-hostable and commercial-ready AI film & video production system. It manages the complete path from source material to an audited deliverable:
 
 source audit → script → assets → storyboards → first frames → videos → voice/subtitles/music → composition → acceptance → delivery.
 
@@ -57,7 +57,7 @@ Planned:
 - `packages/config`: typed environment and runtime configuration
 - `packages/security`: Argon2id hashing, token hashing, AES-256-GCM secret encryption
 - `infra`: API, worker, and web Dockerfiles (`docker-compose.yml` sits at the repository root)
-- `docs`: currently the short-drama production skill specification; product, API, and operations docs are still to be written
+- `docs`: currently the film & video production skill specification; product, API, and operations docs are still to be written
 
 ## Domain model
 

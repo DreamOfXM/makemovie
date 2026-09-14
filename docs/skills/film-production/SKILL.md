@@ -1,12 +1,12 @@
 ---
-name: short-drama-production
-description: 短剧生产总控规范 — 独立于任何外部项目，覆盖原文审计到交付的可审计、可追溯生产链路
+name: film-production
+description: 影视生产总控规范 — 独立于任何外部项目，覆盖原文审计到交付的可审计、可追溯生产链路
 license: Apache-2.0
 ---
 
-# 短剧生产总控
+# 影视生产总控
 
-本 Skill 属于 `short-drama-studio`，与任何外部开源或商业项目无依赖、无引用。
+本 Skill 属于 `makemovie`，与任何外部开源或商业项目无依赖、无引用。
 
 ## 硬规则
 

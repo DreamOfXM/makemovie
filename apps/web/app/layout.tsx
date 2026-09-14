@@ -7,9 +7,9 @@ import { Toaster } from '@/components/ui/sonner'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: { default: 'Short Drama Studio', template: '%s · Short Drama Studio' },
-  description: 'AI short-drama production workspace',
-  applicationName: 'Short Drama Studio',
+  title: { default: 'MakeMovie', template: '%s · MakeMovie' },
+  description: 'AI film & video production line — from text to finished cut',
+  applicationName: 'MakeMovie',
 }
 
 export const viewport: Viewport = {
