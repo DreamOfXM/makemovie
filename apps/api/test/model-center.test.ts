@@ -42,7 +42,7 @@ describe('provider connections', () => {
   it('creates a connection with catalog capabilities and encrypts the api key', async () => {
     const owner = await env.register('mc-conn@example.com', 'Conn Org')
     const connection = await createMockConnection(owner.token, 'mock-main')
-    expect(connection.capabilities.length).toBe(8)
+    expect(connection.capabilities.length).toBe(10)
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.encryptedSecret.startsWith('v1.')).toBe(true)

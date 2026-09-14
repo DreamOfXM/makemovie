@@ -81,6 +81,7 @@ interface GenerationTarget {
   entityId: string
   prompt: string
   assetId?: string
+  scriptVersionId?: string
 }
 
 function isGenerationStage(value: unknown): value is GenerationStage {
@@ -206,11 +207,29 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         if (selected.length === 0) return reply.code(400).send({ error: 'episode has no storyboards to generate' })
       }
       if (perAsset && episode.assets.length === 0) return reply.code(400).send({ error: 'episode has no assets to generate' })
+
+      // AI content stages need real context, not just the episode title, and are
+      // gated on the upstream version being approved — a script is written from an
+      // approved source, and storyboards are broken out of an approved script.
+      let scriptVersionId: string | undefined
+      let contentPrompt: string | undefined
+      if (stage === 'SCRIPT') {
+        const source = await app.db.sourceDocumentVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, orderBy: { version: 'desc' } })
+        if (!source) return reply.code(409).send({ error: 'generations:noApprovedSource' })
+        contentPrompt = `根据以下源文档，写出这一集的完整拍摄剧本：\n\n${source.content}`
+      }
+      if (stage === 'STORYBOARD') {
+        const script = await app.db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, orderBy: { version: 'desc' } })
+        if (!script) return reply.code(409).send({ error: 'generations:noApprovedScript' })
+        scriptVersionId = script.id
+        contentPrompt = `把以下剧本拆分成连续的分镜镜头，输出一个 JSON 数组，每个元素包含 number、title、description、sourceExcerpt、durationMs（毫秒）、continuityIn、continuityOut。只输出 JSON，不要其它说明。\n\n剧本：\n${script.content}`
+      }
+
       const targets: GenerationTarget[] = perAsset
         ? episode.assets.map(asset => ({ entityId: asset.id, prompt: `${asset.kind} ${asset.name}: ${asset.description}`, assetId: asset.id }))
         : perStoryboard
           ? selected.map(storyboard => ({ entityId: storyboard.id, prompt: `${storyboard.title}: ${storyboard.description}` }))
-          : [{ entityId: episode.id, prompt: episode.title }]
+          : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
       const slot = stageSlots[stage]
       const candidates = await resolveSlotCandidates(app.db, auth.organizationId, episode.projectId, slot)
@@ -234,7 +253,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
                 idempotencyKey: idempotencyKeys[index],
                 // ProviderRequest payload; model and parameters belong to whichever
                 // candidate ends up running, so the worker fills them in.
-                requestSnapshot: JSON.stringify({ input: { prompt: target.prompt }, ...(target.assetId ? { assetId: target.assetId } : {}) }),
+                requestSnapshot: JSON.stringify({ input: { prompt: target.prompt }, ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}) }),
               })),
             },
           },

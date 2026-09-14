@@ -149,6 +149,9 @@ describe('generation trigger', () => {
   })
 
   it('creates one batch and one queued task for an episode-level stage, and enqueues the job', async () => {
+    const sourceContent = '原小说：雨夜的滨江老城区，一桩离奇失踪案。'
+    await env.db.sourceDocumentVersion.create({ data: { episodeId, version: 1, content: sourceContent, checksum: 'src-ep1', status: 'APPROVED' } })
+
     const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
@@ -178,7 +181,7 @@ describe('generation trigger', () => {
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(stored.stage).toBe('SCRIPT')
     expect(stored.idempotencyKey).toBe(`${episodeId}:SCRIPT:${episodeId}`)
-    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({ input: { prompt: 'EP1' } })
+    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({ input: { prompt: `根据以下源文档，写出这一集的完整拍摄剧本：\n\n${sourceContent}` } })
   })
 
   it('fans a storyboard stage out over the requested storyboards only', async () => {
@@ -433,6 +436,7 @@ describe('generation candidate resolution', () => {
     expect(afterDisable.json().error).toBe('no verified candidates for slot tts_voice')
 
     const { episodeId: entitlementEpisodeId } = await newEpisode('Resolve Unverified Drama')
+    await env.db.scriptVersion.create({ data: { episodeId: entitlementEpisodeId, version: 1, content: 'a script', checksum: 'resolve-unverified', status: 'APPROVED' } })
     const unverifiedConnection = await newConnection('filter-stale-gen')
     const capabilityId = capabilityOf(unverifiedConnection, 'mock-text')
     await bindSlot('storyboard_text', capabilityId)
@@ -586,5 +590,41 @@ describe('storyboard media', () => {
     const bare = rows.find(row => row.id === withoutMedia)!
     expect(bare.firstFrame).toBeNull()
     expect(bare.video).toBeNull()
+  })
+})
+
+describe('AI content stage gating', () => {
+  it('refuses SCRIPT generation without an approved source', async () => {
+    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 20, title: 'No Source EP' } })
+    const epId = ep.json().id as string
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('generations:noApprovedSource')
+  })
+
+  it('refuses STORYBOARD generation without an approved script', async () => {
+    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 21, title: 'No Script EP' } })
+    const epId = ep.json().id as string
+    await env.db.sourceDocumentVersion.create({ data: { episodeId: epId, version: 1, content: 'a source', checksum: 'gate-src', status: 'APPROVED' } })
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('generations:noApprovedScript')
+  })
+
+  it('links generated storyboards to the approved script in the request snapshot', async () => {
+    const capability = await env.db.modelCapability.findFirstOrThrow({ where: { model: 'mock-text', connection: { organizationId } } })
+    await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id } })
+
+    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 22, title: 'Script EP' } })
+    const epId = ep.json().id as string
+    const script = await env.db.scriptVersion.create({ data: { episodeId: epId, version: 1, content: 'the approved script', checksum: 'gate-script', status: 'APPROVED' } })
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    expect(res.statusCode).toBe(201)
+    const batch = res.json().batch as BatchDto
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: batch.tasks[0].id } })
+    const snapshot = JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string }; scriptVersionId?: string }
+    expect(snapshot.scriptVersionId).toBe(script.id)
+    expect(snapshot.input.prompt).toContain('the approved script')
   })
 })
