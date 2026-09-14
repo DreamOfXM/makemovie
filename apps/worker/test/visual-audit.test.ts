@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { loadWorkerConfig } from '../src/config.js'
-import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type QcSubject } from '../src/qc.js'
+import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type QcSubject, type QualityChecker } from '../src/qc.js'
 import { buildAuditPrompt, parseVerdict } from '../src/visual-audit.js'
 
 function subject(overrides: Partial<QcSubject> = {}): QcSubject {
   return {
     organizationId: 'org-1',
     projectId: 'proj-1',
-    stage: 'IMAGE',
+    stage: 'FIRST_FRAME',
     modality: 'image',
     mimeType: 'image/png',
     bytes: new Uint8Array([1, 2, 3]),
@@ -76,7 +76,7 @@ describe('parseVerdict', () => {
 describe('buildAuditPrompt', () => {
   it('names the stage, the prompt and the threshold, and demands JSON alone', () => {
     const prompt = buildAuditPrompt(subject(), 'image')
-    expect(prompt).toContain('Stage: IMAGE')
+    expect(prompt).toContain('Stage: FIRST_FRAME')
     expect(prompt).toContain('a rainy night market, neon reflections')
     expect(prompt).toContain(`A score of ${QC_THRESHOLD} or above`)
     expect(prompt).toContain('Reply with JSON only')
@@ -96,18 +96,23 @@ describe('buildAuditPrompt', () => {
 })
 
 describe('HashQualityChecker', () => {
+  // Held as the interface: the hash checker scores the task id and attempt it was
+  // built with and ignores the artifact, but run-task always passes one.
   it('passes in pass mode and reworks in fail mode, both as fake-qc', async () => {
-    const passed = await new HashQualityChecker('task-1', 1, 'pass').check(subject())
+    const passing: QualityChecker = new HashQualityChecker('task-1', 1, 'pass')
+    const passed = await passing.check(subject())
     expect(passed).toEqual({ kind: 'fake-qc', decision: 'pass', score: 1 })
 
-    const reworked = await new HashQualityChecker('task-1', 1, 'fail').check(subject())
+    const rejecting: QualityChecker = new HashQualityChecker('task-1', 1, 'fail')
+    const reworked = await rejecting.check(subject())
     expect(reworked).toMatchObject({ kind: 'fake-qc', decision: 'rework', score: 0.1 })
     expect((reworked as { reasons: string[] }).reasons[0]).toContain(`${QC_THRESHOLD}`)
   })
 
   it('is deterministic for the same task and attempt in random mode', async () => {
-    const first = await new HashQualityChecker('task-9', 2, 'random').check(subject())
-    const second = await new HashQualityChecker('task-9', 2, 'random').check(subject())
+    const checker: QualityChecker = new HashQualityChecker('task-9', 2, 'random')
+    const first = await checker.check(subject())
+    const second = await checker.check(subject())
     expect(first).toEqual(second)
     expect(first.decision === 'unjudged').toBe(false)
     if (first.decision !== 'unjudged') {

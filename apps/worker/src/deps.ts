@@ -11,8 +11,9 @@ export interface PipelineDeps {
   masterKey: string
   qcMode: QcMode
   enqueueJob(payload: PipelinePayload): Promise<void>
-  // Optional because apps/worker/test is covered by no tsconfig: a required member
-  // would break the existing pipeline tests at runtime rather than at typecheck.
+  // Only model mode injects one. The hash checker has to be built per task from its
+  // id and attempt, which a worker-wide dependency cannot carry, so run-task builds
+  // it itself when this is unset.
   checker?: QualityChecker
   pollIntervalMs?: number
   pollTimeoutMs?: number

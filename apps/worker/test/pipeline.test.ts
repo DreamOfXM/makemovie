@@ -313,5 +313,4 @@ async function bindVisualAudit(seed: Seed, options: { verified?: boolean; apiKey
   await env.db.capabilityBinding.create({
     data: { organizationId: seed.organizationId, slot: 'VISUAL_AUDIT', capabilityId: capability.id, priority: 10 },
   })
-  return capability.id
 }
