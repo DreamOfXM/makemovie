@@ -200,6 +200,38 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  app.patch<{ Params: { episodeId: string; version: string }; Body: { content?: string } }>(
+    '/episodes/:episodeId/script-versions/:version',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const current = await findScriptVersion(app.db, episode.id, request.params.version)
+      if (!current) return reply.code(404).send({ error: 'Script version not found' })
+
+      const content = request.body?.content
+      if (typeof content !== 'string' || !content.trim()) return reply.code(400).send({ error: 'content is required' })
+      if (content.length > maxContentLength) return reply.code(400).send({ error: `content must not exceed ${maxContentLength} characters` })
+
+      // Editing invalidates any prior approval: the changed words need re-approval
+      // before downstream stages should rely on them.
+      const updated = await app.db.scriptVersion.update({
+        where: { id: current.id },
+        data: { content, checksum: checksumOf(content), status: 'DRAFT' },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'script.edit',
+        entityType: 'ScriptVersion',
+        entityId: updated.id,
+        payload: { episodeId: episode.id, version: updated.version, contentLength: content.length },
+      })
+      return { version: toVersionDto(updated) }
+    },
+  )
+
   app.post<{ Params: { episodeId: string; version: string } }>(
     '/episodes/:episodeId/script-versions/:version/approve',
     { preHandler: requirePermission('episode:write') },

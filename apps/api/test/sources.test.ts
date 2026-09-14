@@ -278,6 +278,24 @@ describe('script versions', () => {
     expect(storyboards.map(storyboard => storyboard.scriptVersionId)).toEqual([scriptV2Id, scriptV2Id])
   })
 
+  it('edits a script version, recomputes its checksum, and resets it to draft', async () => {
+    const edited = '修改后的剧本：沈亦在雨夜中追踪线索。'
+
+    const forbidden = await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/2`, headers: authHeaders(viewerToken), payload: { content: edited } })
+    expect(forbidden.statusCode).toBe(403)
+
+    const res = await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/2`, headers: authHeaders(editorToken), payload: { content: edited } })
+    expect(res.statusCode).toBe(200)
+    const version = res.json().version as VersionSummary
+    expect(version.content).toBe(edited)
+    expect(version.checksum).toBe(sha256(edited))
+    expect(version.status).toBe('DRAFT')
+
+    const blank = await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/2`, headers: authHeaders(editorToken), payload: { content: '   ' } })
+    expect(blank.statusCode).toBe(400)
+    expect((await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/99`, headers: authHeaders(editorToken), payload: { content: edited } })).statusCode).toBe(404)
+  })
+
   it('records the source and script events in the audit trail', async () => {
     const res = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
@@ -286,5 +304,6 @@ describe('script versions', () => {
     expect(events.some(event => event.action === 'source.approve' && event.entityType === 'SourceDocumentVersion')).toBe(true)
     expect(events.some(event => event.action === 'script.derive' && event.entityType === 'ScriptVersion')).toBe(true)
     expect(events.some(event => event.action === 'script.approve' && event.entityType === 'ScriptVersion')).toBe(true)
+    expect(events.some(event => event.action === 'script.edit' && event.entityType === 'ScriptVersion')).toBe(true)
   })
 })
