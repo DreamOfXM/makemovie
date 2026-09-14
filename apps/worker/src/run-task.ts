@@ -5,13 +5,12 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Prisma, syncBatchStatus, type ModelCapability as CapabilityRow } from '@studio/db'
 import type { ModelModality } from '@studio/domain'
 import type { RunTaskCandidate, RunTaskPayload } from '@studio/jobs'
-import { buildObjectKey, extensionFor, sha256, synthesizeMockMedia } from '@studio/media'
+import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media'
 import { createAdapter, type ModelCapability, type PollResult, type ProviderAdapter, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
-import type { QcMode } from './config.js'
 import type { PipelineDeps } from './deps.js'
+import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
 
-export const QC_THRESHOLD = 0.7
 export const MAX_ATTEMPTS = 3
 
 type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { include: { episode: { include: { project: true } } } } } }>
@@ -116,23 +115,48 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
       },
     })
 
-    const score = qcScore(task.id, payload.attempt, deps.qcMode)
-    const passed = score >= QC_THRESHOLD
+    const checker = deps.checker ?? new HashQualityChecker(task.id, payload.attempt, deps.qcMode)
+    const verdict = await checker.check({
+      stage: task.stage,
+      modality: capability.modality,
+      mimeType: material.mimeType,
+      bytes: material.bytes,
+      prompt: promptOf(request),
+      workdir,
+      durationMs: material.durationMs,
+    })
     await deps.db.qualityCheck.create({
       data: {
-        status: passed ? 'APPROVED' : 'NEEDS_REVIEW',
-        kind: 'fake-qc',
-        score,
-        report: JSON.stringify({ threshold: QC_THRESHOLD, mode: deps.qcMode, candidate }),
+        status: verdict.decision === 'pass' ? 'APPROVED' : 'NEEDS_REVIEW',
+        kind: verdict.kind,
+        score: verdict.decision === 'unjudged' ? null : verdict.score,
+        report: JSON.stringify({
+          kind: verdict.kind,
+          threshold: QC_THRESHOLD,
+          mode: deps.qcMode,
+          candidate,
+          reasons: verdict.decision === 'pass' ? [] : verdict.reasons,
+        }),
         artifactId: artifact.id,
       },
     })
 
-    if (!passed) {
+    // An auditor that could not judge is a fault of the audit, not of the content.
+    // Regenerating would pay for an artifact nobody rejected, and quietly scoring
+    // it with the hash instead would pretend a judgment happened, so the task stops.
+    if (verdict.decision === 'unjudged') {
+      await deps.db.generationTask.update({
+        where: { id: task.id },
+        data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: ${verdict.reasons.join('; ') || 'no verdict'}` },
+      })
+      return { status: 'exhausted' }
+    }
+
+    if (verdict.decision === 'rework') {
       if (payload.attempt >= MAX_ATTEMPTS) {
         await deps.db.generationTask.update({
           where: { id: task.id },
-          data: { status: 'FAILED', errorSnapshot: `fake-qc: threshold not met after ${MAX_ATTEMPTS} attempts` },
+          data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: threshold not met after ${MAX_ATTEMPTS} attempts` },
         })
         return { status: 'exhausted' }
       }
@@ -147,7 +171,7 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
         provider: candidate.provider,
         model: candidate.model,
         modality: capability.modality,
-        inputUnits: promptLength(request),
+        inputUnits: promptOf(request).length,
         outputUnits: stored.sizeBytes,
       },
     })
@@ -163,7 +187,7 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
           providerTaskId: submitted.taskId,
           artifactId: artifact.id,
           artifactUrl: result.artifactUrl ?? null,
-          qc: { score, threshold: QC_THRESHOLD },
+          qc: { score: verdict.score, threshold: QC_THRESHOLD },
         }),
       },
     })
@@ -202,13 +226,6 @@ async function materialize(result: PollResult, modality: string, workdir: string
   throw new Error('provider completed without an artifact')
 }
 
-function qcScore(taskId: string, attempt: number, mode: QcMode): number {
-  if (mode === 'pass') return 1
-  if (mode === 'fail') return 0.1
-  const digest = sha256(new TextEncoder().encode(`${taskId}:${attempt}`))
-  return Number.parseInt(digest.slice(0, 8), 16) / 0xffffffff
-}
-
 function parseRequest(snapshot: string | null, fallbackModel: string): ProviderRequest {
   if (!snapshot) throw new Error('task has no requestSnapshot')
   const parsed = JSON.parse(snapshot) as { model?: unknown; input?: unknown; parameters?: unknown }
@@ -219,8 +236,8 @@ function parseRequest(snapshot: string | null, fallbackModel: string): ProviderR
   }
 }
 
-function promptLength(request: ProviderRequest): number {
-  return typeof request.input.prompt === 'string' ? request.input.prompt.length : 0
+function promptOf(request: ProviderRequest): string {
+  return typeof request.input.prompt === 'string' ? request.input.prompt : ''
 }
 
 function toCapability(provider: string, row: CapabilityRow): ModelCapability {
