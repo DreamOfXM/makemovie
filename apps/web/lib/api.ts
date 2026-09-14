@@ -16,7 +16,12 @@ export function setToken(token: string | null): void {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Full error payload, so callers can read extra fields such as `reasons` on a 409. */
+    readonly body?: Record<string, unknown> | null,
+  ) {
     super(message)
   }
 }
@@ -33,7 +38,7 @@ export async function request<T>(path: string, options: RequestInit & { token?: 
   const data = (await response.json().catch(() => null)) as Record<string, unknown> | null
   if (!response.ok) {
     const message = (data?.error as string) || (data?.message as string) || `HTTP ${response.status}`
-    throw new ApiError(message, response.status)
+    throw new ApiError(message, response.status, data)
   }
   return data as T
 }

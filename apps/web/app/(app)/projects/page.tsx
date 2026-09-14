@@ -50,6 +50,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
+import { SourcesPanel } from '@/components/sources/sources-panel'
+import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
 type StoryboardDialogState = { mode: 'create'; nextNumber: number } | { mode: 'edit'; storyboard: Storyboard } | null
@@ -401,6 +403,10 @@ export default function ProjectsPage() {
           </Card>
 
           <GenerationsPanel episodeId={selectedEpisode?.id ?? null} />
+
+          <SourcesPanel episodeId={selectedEpisode?.id ?? null} />
+
+          <DeliveryPanel episodeId={selectedEpisode?.id ?? null} />
         </div>
       </div>
 
