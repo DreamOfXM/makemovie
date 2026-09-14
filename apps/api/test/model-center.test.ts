@@ -220,3 +220,89 @@ describe('capability slot bindings', () => {
     expect(actions).toContain('binding.create')
   })
 })
+
+interface ResolveCandidate {
+  bindingId: string
+  scope: string
+  priority: number
+  capabilityId: string
+  provider: string
+  connectionName: string
+  model: string
+  displayName: string
+  modality: string
+}
+
+interface ResolveBody {
+  slot: string
+  projectId: string | null
+  candidates: ResolveCandidate[]
+}
+
+describe('candidate resolution filtering', () => {
+  it('drops unverified, disabled and duplicate candidates, keeping project scope first', async () => {
+    const owner = await env.register('mc-filter@example.com', 'Filter Org')
+    const main = await createMockConnection(owner.token, 'filter-main')
+    const alt = await createMockConnection(owner.token, 'filter-alt')
+    const dark = await createMockConnection(owner.token, 'filter-dark')
+    const stale = await createMockConnection(owner.token, 'filter-stale')
+    for (const connection of [main, alt, dark, stale]) {
+      await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    }
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(owner.token), payload: { name: 'Filter Drama' } })
+    const projectId = project.json().id as string
+
+    const capId = (connection: Connection) => connection.capabilities.find(c => c.model === 'mock-t2v')!.id
+    const bind = (capabilityId: string, scope: string | undefined, priority: number, enabled = true) =>
+      env.app.inject({
+        method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+        payload: { slot: 'video_t2v', capabilityId, projectId: scope, priority, enabled },
+      })
+
+    expect((await bind(capId(alt), projectId, 9)).statusCode).toBe(201)
+    expect((await bind(capId(main), projectId, 1)).statusCode).toBe(201)
+    // Org scope: a duplicate of a project-scoped capability, a disabled binding, a
+    // capability on a disabled connection, and a capability that lost its entitlement.
+    expect((await bind(capId(main), undefined, 5)).statusCode).toBe(201)
+    expect((await bind(capId(alt), undefined, 50, false)).statusCode).toBe(201)
+    expect((await bind(capId(dark), undefined, 100)).statusCode).toBe(201)
+    expect((await bind(capId(stale), undefined, 80)).statusCode).toBe(201)
+
+    await env.app.inject({ method: 'PATCH', url: `/providers/connections/${dark.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
+    await env.db.modelCapability.update({ where: { id: capId(stale) }, data: { entitlementVerifiedAt: null } })
+
+    const scoped = await env.app.inject({ method: 'GET', url: `/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
+    expect(scoped.statusCode).toBe(200)
+    const scopedBody = scoped.json() as ResolveBody
+    expect(scopedBody.slot).toBe('video_t2v')
+    expect(scopedBody.projectId).toBe(projectId)
+    expect(scopedBody.candidates.map(c => [c.scope, c.priority, c.connectionName])).toEqual([
+      ['project', 9, 'filter-alt'],
+      ['project', 1, 'filter-main'],
+    ])
+
+    // Without a project the project-scoped bindings vanish and the org-scoped
+    // duplicate is the only survivor: the disabled, unverified and turned-off ones stay out.
+    const orgWide = await env.app.inject({ method: 'GET', url: '/bindings/resolve?slot=video_t2v', headers: authHeaders(owner.token) })
+    const orgBody = orgWide.json() as ResolveBody
+    expect(orgBody.projectId).toBeNull()
+    expect(orgBody.candidates.map(c => [c.scope, c.priority, c.connectionName])).toEqual([['organization', 5, 'filter-main']])
+
+    // The console renders every one of these; a refactor must not drop a field.
+    const [candidate] = scopedBody.candidates
+    expect(Object.keys(candidate).sort()).toEqual([
+      'bindingId', 'capabilityId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope',
+    ])
+    expect(candidate).toMatchObject({
+      scope: 'project',
+      priority: 9,
+      capabilityId: capId(alt),
+      provider: 'mock',
+      connectionName: 'filter-alt',
+      model: 'mock-t2v',
+      displayName: 'Mock T2V',
+      modality: 't2v',
+    })
+    expect(candidate.bindingId).toBeTruthy()
+  })
+})

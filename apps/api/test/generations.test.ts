@@ -354,3 +354,96 @@ describe('episode composition', () => {
     expect(events.some(event => event.action === 'composition.trigger')).toBe(true)
   })
 })
+
+// The trigger route resolves candidates with its own copy of the ordering and
+// filtering rules behind GET /bindings/resolve. These pin that copy from the
+// generation side, on fresh episodes so the shared-episode assertions above hold.
+describe('generation candidate resolution', () => {
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  async function addStoryboard(targetEpisodeId: string): Promise<void> {
+    const storyboard = await env.app.inject({
+      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'Rooftop chase', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(storyboard.statusCode).toBe(201)
+  }
+
+  async function newConnection(name: string): Promise<Connection> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    return connection
+  }
+
+  async function bindSlot(slot: string, capabilityId: string, scope?: string, priority = 0): Promise<void> {
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
+    expect(binding.statusCode).toBe(201)
+  }
+
+  const capabilityOf = (connection: Connection, model: string) => connection.capabilities.find(capability => capability.model === model)!.id
+
+  it('enqueues project scope first, priority descending within a scope, deduplicated by capability', async () => {
+    const { projectId, episodeId: freshEpisodeId } = await newEpisode('Resolve Order Drama')
+    await addStoryboard(freshEpisodeId)
+    const first = await newConnection('order-first')
+    const second = await newConnection('order-second')
+    const scoped = await newConnection('order-scoped')
+    const image = (connection: Connection) => capabilityOf(connection, 'mock-image')
+    // image_gen is unbound in beforeAll, so these four are the whole candidate pool.
+    await bindSlot('image_gen', image(scoped), projectId, 1)
+    await bindSlot('image_gen', image(scoped), undefined, 9)
+    await bindSlot('image_gen', image(first), undefined, 5)
+    await bindSlot('image_gen', image(second), undefined, 0)
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${freshEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    expect(res.statusCode).toBe(201)
+    const task = (res.json().batch as BatchDto).tasks[0]
+    const payload = (await queue.getJob(`run-${task.id}-1`))?.data as RunTaskPayload
+    // The project-scoped binding wins despite priority 1, its org-scoped twin is
+    // dropped as a duplicate capability, then org scope follows in priority order.
+    expect(payload.candidates.map(candidate => [candidate.connectionId, candidate.capabilityId])).toEqual([
+      [scoped.id, image(scoped)],
+      [first.id, image(first)],
+      [second.id, image(second)],
+    ])
+    expect(payload.candidates.every(candidate => candidate.provider === 'mock' && candidate.model === 'mock-image')).toBe(true)
+  })
+
+  it('refuses a stage whose only candidate lost its connection or its entitlement', async () => {
+    const { episodeId: connectionEpisodeId } = await newEpisode('Resolve Disabled Drama')
+    await addStoryboard(connectionEpisodeId)
+    const connection = await newConnection('filter-gen')
+    await bindSlot('image_gen', capabilityOf(connection, 'mock-image'))
+    await bindSlot('tts_voice', capabilityOf(connection, 'mock-tts'))
+
+    const whileEnabled = await env.app.inject({ method: 'POST', url: `/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    expect(whileEnabled.statusCode).toBe(201)
+
+    const disabled = await env.app.inject({ method: 'PATCH', url: `/providers/connections/${connection.id}`, headers: authHeaders(ownerToken), payload: { enabled: false } })
+    expect(disabled.statusCode).toBe(200)
+    // A different stage on the same episode, so the idempotency key cannot mask the 409.
+    const afterDisable = await env.app.inject({ method: 'POST', url: `/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    expect(afterDisable.statusCode).toBe(409)
+    expect(afterDisable.json().error).toBe('no verified candidates for slot tts_voice')
+
+    const { episodeId: entitlementEpisodeId } = await newEpisode('Resolve Unverified Drama')
+    const unverifiedConnection = await newConnection('filter-stale-gen')
+    const capabilityId = capabilityOf(unverifiedConnection, 'mock-text')
+    await bindSlot('storyboard_text', capabilityId)
+    await env.db.modelCapability.update({ where: { id: capabilityId }, data: { entitlementVerifiedAt: null } })
+
+    const afterRevoke = await env.app.inject({ method: 'POST', url: `/episodes/${entitlementEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    expect(afterRevoke.statusCode).toBe(409)
+    expect(afterRevoke.json().error).toBe('no verified candidates for slot storyboard_text')
+  })
+})
