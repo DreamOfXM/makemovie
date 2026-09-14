@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DiskStorage, buildObjectKey, extensionFor, synthesizeMockMedia } from '../src/index.js'
+import { DiskStorage, buildObjectKey, extensionFor, extractFrame, frameArgs, synthesizeMockMedia } from '../src/index.js'
 
 describe('disk storage', () => {
   let root: string
@@ -62,5 +62,56 @@ describe('mock media synthesis', () => {
     const out = path.join(root, 'script.bin')
     const meta = await synthesizeMockMedia('text', out)
     expect(meta.mimeType).toBe('text/plain')
+  })
+})
+
+describe('representative frame extraction', () => {
+  let root: string
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), 'studio-frame-'))
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('seeks to the middle of the clip and asks for exactly one frame', () => {
+    const args = frameArgs('/tmp/in.mp4', '/tmp/out.jpg', 6000)
+    expect(args.slice(0, 7)).toEqual(['-y', '-v', 'error', '-ss', '3.000', '-i', '/tmp/in.mp4'])
+    expect(args.slice(7)).toEqual(['-frames:v', '1', '-vf', "scale='min(1024,iw)':-2", '-q:v', '3', '/tmp/out.jpg'])
+  })
+
+  it('clamps a negative or missing duration to the first frame', () => {
+    expect(frameArgs('in.mp4', 'out.jpg', 0)[4]).toBe('0.000')
+    expect(frameArgs('in.mp4', 'out.jpg', -500)[4]).toBe('0.000')
+  })
+
+  it('writes a JPEG when given a real clip', async () => {
+    const clip = path.join(root, 'clip.mp4')
+    await synthesizeMockMedia('t2v', clip, { durationMs: 6000 })
+    const frame = path.join(root, 'frame.jpg')
+    await extractFrame(clip, frame, 6000)
+    const bytes = await readFile(frame)
+    expect(bytes.subarray(0, 3).toString('hex')).toBe('ffd8ff')
+    expect(bytes.byteLength).toBeGreaterThan(1000)
+  })
+
+  it('lands mid-clip rather than on the first frame', async () => {
+    const clip = path.join(root, 'clip.mp4')
+    await synthesizeMockMedia('t2v', clip, { durationMs: 6000 })
+    const first = path.join(root, 'first.jpg')
+    const middle = path.join(root, 'middle.jpg')
+    await extractFrame(clip, first, 0)
+    await extractFrame(clip, middle, 6000)
+    expect(Buffer.compare(await readFile(first), await readFile(middle))).not.toBe(0)
+  })
+
+  it('probes the duration when the caller does not know it', async () => {
+    const clip = path.join(root, 'clip.mp4')
+    await synthesizeMockMedia('t2v', clip, { durationMs: 4000 })
+    const frame = path.join(root, 'probed.jpg')
+    await extractFrame(clip, frame)
+    expect((await readFile(frame)).subarray(0, 3).toString('hex')).toBe('ffd8ff')
   })
 })

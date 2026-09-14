@@ -117,6 +117,31 @@ export class FfmpegComposer implements Composer {
   }
 }
 
+/**
+ * Builds the ffmpeg argument list for pulling one representative frame out of a
+ * clip. The seek lands mid-clip: a first frame is usually a fade-in and says
+ * nothing about the shot. `min(1024,iw)` caps the width without ever upscaling,
+ * and `-2` keeps the aspect ratio at an even height, which JPEG requires. A
+ * duration of 0 — probe failed, or the input is not a clip — falls back to the
+ * first frame rather than failing.
+ */
+export function frameArgs(inputPath: string, outputPath: string, durationMs: number): string[] {
+  return [
+    '-y', '-v', 'error',
+    '-ss', Math.max(0, durationMs / 1000 / 2).toFixed(3),
+    '-i', inputPath,
+    '-frames:v', '1',
+    '-vf', "scale='min(1024,iw)':-2",
+    '-q:v', '3',
+    outputPath,
+  ]
+}
+
+export async function extractFrame(inputPath: string, outputPath: string, durationMs?: number): Promise<void> {
+  const known = durationMs ?? await probeDurationMs(inputPath)
+  await run('ffmpeg', frameArgs(inputPath, outputPath, known))
+}
+
 export interface SynthesizedMedia {
   mimeType: string
   width?: number
