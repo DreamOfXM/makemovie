@@ -6,6 +6,7 @@ import { composeEpisode } from './compose.js'
 import { loadWorkerConfig } from './config.js'
 import type { PipelineDeps } from './deps.js'
 import { runTask } from './run-task.js'
+import { ModelQualityChecker } from './visual-audit.js'
 
 const config = loadWorkerConfig()
 const db = new PrismaClient({ datasources: { db: { url: config.databaseUrl } } })
@@ -18,6 +19,10 @@ const deps: PipelineDeps = {
   masterKey: config.masterKey,
   qcMode: config.qcMode,
   enqueueJob: payload => enqueue(queue, payload),
+  // Opt-in: every other mode leaves this unset and run-task falls back to the hash
+  // placeholder. Model mode costs a vision-model call per artifact and is not
+  // deterministic, so it is never a CI default.
+  checker: config.qcMode === 'model' ? new ModelQualityChecker({ db, masterKey: config.masterKey }) : undefined,
 }
 
 const worker = new Worker<PipelinePayload>(

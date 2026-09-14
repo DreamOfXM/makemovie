@@ -13,6 +13,8 @@ export type QcKind = 'fake-qc' | 'visual-audit'
 
 /** Captured after the artifact is stored, so a checker never has to re-download it. */
 export interface QcSubject {
+  organizationId: string
+  projectId: string
   stage: Stage
   modality: ModelModality
   mimeType: string
@@ -59,6 +61,11 @@ export class HashQualityChecker implements QualityChecker {
   private readonly mode: QcMode
 
   constructor(taskId: string, attempt: number, mode: QcMode) {
+    // Without this, mode=model with no checker supplied would fall through to the
+    // hash and the pipeline would look audited when it was not.
+    if (mode === 'model') {
+      throw new Error('HashQualityChecker cannot serve STUDIO_QC_MODE=model: supply a ModelQualityChecker')
+    }
     this.taskId = taskId
     this.attempt = attempt
     this.mode = mode

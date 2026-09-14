@@ -1,14 +1,13 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { Prisma, syncBatchStatus, type ModelCapability as CapabilityRow } from '@studio/db'
-import type { ModelModality } from '@studio/domain'
+import { Prisma, syncBatchStatus } from '@studio/db'
 import type { RunTaskCandidate, RunTaskPayload } from '@studio/jobs'
 import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media'
-import { createAdapter, type ModelCapability, type PollResult, type ProviderAdapter, type ProviderRequest } from '@studio/providers'
+import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
 import type { PipelineDeps } from './deps.js'
+import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
 
 export const MAX_ATTEMPTS = 3
@@ -25,8 +24,6 @@ interface Material {
   durationMs?: number
 }
 
-const POLL_INTERVAL_MS = 250
-const POLL_TIMEOUT_MS = 30_000
 const MOCK_DURATION_MS = 1_000
 
 // ffmpeg chooses the container from the output file extension, so the temp name has to
@@ -50,7 +47,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
     try {
       outcome = await runCandidate(task, candidate, payload, deps)
     } catch (error) {
-      outcome = { status: 'next', error: `${label(candidate)}: ${message(error)}` }
+      outcome = { status: 'next', error: `${label(candidate)}: ${errorMessage(error)}` }
     }
     if (outcome.status === 'next') {
       errors.push(outcome.error)
@@ -83,7 +80,10 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
   const adapter = createAdapter(connection.provider, { apiKey, baseUrl: connection.baseUrl })
 
   const submitted = await adapter.submit(capability, request)
-  const result = await pollToSettled(adapter, capability, submitted.taskId, deps)
+  const result = await pollToSettled(adapter, capability, submitted.taskId, {
+    intervalMs: deps.pollIntervalMs,
+    timeoutMs: deps.pollTimeoutMs,
+  })
   if (result.status === 'failed') return { status: 'next', error: `${label(candidate)}: ${result.error ?? 'provider reported failure'}` }
 
   const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
@@ -117,6 +117,8 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
 
     const checker = deps.checker ?? new HashQualityChecker(task.id, payload.attempt, deps.qcMode)
     const verdict = await checker.check({
+      organizationId: task.organizationId,
+      projectId: task.batch.episode.project.id,
       stage: task.stage,
       modality: capability.modality,
       mimeType: material.mimeType,
@@ -197,18 +199,6 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
   }
 }
 
-async function pollToSettled(adapter: ProviderAdapter, capability: ModelCapability, providerTaskId: string, deps: PipelineDeps): Promise<PollResult> {
-  const intervalMs = deps.pollIntervalMs ?? POLL_INTERVAL_MS
-  const timeoutMs = deps.pollTimeoutMs ?? POLL_TIMEOUT_MS
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const result = await adapter.poll(capability, providerTaskId)
-    if (result.status !== 'running') return result
-    if (Date.now() + intervalMs > deadline) return { status: 'failed', error: `provider task ${providerTaskId} did not settle within ${timeoutMs}ms` }
-    await sleep(intervalMs)
-  }
-}
-
 async function materialize(result: PollResult, modality: string, workdir: string): Promise<Material> {
   const artifactUrl = result.artifactUrl
   if (artifactUrl?.startsWith('mock://')) {
@@ -240,26 +230,10 @@ function promptOf(request: ProviderRequest): string {
   return typeof request.input.prompt === 'string' ? request.input.prompt : ''
 }
 
-function toCapability(provider: string, row: CapabilityRow): ModelCapability {
-  return {
-    provider,
-    model: row.model,
-    modality: row.modality as ModelModality,
-    acceptsFirstFrame: row.acceptsFirstFrame,
-    acceptsReferenceImages: row.acceptsReferenceImages,
-    maxReferenceImages: row.maxReferenceImages,
-    entitlementVerifiedAt: row.entitlementVerifiedAt,
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function label(candidate: RunTaskCandidate): string {
   return `${candidate.provider}/${candidate.model}`
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }

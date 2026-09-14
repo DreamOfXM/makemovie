@@ -1,6 +1,6 @@
 import { loadConfig } from '@studio/config'
 
-export type QcMode = 'random' | 'pass' | 'fail'
+export type QcMode = 'random' | 'pass' | 'fail' | 'model'
 
 export interface WorkerConfig {
   databaseUrl: string
@@ -23,6 +23,6 @@ export function loadWorkerConfig(env: Record<string, string | undefined> = proce
 
 function qcModeFrom(value: string | undefined): QcMode {
   if (value === undefined || value === '') return 'random'
-  if (value === 'random' || value === 'pass' || value === 'fail') return value
-  throw new Error(`STUDIO_QC_MODE must be one of random|pass|fail, got "${value}"`)
+  if (value === 'random' || value === 'pass' || value === 'fail' || value === 'model') return value
+  throw new Error(`STUDIO_QC_MODE must be one of random|pass|fail|model, got "${value}"`)
 }
