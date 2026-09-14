@@ -11,6 +11,8 @@ import {
   isKnownProvider,
   listCatalogs,
   MOCK_VLM_VERDICT,
+  MOCK_SCRIPT_TEXT,
+  MOCK_STORYBOARD_JSON,
   MockProviderAdapter,
   resetDashScopeSyncResults,
   resetMockTasks,
@@ -109,6 +111,28 @@ describe('mock adapter lifecycle', () => {
     const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
     const result = await adapter.poll(capability({ modality: 'text' }), 'missing')
     expect(result.status).toBe('failed')
+  })
+
+  it('answers script and storyboard polls with parseable text', async () => {
+    const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
+
+    const script = capability({ provider: 'mock', model: 'mock-script', modality: 'text' })
+    const { taskId: scriptTask } = await adapter.submit(script, { model: 'mock-script', input: {}, parameters: {} })
+    expect((await adapter.poll(script, scriptTask)).status).toBe('running')
+    const scriptDone = await adapter.poll(script, scriptTask)
+    expect(scriptDone).toEqual({ status: 'completed', text: MOCK_SCRIPT_TEXT })
+
+    const board = capability({ provider: 'mock', model: 'mock-storyboard', modality: 'text' })
+    const { taskId: boardTask } = await adapter.submit(board, { model: 'mock-storyboard', input: {}, parameters: {} })
+    await adapter.poll(board, boardTask)
+    const boardDone = await adapter.poll(board, boardTask)
+    expect(boardDone.status).toBe('completed')
+    expect(boardDone.text).toBe(MOCK_STORYBOARD_JSON)
+    const shots = JSON.parse(boardDone.text!) as Array<Record<string, unknown>>
+    expect(Array.isArray(shots)).toBe(true)
+    expect(shots.length).toBeGreaterThan(0)
+    expect(shots[0]).toHaveProperty('title')
+    expect(shots[0]).toHaveProperty('description')
   })
 })
 

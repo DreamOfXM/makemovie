@@ -45,6 +45,8 @@ const mock: ProviderCatalog = {
   catalogVersion: '2026-09',
   models: [
     { model: 'mock-text', displayName: 'Mock Text', modality: 'text' },
+    { model: 'mock-script', displayName: 'Mock Scriptwriter', modality: 'text' },
+    { model: 'mock-storyboard', displayName: 'Mock Storyboard Artist', modality: 'text' },
     { model: 'mock-vlm', displayName: 'Mock Vision', modality: 'vlm' },
     { model: 'mock-image', displayName: 'Mock Image', modality: 'image' },
     { model: 'mock-t2v', displayName: 'Mock T2V', modality: 't2v' },
