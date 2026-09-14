@@ -34,6 +34,21 @@ describe('disk storage', () => {
     expect([...(await storage.read(key))]).toEqual([1, 2, 3])
   })
 
+  it('opens a stored object as a stream carrying its size', async () => {
+    const key = 'org-1/proj-1/ep-1/VIDEO/task-1/v1.mp4'
+    await storage.put(key, new Uint8Array([9, 8, 7, 6]), 'video/mp4')
+    const opened = await storage.open(key)
+    expect(opened).not.toBeNull()
+    expect(opened!.sizeBytes).toBe(4)
+    const chunks: Buffer[] = []
+    for await (const chunk of opened!.body) chunks.push(chunk as Buffer)
+    expect([...Buffer.concat(chunks)]).toEqual([9, 8, 7, 6])
+  })
+
+  it('resolves null for an object that was never stored', async () => {
+    expect(await storage.open('org-1/proj-1/ep-1/VIDEO/task-1/v9.mp4')).toBeNull()
+  })
+
   it('rejects keys that escape the storage root', () => {
     expect(() => storage.localPath('../../etc/passwd')).toThrow(/escapes storage root/)
   })

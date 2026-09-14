@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { Readable } from 'node:stream'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
@@ -27,10 +29,26 @@ export interface StoredObject {
   mimeType: string
 }
 
+export interface StorageStream {
+  body: Readable
+  /**
+   * Carried beside the body because the `MediaArtifact` row has no size column, so the
+   * backend is the only place a content-length can come from. S3 returns it on the same
+   * `GetObject` call that returns the body, so this costs no extra round-trip.
+   */
+  sizeBytes: number
+}
+
 export interface Storage {
   put(key: string, data: Uint8Array, mimeType: string): Promise<StoredObject>
   read(key: string): Promise<Uint8Array>
   exists(key: string): Promise<boolean>
+  /**
+   * Opens the object for HTTP delivery. Resolves `null` when it is absent rather than
+   * throwing: the API turns that into its `artifact file not found` response, and a
+   * missing object is an expected outcome here, not a fault.
+   */
+  open(key: string): Promise<StorageStream | null>
   /** Absolute on-disk location, for tools (ffmpeg) that need a real file. */
   localPath(key: string): string
 }
@@ -75,6 +93,17 @@ export class DiskStorage implements Storage {
     } catch {
       return false
     }
+  }
+
+  async open(key: string): Promise<StorageStream | null> {
+    const target = this.localPath(key)
+    let sizeBytes: number
+    try {
+      sizeBytes = (await stat(target)).size
+    } catch {
+      return null
+    }
+    return { body: createReadStream(target), sizeBytes }
   }
 }
 
