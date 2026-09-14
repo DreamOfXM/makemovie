@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
 import { createPipelineQueue, type ComposeEpisodePayload, type RunTaskPayload } from '@studio/jobs'
 import { startTestEnv, type TestEnv } from './env.js'
 
@@ -274,11 +272,9 @@ describe('task cancellation', () => {
 
 describe('artifact content', () => {
   it('streams stored bytes with their mime type and 404s on a missing file', async () => {
-    const artifactDir = env.artifactsDir
     const objectKey = `${organizationId}/${projectId}/${episodeId}/video/${storyboardIds[0]}/v1.png`
     const bytes = Buffer.from('mock png bytes')
-    mkdirSync(path.dirname(path.join(artifactDir, objectKey)), { recursive: true })
-    writeFileSync(path.join(artifactDir, objectKey), bytes)
+    await env.app.storage.put(objectKey, bytes, 'image/png')
 
     const artifact = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: videoTaskId, stage: 'VIDEO', objectKey, checksum: 'checksum-1', mimeType: 'image/png', version: 1, width: 320, height: 240 },

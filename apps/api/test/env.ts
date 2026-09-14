@@ -34,8 +34,6 @@ async function acquirePort(): Promise<number> {
 export interface TestEnv {
   app: FastifyInstance
   db: PrismaClient
-  /** Temporary artifact root the booted app streams from. */
-  artifactsDir: string
   register(email: string, organizationName: string): Promise<{ token: string; organization: { id: string; name: string }; role: string }>
   authHeaders(token: string): Record<string, string>
   stop(): Promise<void>
@@ -71,7 +69,6 @@ export async function startTestEnv(): Promise<TestEnv> {
   return {
     app,
     db,
-    artifactsDir,
     authHeaders(token: string) {
       return { authorization: `Bearer ${token}` }
     },

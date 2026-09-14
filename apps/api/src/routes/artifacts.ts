@@ -1,8 +1,5 @@
-import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
 import type { FastifyInstance } from 'fastify'
 import type { MediaArtifact } from '@studio/db'
-import { DiskStorage } from '@studio/media'
 import { requirePermission } from '../plugins/auth.js'
 
 export interface ArtifactDto {
@@ -35,13 +32,11 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const artifact = await app.db.mediaArtifact.findFirst({ where: { id: request.params.artifactId, organizationId: auth.organizationId } })
       if (!artifact) return reply.code(404).send({ error: 'artifact not found' })
-      const storage = new DiskStorage(app.config.artifactsDir)
-      if (!(await storage.exists(artifact.objectKey))) return reply.code(404).send({ error: 'artifact file not found' })
-      const file = storage.localPath(artifact.objectKey)
-      const stats = await stat(file)
+      const stored = await app.storage.open(artifact.objectKey)
+      if (!stored) return reply.code(404).send({ error: 'artifact file not found' })
       reply.header('content-type', artifact.mimeType)
-      reply.header('content-length', String(stats.size))
-      return reply.send(createReadStream(file))
+      reply.header('content-length', String(stored.sizeBytes))
+      return reply.send(stored.body)
     },
   )
 }
