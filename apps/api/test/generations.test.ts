@@ -545,3 +545,46 @@ describe('asset generation trigger', () => {
     expect(res.json()).toEqual({ error: 'episode has no assets to generate' })
   })
 })
+
+describe('storyboard media', () => {
+  it('exposes each storyboard\'s latest succeeded first-frame and video, and null when absent', async () => {
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 7, title: 'Media EP' } })
+    expect(episode.statusCode).toBe(201)
+    const mediaEpisodeId = episode.json().id as string
+
+    const storyboardIdsLocal: string[] = []
+    for (const [number, title] of [[1, 'Media SB1'], [2, 'Media SB2']] as const) {
+      const created = await env.app.inject({
+        method: 'POST', url: `/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number, title, durationMs: 5000, description: 'a quiet street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+      })
+      expect(created.statusCode).toBe(201)
+      storyboardIdsLocal.push(created.json().id as string)
+    }
+    const [withMedia, withoutMedia] = storyboardIdsLocal
+
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId: mediaEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
+    const firstFrameTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${mediaEpisodeId}:IMAGE:${withMedia}` },
+    })
+    const firstFrame = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: firstFrameTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/media-ep/ff/v1.png`, checksum: 'ff-1', mimeType: 'image/png', version: 1, width: 320, height: 240 },
+    })
+    const videoTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', idempotencyKey: `${mediaEpisodeId}:VIDEO:${withMedia}` },
+    })
+    const video = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: videoTask.id, stage: 'VIDEO', objectKey: `${organizationId}/media-ep/video/v1.mp4`, checksum: 'v-1', mimeType: 'video/mp4', version: 1, durationMs: 5000 },
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    const rows = res.json() as Array<{ id: string; firstFrame: ArtifactDto | null; video: ArtifactDto | null }>
+    const populated = rows.find(row => row.id === withMedia)!
+    expect(populated.firstFrame).toMatchObject({ id: firstFrame.id, mimeType: 'image/png', downloadUrl: `/artifacts/${firstFrame.id}/content` })
+    expect(populated.video).toMatchObject({ id: video.id, mimeType: 'video/mp4', downloadUrl: `/artifacts/${video.id}/content` })
+    const bare = rows.find(row => row.id === withoutMedia)!
+    expect(bare.firstFrame).toBeNull()
+    expect(bare.video).toBeNull()
+  })
+})

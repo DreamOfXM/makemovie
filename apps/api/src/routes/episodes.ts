@@ -4,6 +4,7 @@ import { can, canTransition, isWorkflowStatus, workflowStatuses, type Action, ty
 import { recordAudit } from '../lib/audit.js'
 import { authenticate, requirePermission } from '../plugins/auth.js'
 import type { AuthContext } from '../types.js'
+import { toArtifactDto, type ArtifactDto } from './artifacts.js'
 
 function toDbStatus(status: WorkflowStatus): string {
   return status.toUpperCase()
@@ -19,6 +20,26 @@ function isPrismaUniqueViolation(error: unknown): boolean {
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
+}
+
+// A task's idempotency key is `${episodeId}:${stage}:${entityId}`, and for the per-storyboard
+// IMAGE/VIDEO stages the entity is the storyboard, so the third segment maps a succeeded task
+// back to its storyboard. Returns the latest succeeded first-frame and video artifact per storyboard.
+async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }> {
+  const firstFrame = new Map<string, ArtifactDto>()
+  const video = new Map<string, ArtifactDto>()
+  const tasks = await db.generationTask.findMany({
+    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO'] }, status: 'SUCCEEDED' },
+    include: { artifacts: { orderBy: { version: 'desc' }, take: 1 } },
+  })
+  for (const task of tasks) {
+    const storyboardId = task.idempotencyKey?.split(':')[2]
+    const artifact = task.artifacts[0]
+    if (!storyboardId || !artifact) continue
+    if (task.stage === 'FIRST_FRAME') firstFrame.set(storyboardId, toArtifactDto(artifact))
+    else if (task.stage === 'VIDEO') video.set(storyboardId, toArtifactDto(artifact))
+  }
+  return { firstFrame, video }
 }
 
 function statusAction(target: WorkflowStatus): Action {
@@ -120,7 +141,13 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
-      return app.db.storyboard.findMany({ where: { episodeId: episode.id }, include: { assets: true }, orderBy: { number: 'asc' } })
+      const storyboards = await app.db.storyboard.findMany({ where: { episodeId: episode.id }, include: { assets: true }, orderBy: { number: 'asc' } })
+      const media = await storyboardMedia(app.db, episode.id)
+      return storyboards.map(storyboard => ({
+        ...storyboard,
+        firstFrame: media.firstFrame.get(storyboard.id) ?? null,
+        video: media.video.get(storyboard.id) ?? null,
+      }))
     },
   )
 
