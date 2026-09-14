@@ -3,6 +3,7 @@ import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, Provider
 import { sanitizeError } from './types.js'
 
 const TEXT_PATH = '/api/v1/services/aigc/text-generation/generation'
+const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
 const IMAGE_PATH = '/api/v1/services/aigc/text2image/image-synthesis'
 const VIDEO_PATH = '/api/v1/services/aigc/video-generation/video-synthesis'
 const TASK_PATH = '/api/v1/tasks'
@@ -27,12 +28,31 @@ export function buildSubmitRequest(
   }
   const prompt = typeof request.input.prompt === 'string' ? request.input.prompt : ''
 
-  if (capability.modality === 'text' || capability.modality === 'vlm') {
+  if (capability.modality === 'text') {
     const messages = Array.isArray(request.input.messages) && request.input.messages.length > 0
       ? request.input.messages
       : [{ role: 'user', content: prompt }]
     return {
       url: `${base}${TEXT_PATH}`,
+      method: 'POST',
+      headers,
+      body: { model: request.model, input: { messages }, parameters: request.parameters },
+    }
+  }
+
+  // UNVERIFIED: no credentials. The multimodal endpoint takes message content as
+  // an array of typed parts rather than a bare string, and answers under
+  // output.choices. Whether a base64 data URL is accepted where a public image
+  // URL is documented is also untested — the visual audit relies on it.
+  if (capability.modality === 'vlm') {
+    const images = Array.isArray(request.input.images)
+      ? request.input.images.filter((image): image is string => typeof image === 'string')
+      : []
+    const messages = Array.isArray(request.input.messages) && request.input.messages.length > 0
+      ? request.input.messages
+      : [{ role: 'user', content: [...images.map(image => ({ image })), { text: prompt }] }]
+    return {
+      url: `${base}${VLM_PATH}`,
       method: 'POST',
       headers,
       body: { model: request.model, input: { messages }, parameters: request.parameters },
@@ -111,6 +131,28 @@ function extractArtifactUrl(output: Record<string, unknown>): string | undefined
   return undefined
 }
 
+/**
+ * DashScope answers in three shapes: `output.text` on the text endpoint's default
+ * result format, `output.choices[0].message.content` as a bare string when
+ * `result_format: 'message'`, and that same content as an array of `{text}` parts
+ * on the multimodal endpoint. Unrecognised shapes yield an empty string — deciding
+ * what a missing answer means is the caller's job, not this one's.
+ */
+export function extractDashScopeText(output: Record<string, unknown>): string {
+  if (typeof output.text === 'string') return output.text
+  const choices = output.choices
+  if (!Array.isArray(choices) || choices.length === 0) return ''
+  const first = choices[0] as { message?: unknown } | null
+  if (typeof first?.message !== 'object' || first.message === null) return ''
+  const content = (first.message as { content?: unknown }).content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(part => (typeof part === 'object' && part !== null ? (part as { text?: unknown }).text : undefined))
+    .filter((text): text is string => typeof text === 'string')
+    .join('')
+}
+
 interface SyncTextResult {
   text: string
 }
@@ -163,7 +205,7 @@ export class DashScopeAdapter implements ProviderAdapter {
 
     if (capability.modality === 'text' || capability.modality === 'vlm') {
       const output = (body?.output ?? {}) as Record<string, unknown>
-      const text = typeof output.text === 'string' ? output.text : ''
+      const text = extractDashScopeText(output)
       const taskId = `ds-sync-${++syncCounter}`
       syncResults.set(taskId, { text })
       return { taskId }

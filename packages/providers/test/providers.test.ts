@@ -6,10 +6,13 @@ import {
   buildSubmitRequest,
   createAdapter,
   DashScopeAdapter,
+  extractDashScopeText,
   getCatalog,
   isKnownProvider,
   listCatalogs,
+  MOCK_VLM_VERDICT,
   MockProviderAdapter,
+  resetDashScopeSyncResults,
   resetMockTasks,
   sanitizeError,
   validateReferenceRequest,
@@ -39,6 +42,7 @@ describe('catalog', () => {
     expect(catalog).toBeDefined()
     const modalities = new Set(catalog!.models.map(m => m.modality))
     expect(modalities.has('text')).toBe(true)
+    expect(modalities.has('vlm')).toBe(true)
     expect(modalities.has('image')).toBe(true)
     expect(modalities.has('t2v')).toBe(true)
     expect(modalities.has('i2v')).toBe(true)
@@ -91,6 +95,16 @@ describe('mock adapter lifecycle', () => {
     expect(done.artifactUrl).toBe(`mock://artifacts/${taskId}/i2v`)
   })
 
+  it('answers a vlm poll with a verdict instead of an artifact', async () => {
+    const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
+    const cap = capability({ provider: 'mock', model: 'mock-vlm', modality: 'vlm' })
+    const { taskId } = await adapter.submit(cap, { model: 'mock-vlm', input: { prompt: 'judge this frame' }, parameters: {} })
+    expect((await adapter.poll(cap, taskId)).status).toBe('running')
+    const done = await adapter.poll(cap, taskId)
+    expect(done).toEqual({ status: 'completed', text: MOCK_VLM_VERDICT })
+    expect(JSON.parse(done.text!)).toMatchObject({ score: 0.9 })
+  })
+
   it('poll of unknown task fails', async () => {
     const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
     const result = await adapter.poll(capability({ modality: 'text' }), 'missing')
@@ -138,6 +152,30 @@ describe('dashscope request building', () => {
     })
     const body = req.body as { input: { messages: Array<{ role: string; content: string }> } }
     expect(body.input.messages).toEqual([{ role: 'user', content: 'write episode 1' }])
+  })
+
+  it('builds a synchronous multimodal request for vlm', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'vlm', model: 'qwen-vl-max' }), {
+      model: 'qwen-vl-max',
+      input: { prompt: 'score this frame', images: ['data:image/jpeg;base64,/9j/4AAQ'] },
+      parameters: {},
+    })
+    expect(req.url).toBe(`${base}/api/v1/services/aigc/multimodal-generation/generation`)
+    expect(req.headers['X-DashScope-Async']).toBeUndefined()
+    const body = req.body as { input: { messages: Array<{ role: string; content: unknown }> } }
+    expect(body.input.messages).toEqual([
+      { role: 'user', content: [{ image: 'data:image/jpeg;base64,/9j/4AAQ' }, { text: 'score this frame' }] },
+    ])
+  })
+
+  it('passes caller-built vlm messages through untouched', () => {
+    const messages = [{ role: 'user', content: [{ text: 'custom audit prompt' }] }]
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'vlm' }), {
+      model: 'qwen-vl-max',
+      input: { prompt: 'ignored', messages },
+      parameters: {},
+    })
+    expect((req.body as { input: { messages: unknown } }).input.messages).toEqual(messages)
   })
 
   it('builds an async image request', () => {
@@ -247,6 +285,62 @@ describe('dashscope adapter probe', () => {
     fetchMock.mockRejectedValue(new Error('fetch failed'))
     const result = await adapter().probe(capability({ modality: 'i2v', acceptsFirstFrame: true }))
     expect(result).toEqual({ ok: false, status: 0, message: 'fetch failed' })
+  })
+})
+
+describe('dashscope adapter submit and poll', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    resetDashScopeSyncResults()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads a vlm verdict out of output.choices on the multimodal endpoint', async () => {
+    const verdict = '{"score":0.42,"reasons":["subject is out of focus"]}'
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: [{ text: verdict }] } }] },
+        request_id: 'r-9',
+      }),
+    })
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'vlm', model: 'qwen-vl-max' })
+    const { taskId } = await adapter.submit(cap, {
+      model: 'qwen-vl-max',
+      input: { prompt: 'score this frame', images: ['data:image/jpeg;base64,/9j/4AAQ'] },
+      parameters: {},
+    })
+    expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', text: verdict })
+  })
+})
+
+describe('extractDashScopeText', () => {
+  it('reads all three response shapes', () => {
+    expect(extractDashScopeText({ text: 'plain answer' })).toBe('plain answer')
+    expect(extractDashScopeText({ choices: [{ message: { content: 'a string' } }] })).toBe('a string')
+    expect(extractDashScopeText({ choices: [{ message: { content: [{ text: 'two' }, { text: ' parts' }] } }] })).toBe('two parts')
+  })
+
+  it('keeps text parts and drops the rest', () => {
+    expect(extractDashScopeText({ choices: [{ message: { content: [{ image: 'x' }, { text: 'kept' }] } }] })).toBe('kept')
+  })
+
+  it('yields an empty string for shapes it does not recognise', () => {
+    expect(extractDashScopeText({})).toBe('')
+    expect(extractDashScopeText({ choices: [] })).toBe('')
+    expect(extractDashScopeText({ choices: [{}] })).toBe('')
+    expect(extractDashScopeText({ choices: [{ message: null }] })).toBe('')
+    expect(extractDashScopeText({ choices: [{ message: { content: 42 } }] })).toBe('')
+    expect(extractDashScopeText({ choices: [{ message: { content: 'x' } }, { message: { content: 'ignored' } }] })).toBe('x')
   })
 })
 
