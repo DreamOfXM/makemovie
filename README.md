@@ -13,9 +13,11 @@ Working today:
 - Database-backed sessions with Argon2id password hashing and per-organization switching
 - **Model capability center**: provider catalogs, encrypted API keys, entitlement probes, and capability-slot bindings with ordered fallback resolution
 - **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it, and a script can be edited by hand (an edit resets it to draft for re-approval)
-- **Episode assets**: author characters, props, and scenes with a description, generate a reference image for each through the bound image model, and approve the version you want — a succeeded generation becomes a draft asset version linked to its artifact
+- **Episode assets**: author characters, props, and scenes with a description, generate a reference image for each through the bound image model, approve the version you want, and bind assets to the storyboard shots that use them — a succeeded generation becomes a draft asset version linked to its artifact
 - **Generation pipeline**: per-stage batches (script, asset, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
-- **AI content generation**: the script and storyboard stages write real generated content back into the episode — the script from the approved source, the storyboard shots from the approved script — each gated on its upstream approval. This is the first phase of a fully automated, human-on-the-loop pipeline
+- **AI content generation**: the script and storyboard stages write real generated content back into the episode — the script from the approved source, the storyboard shots from the approved script — each gated on its upstream approval
+- **Automated orchestration**: a one-click **Advance pipeline** runs the next eligible stage, and the worker auto-advances on its own whenever a batch completes, chaining script → storyboard → asset → first frames → video. Each hop is gated on the approval it needs (a script needs an approved source; storyboards, images, video, and audio need an approved script), so the chain pauses for a human instead of spending money on unapproved visuals
+- **Edit + regenerate**: every stage's output stays editable, and re-running a stage after an edit creates a new revision rather than overwriting the old one — the prior batch is kept for traceability and the newest revision is what the console shows
 - **Model-driven visual audit** (`STUDIO_QC_MODE=model`): images are judged by the model bound to the `visual_audit` slot and videos by one frame extracted mid-clip. The default gate is still a deterministic hash placeholder that names itself `fake-qc`. Text and audio are **not** audited — they fail the task rather than pretend to pass
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
 - **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
@@ -28,8 +30,10 @@ Working today:
 
 Designed, not yet built:
 
-- Automatic stage orchestration — one-click end-to-end from an approved source through composition — and downstream regeneration when a script or storyboard is edited
-- Storyboard authoring gates (binding approved assets to storyboards) and upstream-approval enforcement for the media (image/video/audio) stages
+- The automated chain stops at video: composition is still a deliberate human click, and audio (voice/music) is triggerable but not auto-advanced
+- Regenerate is explicit per stage, not an auto-cascade — editing a script does not silently re-run every downstream stage, because that would spend on visuals nobody asked to regenerate; a human regenerates the stages they want
+- Assets are still authored by hand (their reference images are AI-generated); automatically extracting characters, props, and scenes from the script is not built
+- The deep content audits (source coverage, continuity across shots, audio sync) and the live video / vision-model audit paths
 
 ## Monorepo
 
@@ -39,6 +43,7 @@ Designed, not yet built:
 - `packages/domain` — state machines, RBAC matrix, capability slots and bind rules
 - `packages/db` — Prisma schema, migrations, and batch status rollup
 - `packages/jobs` — queue names and job payload contracts shared by the API and the worker
+- `packages/pipeline` — generation orchestration (stage gates, prompt building, batching, auto-advance, regenerate) shared by the API trigger and the worker relay
 - `packages/providers` — provider catalogs and adapters (dashscope, mock)
 - `packages/security` — Argon2id hashing, token hashing, AES-256-GCM secret encryption
 - `packages/media` — object storage (disk and S3 backends), mock media synthesis, and FFmpeg composition
@@ -68,12 +73,12 @@ Open http://localhost:3010, create a workspace, then configure models in **Model
 1. Add a provider connection (API keys are encrypted at rest with `STUDIO_MASTER_KEY`).
 2. Run **Probe entitlements** to verify which models your key can actually use.
 3. Bind verified models to capability slots (script, storyboard, image, video T2V/I2V/R2V, voice, music, visual audit). Project-level bindings override organization-level ones; `Resolve candidates` shows the ordered fallback list the pipeline will use.
-4. Open a project, select an episode, and use the **Generation** panel: pick a stage and **Trigger generation**. Each task runs through the resolved candidates, is quality-gated (up to three attempts), and its artifacts become previewable in the panel while it polls for status.
+4. Open a project, select an episode, and drive the pipeline. **Advance pipeline** (in the episode stepper) runs the next eligible stage and the worker keeps the chain moving on its own once a batch completes; or use the **Generation** panel to **Trigger generation** for a single stage by hand. Each task runs through the resolved candidates, is quality-gated (up to three attempts), and its artifacts become previewable in the panel while it polls for status.
 5. **Compose episode** concatenates the newest succeeded video artifact of every storyboard into a single deliverable.
 6. In the **Sources & scripts** panel, upload the source document, approve it, then derive a script version from the approved source and approve that — approving a script re-points every storyboard of the episode at it, so downstream stages trace one writing.
 7. In the **Deliveries** panel, package the episode into a delivery manifest — packaging is refused with reasons until the composition has completed and every storyboard has a succeeded video — then inspect or download the manifest, and accept it or reject it with a reason.
 
-Triggering a stage twice returns the existing batch instead of queueing duplicate work, so a retry needs a new episode.
+Triggering a stage twice returns the existing batch instead of queueing duplicate work. To re-run a stage after editing its upstream, use **Regenerate** in the Generation panel: it creates a new revision (the prior batch is kept for traceability) instead of colliding with the first run.
 
 Use the **Mock Provider** to explore the whole flow without any API key.
 
@@ -106,11 +111,11 @@ DashScope image generation is different: the Qwen-Image path (`qwen-image-3.0` a
 pnpm test
 ```
 
-API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, the model-driven visual audit (a missing or unverified auditor, a rejected artifact, an approved image and an approved video frame, and a provider fault), and composition, and shell out to a real `ffmpeg`. Media tests cover both storage backends — the disk one against a temporary directory, the S3 one against an in-process fake server, which is as far as it can be tested without a real object store. No test calls a live multimodal provider; the auditor in the tests is the mock, which answers a fixed score it has not earned by looking at anything.
+API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. They also pin the orchestration: the upstream-approval gates on the content and media stages, the one-click `run-pipeline` advance (including skipping a stage whose first frames already ran), and regenerate creating a new revision while leaving the base batch intact. Worker tests cover candidate fallback, the quality gate with rework attempts, the model-driven visual audit (a missing or unverified auditor, a rejected artifact, an approved image and an approved video frame, and a provider fault), composition, the AI content write-back (a script version and storyboard rows from the approved upstream), and auto-advance relaying a completed batch into the next stage — and shell out to a real `ffmpeg`. Media tests cover both storage backends — the disk one against a temporary directory, the S3 one against an in-process fake server, which is as far as it can be tested without a real object store. No test calls a live multimodal provider; the auditor in the tests is the mock, which answers a fixed score it has not earned by looking at anything.
 
 ## Documentation
 
-- `ARCHITECTURE.md` — domain model, model capability center, state machine, capability policy, queue design, quality gates, storage, security
+- `ARCHITECTURE.md` — domain model, model capability center, state machine, capability policy, generation pipeline and orchestration (auto-advance, regenerate), queue design, quality gates, storage, security
 - `CONTRIBUTING.md` — development workflow, testing, and pull-request checklist
 - `docs/skills/short-drama-production/SKILL.md` — the production methodology the pipeline encodes
 
