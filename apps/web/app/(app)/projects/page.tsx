@@ -54,6 +54,7 @@ import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
 import { StoryboardCard } from '@/components/storyboards/storyboard-card'
+import { EpisodeStepper } from '@/components/episode/episode-stepper'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
 type StoryboardDialogState = { mode: 'create'; nextNumber: number } | { mode: 'edit'; storyboard: Storyboard } | null
@@ -320,6 +321,14 @@ export default function ProjectsPage() {
 
           {selectedEpisode ? (
             <>
+          <EpisodeStepper episodeId={selectedEpisode.id} storyboardCount={storyboards.length} />
+          <div id="step-source" className="scroll-mt-4">
+            <SourcesPanel episodeId={selectedEpisode.id} />
+          </div>
+          <div id="step-assets" className="scroll-mt-4">
+            <AssetsPanel episodeId={selectedEpisode.id} />
+          </div>
+          <div id="step-storyboards" className="scroll-mt-4">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -381,13 +390,14 @@ export default function ProjectsPage() {
             )}
           </Card>
 
-          <AssetsPanel episodeId={selectedEpisode?.id ?? null} />
+          </div>
 
-          <GenerationsPanel episodeId={selectedEpisode?.id ?? null} />
-
-          <SourcesPanel episodeId={selectedEpisode?.id ?? null} />
-
-          <DeliveryPanel episodeId={selectedEpisode?.id ?? null} />
+          <div id="step-generation" className="scroll-mt-4">
+            <GenerationsPanel episodeId={selectedEpisode.id} />
+          </div>
+          <div id="step-delivery" className="scroll-mt-4">
+            <DeliveryPanel episodeId={selectedEpisode.id} />
+          </div>
             </>
           ) : (
             <Card>
