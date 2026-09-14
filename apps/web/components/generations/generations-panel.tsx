@@ -27,6 +27,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
+import { ArtifactLightbox } from '@/components/artifact-lightbox'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -360,13 +361,23 @@ export function useArtifactUrl(downloadUrl: string | null): string | null {
 export function ArtifactPreview({ artifact }: { artifact: GenerationArtifact }) {
   const { t } = useI18n()
   const href = useArtifactUrl(artifact.downloadUrl)
+  const [zoomed, setZoomed] = useState(false)
 
   if (!href) return <span className="text-muted-foreground text-xs">{t('common.loading')}</span>
   if (artifact.mimeType.startsWith('image/')) {
     return (
-      // Previews are blob URLs fetched from the API origin, so next/image cannot optimize them.
-      // eslint-disable-next-line @next/next/no-img-element
-      <img src={href} alt={artifact.id} loading="lazy" className="max-h-24 rounded border" />
+      <>
+        {/* Previews are blob URLs fetched from the API origin, so next/image cannot optimize them. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={href}
+          alt={artifact.id}
+          loading="lazy"
+          onClick={() => setZoomed(true)}
+          className="max-h-24 cursor-zoom-in rounded border"
+        />
+        {zoomed && <ArtifactLightbox src={href} alt={artifact.id} onClose={() => setZoomed(false)} />}
+      </>
     )
   }
   if (artifact.mimeType.startsWith('video/')) {
