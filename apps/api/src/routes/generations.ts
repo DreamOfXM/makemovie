@@ -9,11 +9,12 @@ import { toArtifactDto, type ArtifactDto } from './artifacts.js'
 
 type PipelineQueue = ReturnType<typeof createPipelineQueue>
 
-const generationStages = ['SCRIPT', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
 type GenerationStage = (typeof generationStages)[number]
 
 const stageSlots: Record<GenerationStage, CapabilitySlot> = {
   SCRIPT: 'script_text',
+  ASSET: 'image_gen',
   STORYBOARD: 'storyboard_text',
   IMAGE: 'image_gen',
   VIDEO: 'video_t2v',
@@ -24,6 +25,7 @@ const stageSlots: Record<GenerationStage, CapabilitySlot> = {
 // and the console both call that stage IMAGE.
 const stageDbValues: Record<GenerationStage, Stage> = {
   SCRIPT: 'SCRIPT',
+  ASSET: 'ASSET',
   STORYBOARD: 'STORYBOARD',
   IMAGE: 'FIRST_FRAME',
   VIDEO: 'VIDEO',
@@ -78,6 +80,7 @@ interface GenerationBody {
 interface GenerationTarget {
   entityId: string
   prompt: string
+  assetId?: string
 }
 
 function isGenerationStage(value: unknown): value is GenerationStage {
@@ -186,12 +189,13 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
 
       const episode = await app.db.episode.findFirst({
         where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
-        include: { storyboards: { orderBy: { number: 'asc' } } },
+        include: { storyboards: { orderBy: { number: 'asc' } }, assets: { orderBy: { id: 'asc' } } },
       })
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
 
       const requested = request.body?.storyboardIds
       const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO'
+      const perAsset = stage === 'ASSET'
       const selected = perStoryboard
         ? requested
           ? episode.storyboards.filter(storyboard => requested.includes(storyboard.id))
@@ -201,9 +205,12 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         if (requested && selected.length !== new Set(requested).size) return reply.code(400).send({ error: 'storyboardIds must belong to this episode' })
         if (selected.length === 0) return reply.code(400).send({ error: 'episode has no storyboards to generate' })
       }
-      const targets: GenerationTarget[] = perStoryboard
-        ? selected.map(storyboard => ({ entityId: storyboard.id, prompt: `${storyboard.title}: ${storyboard.description}` }))
-        : [{ entityId: episode.id, prompt: episode.title }]
+      if (perAsset && episode.assets.length === 0) return reply.code(400).send({ error: 'episode has no assets to generate' })
+      const targets: GenerationTarget[] = perAsset
+        ? episode.assets.map(asset => ({ entityId: asset.id, prompt: `${asset.kind} ${asset.name}: ${asset.description}`, assetId: asset.id }))
+        : perStoryboard
+          ? selected.map(storyboard => ({ entityId: storyboard.id, prompt: `${storyboard.title}: ${storyboard.description}` }))
+          : [{ entityId: episode.id, prompt: episode.title }]
 
       const slot = stageSlots[stage]
       const candidates = await resolveSlotCandidates(app.db, auth.organizationId, episode.projectId, slot)
@@ -227,7 +234,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
                 idempotencyKey: idempotencyKeys[index],
                 // ProviderRequest payload; model and parameters belong to whichever
                 // candidate ends up running, so the worker fills them in.
-                requestSnapshot: JSON.stringify({ input: { prompt: target.prompt } }),
+                requestSnapshot: JSON.stringify({ input: { prompt: target.prompt }, ...(target.assetId ? { assetId: target.assetId } : {}) }),
               })),
             },
           },

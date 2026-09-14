@@ -443,3 +443,105 @@ describe('generation candidate resolution', () => {
     expect(afterRevoke.json().error).toBe('no verified candidates for slot storyboard_text')
   })
 })
+
+describe('asset generation trigger', () => {
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  async function newConnection(name: string): Promise<Connection> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    return connection
+  }
+
+  async function bindSlot(slot: string, capabilityId: string, scope?: string, priority = 0): Promise<void> {
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
+    expect(binding.statusCode).toBe(201)
+  }
+
+  const capabilityOf = (connection: Connection, model: string) => connection.capabilities.find(capability => capability.model === model)!.id
+
+  let assetProjectId: string
+  let assetEpisodeId: string
+  let assetBatchId: string
+  const assetIds: string[] = []
+  const assetSeeds = [
+    { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' },
+    { kind: 'prop', name: '黑伞', description: '一把旧黑伞' },
+  ]
+
+  it('plans one image task per asset and enqueues each with the bound image candidate', async () => {
+    const { projectId, episodeId } = await newEpisode('Asset Drama')
+    assetProjectId = projectId
+    assetEpisodeId = episodeId
+    const connection = await newConnection('asset-gen')
+    // Project-scoped: earlier tests pin the org-scoped image_gen candidate pool.
+    await bindSlot('image_gen', capabilityOf(connection, 'mock-image'), projectId)
+
+    for (const seed of assetSeeds) {
+      const created = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: seed })
+      expect(created.statusCode).toBe(201)
+      assetIds.push(created.json().asset.id as string)
+    }
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    expect(res.statusCode).toBe(201)
+    const batch = res.json().batch as BatchDto
+    expect(batch.stage).toBe('ASSET')
+    expect(batch.status).toBe('RUNNING')
+    expect(batch.plannedCount).toBe(2)
+    expect(batch.tasks).toHaveLength(2)
+    assetBatchId = batch.id
+
+    for (const task of batch.tasks) {
+      expect(task.stage).toBe('ASSET')
+      expect(task.status).toBe('QUEUED')
+      const payload = (await queue.getJob(`run-${task.id}-1`))?.data as RunTaskPayload
+      expect(payload).toMatchObject({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1 })
+      expect(payload.candidates[0]).toMatchObject({ connectionId: connection.id, capabilityId: capabilityOf(connection, 'mock-image'), provider: 'mock', model: 'mock-image' })
+      expect(payload.candidates.every(candidate => candidate.provider === 'mock' && candidate.model === 'mock-image')).toBe(true)
+    }
+
+    const stored = await env.db.generationTask.findMany({ where: { batchId: batch.id } })
+    expect(stored).toHaveLength(2)
+    for (const [index, assetId] of assetIds.entries()) {
+      const task = stored.find(candidate => candidate.idempotencyKey === `${episodeId}:ASSET:${assetId}`)
+      expect(task).toBeTruthy()
+      expect(task!.stage).toBe('ASSET')
+      const seed = assetSeeds[index]
+      expect(JSON.parse(task!.requestSnapshot ?? '')).toEqual({ input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}` }, assetId })
+    }
+
+    // A per-asset batch connects no storyboards.
+    const linked = await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { storyboards: true } })
+    expect(linked.storyboards).toEqual([])
+  })
+
+  it('returns the existing batch on a duplicate asset trigger', async () => {
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${assetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().batch.id).toBe(assetBatchId)
+    expect(await env.db.generationTask.count({ where: { batchId: assetBatchId } })).toBe(2)
+  })
+
+  it('refuses viewers and episodes without assets', async () => {
+    const forbidden = await env.app.inject({ method: 'POST', url: `/episodes/${assetEpisodeId}/generations`, headers: authHeaders(viewerToken), payload: { stage: 'ASSET' } })
+    expect(forbidden.statusCode).toBe(403)
+    expect(forbidden.json().error).toMatch(/generation:trigger/)
+
+    const empty = await env.app.inject({ method: 'POST', url: `/projects/${assetProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 2, title: 'Asset Drama EP2' } })
+    expect(empty.statusCode).toBe(201)
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${empty.json().id as string}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'episode has no assets to generate' })
+  })
+})
