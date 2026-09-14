@@ -17,6 +17,7 @@ Working today:
 - **Model-driven visual audit** (`STUDIO_QC_MODE=model`): images are judged by the model bound to the `visual_audit` slot and videos by one frame extracted mid-clip. The default gate is still a deterministic hash placeholder that names itself `fake-qc`. Text and audio are **not** audited — they fail the task rather than pretend to pass
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
 - **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
+- Artifact storage behind one `Storage` interface with two backends — local disk (the default) and S3-compatible object storage selected by `STORAGE_BACKEND` — injected into the API and the worker rather than constructed by them
 - Episode workflow status with validated transitions and an audit trail
 - Member management with session revocation on removal
 - Web UI with English/Chinese switching
@@ -37,7 +38,7 @@ Designed, not yet built:
 - `packages/jobs` — queue names and job payload contracts shared by the API and the worker
 - `packages/providers` — provider catalogs and adapters (dashscope, mock)
 - `packages/security` — Argon2id hashing, token hashing, AES-256-GCM secret encryption
-- `packages/media` — disk object storage, mock media synthesis, and FFmpeg composition
+- `packages/media` — object storage (disk and S3 backends), mock media synthesis, and FFmpeg composition
 - `packages/config` — typed environment configuration
 
 ## Requirements
@@ -45,7 +46,7 @@ Designed, not yet built:
 - Node.js ≥ 22.18 (workspace packages are executed via native TypeScript type stripping)
 - pnpm 9
 - FFmpeg ≥ 6 on `PATH` (the worker shells out to `ffmpeg`/`ffprobe` for composition); the worker Docker image installs it
-- Docker (for PostgreSQL / Redis / MinIO in local deployment)
+- Docker (for PostgreSQL / Redis in local deployment; MinIO too, but only if you set `STORAGE_BACKEND=s3`)
 
 ## Quick start
 
@@ -80,14 +81,17 @@ Use the **Mock Provider** to explore the whole flow without any API key.
 | `DATABASE_URL` | — | PostgreSQL connection string (required) |
 | `STUDIO_MASTER_KEY` | all-zero dev key | 64-hex AES-256-GCM key for provider secrets; required in production |
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ |
-| `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | generated-media root; the worker writes here and the API streams from here, so both processes need the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume) |
+| `STORAGE_BACKEND` | `disk` | `disk` stores artifacts under `STUDIO_ARTIFACTS_DIR`; `s3` stores them in an S3-compatible object store |
+| `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | the disk backend's root; the worker writes here and the API streams from here, so both processes need the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume). Unused when `STORAGE_BACKEND=s3` |
 | `STUDIO_QC_MODE` | `random` | worker quality gate: `pass` accepts every artifact, `fail` rejects every one, `random` scores a hash of the task and attempt against the 0.7 threshold, `model` asks the bound `visual_audit` model to judge it |
-| `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO defaults | read for the planned S3-compatible backend; the current implementation writes to `STUDIO_ARTIFACTS_DIR` and ignores them |
+| `S3_ENDPOINT` / `S3_BUCKET` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO defaults | used only when `STORAGE_BACKEND=s3`; the bucket must already exist |
 | `CORS_ORIGIN` | `http://localhost:3010` | comma-separated allowed origins |
 | `SESSION_TTL_MS` | 7 days | session lifetime |
 | `PORT` | `4010` | API port |
 
 Production refuses the all-zero development master key.
+
+`STORAGE_BACKEND=s3` expects the bucket to exist already — nothing creates it, so against the compose MinIO you need `mc mb local/studio` before the first generation. The API and the worker read the same setting and must agree on it; if they do not, one of them writes artifacts the other cannot find. And the S3 backend has only ever been exercised against an in-process fake server, because no container runtime was available where it was written — whether a real MinIO or AWS accepts its signature is unverified. See **Storage** in `ARCHITECTURE.md`.
 
 `STUDIO_QC_MODE=model` needs a `vlm` capability probed and bound to the `visual_audit` slot in **Model Center**, and it costs one vision-model call per artifact. Without a verified binding the worker fails the task and records a `QualityCheck` with a null score — it does not fall back to the hash, because a score nobody produced would look like a judgment that happened. The live multimodal request has never been run against a real provider: it is written from documentation, is marked `// UNVERIFIED` in `packages/providers/src/dashscope.ts`, and the 0.7 threshold is inherited from the placeholder rather than measured. See **Quality gates** in `ARCHITECTURE.md`.
 
@@ -97,11 +101,11 @@ Production refuses the all-zero development master key.
 pnpm test
 ```
 
-API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, the model-driven visual audit (a missing or unverified auditor, a rejected artifact, an approved image and an approved video frame, and a provider fault), and composition, and shell out to a real `ffmpeg`. No test calls a live multimodal provider; the auditor in the tests is the mock, which answers a fixed score it has not earned by looking at anything.
+API integration tests boot an embedded PostgreSQL, apply real migrations, and exercise auth, RBAC, tenant isolation, the state machine, audit trail, the model capability center, generation batches, artifact streaming, source and script versioning, and acceptance-gated deliveries end to end — no Docker required. Worker tests cover candidate fallback, the quality gate with rework attempts, the model-driven visual audit (a missing or unverified auditor, a rejected artifact, an approved image and an approved video frame, and a provider fault), and composition, and shell out to a real `ffmpeg`. Media tests cover both storage backends — the disk one against a temporary directory, the S3 one against an in-process fake server, which is as far as it can be tested without a real object store. No test calls a live multimodal provider; the auditor in the tests is the mock, which answers a fixed score it has not earned by looking at anything.
 
 ## Documentation
 
-- `ARCHITECTURE.md` — domain model, model capability center, state machine, capability policy, queue design, quality gates, security
+- `ARCHITECTURE.md` — domain model, model capability center, state machine, capability policy, queue design, quality gates, storage, security
 - `CONTRIBUTING.md` — development workflow, testing, and pull-request checklist
 - `docs/skills/short-drama-production/SKILL.md` — the production methodology the pipeline encodes
 

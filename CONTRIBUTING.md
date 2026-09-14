@@ -8,7 +8,7 @@ Short Drama Studio is a pnpm monorepo. This guide covers setup, the conventions 
 - pnpm 9 — `corepack enable` picks up the pinned version from `packageManager`
 - FFmpeg ≥ 6 on `PATH` — the media and worker tests synthesize and compose real media
 - Redis on `127.0.0.1:6380` — the pipeline tests use a real queue (API tests take database 7, worker tests database 5, and each obliterates its own database at teardown). `docker compose up -d redis` provides it; CI runs a service container.
-- Docker — for local PostgreSQL/Redis/MinIO. PostgreSQL is **not** needed for tests: they boot an embedded instance.
+- Docker — for local PostgreSQL and Redis. PostgreSQL is **not** needed for tests: they boot an embedded instance. MinIO is in the compose file as well, but nothing needs it unless you set `STORAGE_BACKEND=s3`, and no test touches it — the S3 backend is tested against an in-process fake server.
 
 ## Setup
 
@@ -21,10 +21,12 @@ pnpm build                          # compiles @studio/providers, api, worker, w
 Run the app:
 
 ```bash
-docker compose up -d postgres redis minio
+docker compose up -d postgres redis
 pnpm --filter @studio/db exec prisma migrate deploy
 pnpm dev                            # api :4010, web :3010, worker
 ```
+
+Add `minio` to that command only if you mean to run with `STORAGE_BACKEND=s3`, and create the bucket before the first generation — nothing in the stack does it. Either use the MinIO console on <http://localhost:9001> (login `studio` / `studio-password`, the compose root credentials) and create a bucket named `studio`, or `mc mb local/studio` from a container that has `mc`. Neither has been run here: no container runtime was available where the S3 backend was written.
 
 Never run `pnpm build` while `pnpm dev` is up. The recursive build includes `next build`, which clobbers `apps/web/.next` — the same directory the dev server serves from — so the running dev server starts 404ing its own chunks and the browser sits stuck on "Restoring your session…". If that happens, stop the dev stack, delete `apps/web/.next`, and restart `pnpm dev`.
 
@@ -59,12 +61,20 @@ Every workspace package points its `exports` at `src/index.ts` **except `@studio
 
 Provider API keys go through `encryptSecret(plaintext, masterKey)` / `decryptSecret(payload, masterKey)` from `@studio/security` (AES-256-GCM, ciphertext format `v1.<iv>.<tag>.<ct>`). The master key comes from `app.config.masterKey`. Never store a plaintext key, never include `encryptedSecret` in a response, and never log it.
 
+### Storage
+
+- Reach bytes through the injected storage — `app.storage` in the API, `deps.storage` in the worker. Never construct a backend inside a route or a task, and never import `DiskStorage` or `S3Storage` outside `packages/media`: the whole point of the seam is that neither process knows which backend it has.
+- Each process builds exactly one instance with `storageFrom(config)` and closes it on shutdown. An S3 client holds a live socket agent that will otherwise keep Node alive, and `close()` is what releases it.
+- Do not add a path-shaped method to `Storage`. `localPath` was removed because only a filesystem can implement it. A caller that genuinely needs a real file writes one, as composition does with `read` into a temporary directory.
+- `open` resolves `null` for an absent object and throws for anything else. Keep that split — answering an unreachable store with "not found" hides media behind a 404 that is not true.
+- The S3 backend has only ever been tested against an in-process fake server, which ignores the `Authorization` header. Anything you change about signing, credentials, region, or TLS stays unverified until someone runs it against a real MinIO; say so in the pull request rather than letting the green suite imply otherwise.
+
 ### Generation pipeline
 
 - Never assign `GenerationBatch.status` directly. Call `syncBatchStatus(db, batchId)` from `@studio/db` after any task transition; the batch status is derived from its task counts.
 - Judge artifacts through the `QualityChecker` seam in `apps/worker/src/qc.ts`, never by writing a `QualityCheck` row from somewhere else. A checker returns `pass`, `rework`, or `unjudged`; `run-task` owns the row so the threshold, mode, and candidate are recorded identically whichever checker ran. `unjudged` means the audit broke, not that the content is bad — it must fail the task and must never fall through to a different checker, because a score nobody produced looks exactly like a judgment that happened.
 - `STUDIO_QC_MODE=model` costs one vision-model call per artifact and is not reproducible: the same frame can score differently on a second run. Keep it out of CI and out of any test default. Tests that need a rejection should supply a stub checker rather than turning the mode on.
-- The API streams artifacts from, and the worker writes them into, `app.config.artifactsDir` (`STUDIO_ARTIFACTS_DIR`). Both processes must resolve the same **absolute** path — a relative default resolves against each package directory and silently splits the media in two.
+- The API streams artifacts from, and the worker writes them into, one injected `Storage`. On the default `disk` backend that is `STUDIO_ARTIFACTS_DIR`, and both processes must resolve the same **absolute** path — a relative default resolves against each package directory and silently splits the media in two. On `s3` the same reasoning applies to the endpoint and bucket, which is why compose merges one shared block into both services instead of listing it twice.
 - Artifact bytes reach the browser only through `GET /artifacts/:artifactId/content`, which needs the session bearer token. Media elements cannot send headers, so the web app fetches the bytes and hands `URL.createObjectURL` results to the element, revoking them on unmount. Do not paste the URL into an `src` attribute.
 
 ### Domain vs Prisma enums

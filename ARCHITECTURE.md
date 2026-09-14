@@ -26,14 +26,14 @@ Shipped:
 - FFmpeg composition of an episode's succeeded video artifacts, plus mock media synthesis for credential-free runs
 - Source document and script versioning: checksummed uploads with duplicate detection, approval gating, and storyboards re-pointed at the approved script version
 - Acceptance-gated delivery packaging with versioned JSON manifests, acceptance, and reasoned rejection
-- Local disk artifact storage shared by the API and the worker, streamed over an authenticated endpoint
+- Artifact storage behind one `Storage` interface with two backends — local disk (the default) and S3-compatible object storage — injected into the API and the worker and streamed over an authenticated endpoint
 - Docker Compose deployment (compose file and API/worker/web Dockerfiles present; end-to-end startup not yet verified)
 - Apache-2.0 licensing
 
 Planned:
 
 - OAuth and SSO extension points
-- S3-compatible object storage behind the same `Storage` interface; MinIO for local deployment
+- S3 backend completion: an integration test against a real MinIO in CI, bucket bootstrap, multipart and streaming upload, and range delivery
 - Asset versions and storyboard authoring gates, plus enforcement of upstream approvals on generation triggers
 - Delivery audits beyond the manifest: normalized media and reproducible export
 - Per-tenant, per-provider, and per-model concurrency limits
@@ -245,9 +245,26 @@ Input version references are real down to the script: storyboards carry `scriptV
 
 ## Storage
 
-Metadata lives in PostgreSQL; bytes live on a local disk root named by `STUDIO_ARTIFACTS_DIR`. The worker writes into it and the API streams out of it, so both processes must resolve the same absolute path — `pnpm dev` pins it, and the Docker Compose deployment shares a named volume. Object keys are generated from tenant/project/episode/stage/entity/version and never from user-provided filenames, and `DiskStorage` rejects any key that escapes the root.
+Metadata lives in PostgreSQL; bytes live behind one `Storage` interface in `packages/media`. Two implementations sit behind it and nothing else in the system knows which one is running: `STORAGE_BACKEND` selects them and defaults to `disk`, so the S3 settings are inert until it is set.
 
-The planned production backend is S3-compatible object storage (MinIO locally) behind the same `Storage` interface; the S3 settings in `packages/config` are read for that migration and are not used by the disk implementation.
+The contract is `put`, `read`, `exists`, `open`, and `close`. Three of those are shaped by constraints worth stating, because each one looks like an oddity until you know what it is for:
+
+- `open` returns a stream **and the object's size**, and resolves `null` when the object is absent rather than throwing. Absence is an expected outcome at the only call site — the API turns it into its `artifact file not found` response — so a thrown error there would be a control-flow exception. The size rides beside the body because the `MediaArtifact` row has no size column and cannot supply a content-length; S3 returns it on the same `GetObject` that returns the body, so it costs no extra round-trip.
+- There is deliberately **no path-shaped method**. An earlier `localPath` existed so ffmpeg could be handed a real file, and only the disk backend could ever implement it — an abstraction with a method one implementation cannot satisfy is not an abstraction. Callers that need a file materialise one, which is what composition already did: it writes what `read` returned into a temporary directory.
+- `close` exists because an S3 client holds a live socket agent that keeps the process up. The disk backend holds nothing between calls and its `close` is empty.
+
+The disk backend roots at `STUDIO_ARTIFACTS_DIR`. The worker writes into it and the API streams out of it, so both processes must resolve the same absolute path — `pnpm dev` pins it, and the Docker Compose deployment shares a named volume. Object keys are generated from tenant/project/episode/stage/entity/version and never from user-provided filenames, and the disk backend rejects any key that escapes its root before touching the filesystem.
+
+The S3 backend talks path-style to `S3_ENDPOINT` and requests checksums only when required, so an upload carries the caller's bytes instead of `aws-chunked` transfer framing. Each process builds exactly one instance through `storageFrom` and injects it — the API onto `app.storage`, the worker into its dependency bundle — and closes it on shutdown. Neither constructs a backend inside a request handler or a task.
+
+What the S3 backend has not been shown to do:
+
+- **It has never met a real S3 server.** No container runtime was available where it was written. It is verified against an in-process fake HTTP server implementing `PUT`/`GET`/`HEAD` and answering a missing key with a genuine `NoSuchKey` body, which exercises request shaping, key encoding, content-type propagation, response-body-to-stream conversion, `ContentLength` extraction, and absence-versus-fault mapping. The fake ignores the `Authorization` header, so SigV4 signature acceptance, credential handling, region resolution, and TLS are unverified; those lines carry `// UNVERIFIED`.
+- **The compose stack has never been brought up in `s3` mode.** Compose defaults to `disk`, so nothing regresses, but that path is unexercised end to end.
+- **It does not create the bucket.** MinIO ships no `studio` bucket, so `STORAGE_BACKEND=s3` against a fresh stack fails at the first `put` until one exists.
+- **Uploads are single-shot.** No multipart and no streaming upload, untested at the sizes a real episode produces.
+- **Delivery is whole-body.** No `Accept-Ranges` is offered, so browser video seeking has no range support to fall back on.
+- **Absence and outage are told apart only by status.** A 404 is absent; anything else is re-thrown. That is deliberate — reporting an unreachable store as "not found" would silently hide media — but it has only been proven against the fake server's 500.
 
 ## Security
 

@@ -1,3 +1,16 @@
+# The API and the worker must agree on where bytes live, exactly as they must agree on
+# STUDIO_ARTIFACTS_DIR, so both merge this one anchor instead of listing it twice.
+# Defaults keep today's behaviour: disk. Setting STORAGE_BACKEND=s3 flips both processes.
+# The S3 key defaults are dev-only and match the MinIO root credentials below; a real
+# deployment overrides every one of them.
+x-storage-env: &storage-env
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-disk}
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+  S3_BUCKET: ${S3_BUCKET:-studio}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-studio}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-studio-password}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -20,6 +33,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+  # Only used when STORAGE_BACKEND=s3. Nothing here creates the `studio` bucket, so an
+  # s3 run needs `mc mb local/studio` first. api and worker deliberately do not gate on
+  # this service's health: on the default disk backend they never talk to it, and a
+  # dependency would refuse to start them for a service they are not using.
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -43,6 +60,7 @@ services:
       # dev-only default; in production set a random 64-hex master key
       STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
+      <<: *storage-env
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3010}
       PORT: 4010
     ports: ["4010:4010"]
@@ -61,6 +79,7 @@ services:
       REDIS_URL: redis://redis:6379
       STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
+      <<: *storage-env
       STUDIO_QC_MODE: ${STUDIO_QC_MODE:-random}
     volumes: ["artifacts:/var/lib/studio/artifacts"]
     depends_on:
