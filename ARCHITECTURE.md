@@ -1,6 +1,6 @@
 # Short Drama Studio
 
-> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, and acceptance-gated delivery manifests are implemented and covered by tests. Quality control has two checkers: a deterministic hash placeholder that is still the default, and a model-driven visual audit of images and single video frames that is implemented but has never been run against a live provider. The remaining upstream content stages (asset versions, storyboard authoring gates), the enforcement of upstream approvals on generation triggers, and the deep content audits remain design; section-level status is called out inline.
+> Status: the platform layer (tenancy, RBAC, sessions, audit, and the model capability configuration center), the first generation pipeline (stage batches, the BullMQ queue, worker execution with candidate fallback, the quality gate, artifact storage and streaming, and FFmpeg composition), source and script versioning with approval gating, episode asset authoring with reference-image generation, versioning, and approval, and acceptance-gated delivery manifests are implemented and covered by tests. Quality control has two checkers: a deterministic hash placeholder that is still the default, and a model-driven visual audit of images and single video frames that is implemented but has never been run against a live provider. The remaining upstream content stage (storyboard authoring gates), the enforcement of upstream approvals on generation triggers, and the deep content audits remain design; section-level status is called out inline.
 
 ## Goal
 
@@ -25,6 +25,7 @@ Shipped:
 - Model-driven visual audit of image artifacts and single video frames behind `STUDIO_QC_MODE=model`, which fails the task rather than degrading when no auditor can judge
 - FFmpeg composition of an episode's succeeded video artifacts, plus mock media synthesis for credential-free runs
 - Source document and script versioning: checksummed uploads with duplicate detection, approval gating, and storyboards re-pointed at the approved script version
+- Episode assets: authoring with a kind, name, and description; reference-image generation through the image slot; versioning; and approval
 - Acceptance-gated delivery packaging with versioned JSON manifests, acceptance, and reasoned rejection
 - Artifact storage behind one `Storage` interface with two backends — local disk (the default) and S3-compatible object storage — injected into the API and the worker and streamed over an authenticated endpoint
 - Docker Compose deployment (compose file and API/worker/web Dockerfiles present; end-to-end startup not yet verified)
@@ -34,7 +35,7 @@ Planned:
 
 - OAuth and SSO extension points
 - S3 backend completion: an integration test against a real MinIO in CI, bucket bootstrap, multipart and streaming upload, and range delivery
-- Asset versions and storyboard authoring gates, plus enforcement of upstream approvals on generation triggers
+- Storyboard authoring gates (binding approved assets to storyboards), plus enforcement of upstream approvals on generation triggers
 - Delivery audits beyond the manifest: normalized media and reproducible export
 - Per-tenant, per-provider, and per-model concurrency limits
 - Additional provider adapters (OpenAI-compatible APIs, Volcengine)
@@ -78,11 +79,12 @@ Tenant isolation is mandatory on every aggregate. Exercised by the API and worke
 - Delivery
 - AuditEvent
 - UsageLedger
+- Asset
+- AssetVersion
 
-Defined in the schema and migrations, waiting on the asset stage:
+Defined in the schema and migrations, waiting on storyboard authoring:
 
-- Asset and AssetVersion
-- StoryboardVersion and StoryboardAsset
+- StoryboardAsset (the storyboard↔asset join table exists, but nothing populates it yet)
 
 All generated artifacts are immutable. A new generation creates a new artifact version and never overwrites an existing file or prompt.
 
@@ -146,8 +148,8 @@ The web Model Center page exposes the same chain in order — connections and pr
 
 Planning (`POST /episodes/:episodeId/generations`, permission `generation:trigger`):
 
-1. The API stage maps to one capability slot: `SCRIPT → script_text`, `STORYBOARD → storyboard_text`, `IMAGE → image_gen`, `VIDEO → video_t2v`, `AUDIO → tts_voice`. `IMAGE` is persisted as the schema stage `FIRST_FRAME` and mapped back on the way out.
-2. `IMAGE` and `VIDEO` plan one task per storyboard (optionally restricted by `storyboardIds`, which must all belong to the episode); the other stages plan a single episode-level task. The prompt is the storyboard title and description, or the episode title.
+1. The API stage maps to one capability slot: `SCRIPT → script_text`, `ASSET → image_gen`, `STORYBOARD → storyboard_text`, `IMAGE → image_gen`, `VIDEO → video_t2v`, `AUDIO → tts_voice`. `IMAGE` is persisted as the schema stage `FIRST_FRAME` and mapped back on the way out.
+2. `IMAGE` and `VIDEO` plan one task per storyboard (optionally restricted by `storyboardIds`, which must all belong to the episode); `ASSET` plans one task per asset; the other stages plan a single episode-level task. The prompt is the storyboard title and description, the asset's `kind name: description`, or the episode title.
 3. Candidates come from `resolve` for that slot and project: project scope before organization scope, priority descending, deduplicated by capability, dropping unverified capabilities and disabled connections. An empty list is a `409` — nothing is queued that could not run.
 4. A `GenerationBatch` and its `GenerationTask` rows are written in one transaction. Each task carries the idempotency key `${episodeId}:${stage}:${entityId}`, which is unique, so re-triggering the same stage of the same episode returns the existing batch with `200` instead of queueing duplicate work.
 5. One `run-task` job per task is enqueued, then an audit event records the trigger.
@@ -159,7 +161,7 @@ Execution (`apps/worker/src/run-task.ts`):
 - The result is materialized into bytes: a `mock://` URL is synthesized locally with FFmpeg, an `http(s)` URL is downloaded, and a text result is encoded as UTF-8.
 - The artifact is stored under `tenant/project/episode/stage/task/v<attempt>.<ext>` and recorded as an immutable `MediaArtifact` with checksum, mime type, dimensions or duration, and the provider response as metadata.
 - A `QualityChecker` then judges the stored artifact and writes a `QualityCheck` row: `APPROVED` at or above the 0.7 threshold, `NEEDS_REVIEW` with a score below it, or `NEEDS_REVIEW` with a **null** score when the checker could not judge at all. A rejection re-queues the same task with `attempt + 1` up to three attempts, then fails it; an unjudged artifact fails it immediately and queues nothing (see **Quality gates**).
-- On success the worker writes a `UsageLedger` entry (input prompt length, output byte count) and stamps the task `SUCCEEDED` with the winning provider, model, and response snapshot.
+- On success the worker writes a `UsageLedger` entry (input prompt length, output byte count) and stamps the task `SUCCEEDED` with the winning provider, model, and response snapshot. For an `ASSET`-stage task it then appends the next `AssetVersion` for the asset named in the task's request snapshot, pointing at the stored artifact and left `DRAFT` — a passed quality check is not a human approval of the likeness.
 - Every candidate failure is collected into `errorSnapshot`, so a failed task explains the whole fallback chain rather than only the last error.
 
 Batch status is derived, never set directly: `syncBatchStatus` recounts the tasks after every transition and rolls up to `RUNNING` while anything is queued or running, `BLOCKED` if anything failed, `NEEDS_REVIEW` if cancellations are mixed with successes, `CANCELLED` if nothing ran, and `COMPLETED` otherwise.
@@ -171,6 +173,8 @@ Composition (`POST /episodes/:episodeId/compositions`) records a `Composition` w
 Read surface: `GET /episodes/:episodeId/generations` returns every batch with its tasks, artifacts, and latest quality check, and `GET /artifacts/:artifactId/content` streams the bytes. Both are tenant-scoped and require `read`.
 
 Upstream versions (`apps/api/src/routes/sources.ts`): source documents and scripts are versioned per episode, unique on `(episodeId, version)`, and deliberately carry no timestamp columns — the version number is the ordering key and lists come back newest-first. `POST /episodes/:episodeId/source-versions` stores the uploaded `content` verbatim (at most 200,000 characters) with a server-computed SHA-256 checksum; re-uploading content whose checksum equals the latest version's is a `409 sources:duplicate`. Approval flips a version to `APPROVED` once (`409 sources:alreadyApproved` on a repeat). `POST /episodes/:episodeId/script-versions` derives a script version by copying content and checksum from an `APPROVED` source version named by `sourceVersion` (`409 sources:sourceNotApproved` otherwise), and approving a script version re-points every storyboard of the episode at it through `storyboard.updateMany`, returning `storyboardsUpdated` so downstream stages trace exactly one script version. List endpoints return summaries without content, keeping the list cheap; the single-version endpoint includes it. Reads require `read`, writes require `episode:write` (EDITOR minimum), and every write is audited (`source.upload`, `source.approve`, `script.derive`, `script.approve`).
+
+Assets (`apps/api/src/routes/assets.ts`): assets are the episode-level references a production reuses — a character, a prop, a scene. `POST /episodes/:episodeId/assets` creates one from a `kind`, a `name`, and a `description` (the text that drives its reference-image prompt), unique on `(episodeId, kind, name)` (`409 assets:duplicate`). Triggering the `ASSET` generation stage plans one image task per asset through the `image_gen` slot, carrying the asset id in the task's request snapshot; when such a task succeeds the worker appends the next `AssetVersion` (description and prompt snapshot set to the prompt, `artifactId` pointing at the stored image, status `DRAFT`). `POST /episodes/:episodeId/assets/:assetId/versions/:version/approve` flips the version to `APPROVED` once (`409 assets:alreadyApproved` on a repeat) and marks the asset approved; nothing is re-pointed, because nothing references an approved asset until storyboard binding lands. Reads require `read`, writes require `episode:write`, and every write is audited (`asset.create`, `asset.approve`).
 
 Delivery (`apps/api/src/routes/deliveries.ts`): `POST /episodes/:episodeId/deliveries` packages a delivery behind an acceptance gate — there must be a `COMPLETED` composition with a non-null master `artifactId`, and every storyboard of the episode must have a succeeded VIDEO-stage artifact. This is deliberately the same rule the compose worker uses to pick a clip, so an episode that cannot be composed cannot be delivered; when the gate fails the response is `409 delivery:notReady` with a human-readable `reasons` array naming each missing piece. The manifest is a versioned JSON document (`schemaVersion` 1) stored as a string on `Delivery.manifest`: `packagedAt`, episode identity, the latest source and script version refs `{version, checksum, status}`, per-storyboard artifacts (`stage`, `objectKey`, `checksum`, `mimeType`, `version`, dimensions, duration), the composition master, and a `quality` summary whose counts come from one `groupBy` over `QualityCheck` reaching the episode through any of its four relations (storyboard, batch, source document version, or artifact task batch) and whose `threshold` restates the same 0.7 bar the worker judges artifacts against. `POST /deliveries/:id/accept` sets `APPROVED` and stamps `acceptance.acceptedAt` into the manifest; `POST /deliveries/:id/reject` requires a non-blank `reason` and sets `NEEDS_REVIEW`; an accepted delivery is immutable — both verbs then answer `409 delivery:alreadyAccepted`. Deliveries carry no timestamp columns either, so lists order newest-first by cuid id. `GET /episodes/:episodeId/deliveries` and `GET /deliveries/:id/manifest` are the reads. Writes require `episode:write` and are audited (`delivery.create`, `delivery.accept`, `delivery.reject`); every route looks the episode or delivery up through `project.organizationId`, so a cross-tenant id is a 404, never a 403. The web project page mounts a **Sources & scripts** panel and a **Deliveries** panel under the generation panel: write actions are `episode:write`-guarded and render disabled for viewers while reads stay enabled, the `delivery:notReady` reasons surface as a warning alert, the duplicate-checksum 409 becomes an inline field error, and the manifest download goes through the authenticated API client and hands the browser a revocable blob URL — a raw API URL is never placed in the DOM.
 
@@ -241,7 +245,7 @@ artifact → task attempt → model/configuration → source prompt/input versio
 
 Implemented today: `MediaArtifact → GenerationTask → GenerationBatch → Episode → Project → Organization` are real relations, the batch also links the storyboards it planned against, and `QualityCheck` points at the artifact it scored. The object key itself encodes tenant, project, episode, stage, entity, and version. The artifact stores checksum, mime type, dimensions or duration, and the raw provider response as metadata; the task stores the planned request snapshot, the winning provider and model, and a response snapshot naming the attempt, candidate, provider task id, and artifact id.
 
-Input version references are real down to the script: storyboards carry `scriptVersionId`, re-pointed at every script approval, so an artifact traces back through its batch and storyboard to the exact approved script content and checksum, and the delivery manifest names the source and script versions beside every artifact checksum. Missing until the asset stage exists: asset version references and a configuration version per attempt.
+Input version references are real down to the script and the asset: storyboards carry `scriptVersionId`, re-pointed at every script approval, so an artifact traces back through its batch and storyboard to the exact approved script content and checksum, and the delivery manifest names the source and script versions beside every artifact checksum. An `ASSET`-stage artifact likewise traces to its asset through `AssetVersion.artifactId`, with the asset id carried in the task's request snapshot. Still missing: a configuration version per attempt.
 
 ## Storage
 
@@ -314,6 +318,7 @@ Met by the current codebase:
 - An artifact streams with its stored mime type and length, and a missing file is a `404`
 - Composition concatenates the newest succeeded video of every storyboard in the manifest and blocks when one is missing
 - A source upload is deduplicated by checksum, a script can only be derived from an approved source, and approving a script re-points every storyboard of the episode at it
+- An asset can be authored, its reference image generated through the image slot, and a version approved — which also marks the asset approved — and a completed asset artifact traces back to that version
 - Delivery packaging is refused with reasons while no composition has completed or any storyboard lacks a succeeded video — the same rule the compose worker applies
 - A delivery manifest names the source and script versions with checksums, every storyboard artifact, the composition master, and the quality counts against the 0.7 threshold
 - An accepted delivery is immutable, and rejecting one requires a reason
@@ -323,8 +328,8 @@ Pending:
 - Source and script content passes its content audits (event order, coverage, prohibited additions)
 - Text and audio artifacts pass a real content audit; under `mode=model` they are returned unjudged and the task fails
 - The visual audit has run against a live multimodal provider, and the 0.7 threshold is calibrated to what one actually scores
-- The system can produce approved asset and storyboard versions
+- The system can produce approved storyboard versions
 - A reference video task cannot select T2V
-- A completed artifact can be traced back to asset versions and a per-attempt configuration version
+- A completed artifact can be traced back to a per-attempt configuration version
 - Delivery audits verify normalized media and reproducible export
 - Docker Compose starts web, API, worker, PostgreSQL, Redis, and MinIO

@@ -13,7 +13,8 @@ Working today:
 - Database-backed sessions with Argon2id password hashing and per-organization switching
 - **Model capability center**: provider catalogs, encrypted API keys, entitlement probes, and capability-slot bindings with ordered fallback resolution
 - **Source & script versioning**: checksummed source uploads with duplicate detection, explicit approval, and script versions derived from an approved source — approving a script re-points every storyboard of the episode at it
-- **Generation pipeline**: per-stage batches (script, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
+- **Episode assets**: author characters, props, and scenes with a description, generate a reference image for each through the bound image model, and approve the version you want — a succeeded generation becomes a draft asset version linked to its artifact
+- **Generation pipeline**: per-stage batches (script, asset, storyboard, image, video, audio) dispatched over BullMQ, resolved through the capability bindings, quality-gated with automatic rework, and streamed back as immutable artifacts
 - **Model-driven visual audit** (`STUDIO_QC_MODE=model`): images are judged by the model bound to the `visual_audit` slot and videos by one frame extracted mid-clip. The default gate is still a deterministic hash placeholder that names itself `fake-qc`. Text and audio are **not** audited — they fail the task rather than pretend to pass
 - FFmpeg composition of the succeeded video artifacts into a single episode deliverable
 - **Acceptance-gated delivery**: packaging refuses an episode the composer could not compose, writes a versioned JSON manifest of every artifact, checksum, and quality count, and records an audited accept or reject
@@ -26,12 +27,12 @@ Working today:
 
 Designed, not yet built:
 
-- Asset versions, storyboard authoring gates, and enforcement of upstream approvals on generation triggers
+- Storyboard authoring gates (binding approved assets to storyboards) and enforcement of upstream approvals on generation triggers
 
 ## Monorepo
 
-- `apps/api` — Fastify API (auth, projects, episodes, members, providers, bindings, generations, source/script versions, deliveries, artifact streaming, audit)
-- `apps/web` — Next.js app (projects, generation panel, sources & scripts, deliveries, model center, members; i18n en/zh)
+- `apps/api` — Fastify API (auth, projects, episodes, members, providers, bindings, generations, source/script versions, assets, deliveries, artifact streaming, audit)
+- `apps/web` — Next.js app (projects, generation panel, sources & scripts, assets, deliveries, model center, members; i18n en/zh)
 - `apps/worker` — BullMQ consumer running generation tasks, quality gates, and composition
 - `packages/domain` — state machines, RBAC matrix, capability slots and bind rules
 - `packages/db` — Prisma schema, migrations, and batch status rollup
