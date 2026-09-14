@@ -189,6 +189,18 @@ describe('dashscope request building', () => {
     expect(req.body).toMatchObject({ input: { prompt: 'a rainy street' }, parameters: { size: '1024*1024' } })
   })
 
+  it('builds a synchronous qwen-image request on the multimodal endpoint', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'qwen-image-3.0' }), {
+      model: 'qwen-image-3.0',
+      input: { prompt: 'a red apple' },
+      parameters: { size: '1328*1328' },
+    })
+    expect(req.url).toBe(`${base}/api/v1/services/aigc/multimodal-generation/generation`)
+    expect(req.headers['X-DashScope-Async']).toBeUndefined()
+    const body = req.body as { input: { messages: Array<{ role: string; content: unknown }> } }
+    expect(body.input.messages).toEqual([{ role: 'user', content: [{ text: 'a red apple' }] }])
+  })
+
   it('builds an i2v request with img_url and rejects missing first frame', () => {
     const cap = capability({ modality: 'i2v', model: 'wanx2.1-i2v-turbo', acceptsFirstFrame: true })
     const req = buildSubmitRequest(base, 'sk-test', cap, {
@@ -320,6 +332,22 @@ describe('dashscope adapter submit and poll', () => {
     })
     expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
     expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', text: verdict })
+  })
+
+  it('reads a qwen-image artifact url out of the sync multimodal response', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: [{ image: 'https://oss/qwen.png', type: 'image' }] } }] },
+        request_id: 'r-qi',
+      }),
+    })
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'image', model: 'qwen-image-3.0' })
+    const { taskId } = await adapter.submit(cap, { model: 'qwen-image-3.0', input: { prompt: 'a red apple' }, parameters: {} })
+    expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/qwen.png' })
   })
 })
 

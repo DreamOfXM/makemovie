@@ -40,10 +40,11 @@ export function buildSubmitRequest(
     }
   }
 
-  // UNVERIFIED: no credentials. The multimodal endpoint takes message content as
-  // an array of typed parts rather than a bare string, and answers under
-  // output.choices. Whether a base64 data URL is accepted where a public image
-  // URL is documented is also untested — the visual audit relies on it.
+  // The multimodal endpoint and its messages input shape are proven live — the
+  // Qwen-Image path below uses this same endpoint — but the VLM direction is not:
+  // no qwen-vl model was available, so whether a base64 data URL is accepted where a
+  // public image URL is documented, and the text-verdict extraction, remain untested.
+  // The visual audit relies on it.
   if (capability.modality === 'vlm') {
     const images = Array.isArray(request.input.images)
       ? request.input.images.filter((image): image is string => typeof image === 'string')
@@ -56,6 +57,17 @@ export function buildSubmitRequest(
       method: 'POST',
       headers,
       body: { model: request.model, input: { messages }, parameters: request.parameters },
+    }
+  }
+
+  // Qwen-Image answers synchronously on the multimodal endpoint (verified live), so it
+  // must not carry the async header the wanx task models below need.
+  if (capability.modality === 'image' && isQwenImage(capability.model)) {
+    return {
+      url: `${base}${VLM_PATH}`,
+      method: 'POST',
+      headers,
+      body: { model: request.model, input: { messages: [{ role: 'user', content: [{ text: prompt }] }] }, parameters: request.parameters },
     }
   }
 
@@ -131,6 +143,27 @@ function extractArtifactUrl(output: Record<string, unknown>): string | undefined
   return undefined
 }
 
+/** Qwen-Image models generate synchronously on the multimodal endpoint, unlike the async wanx task models. */
+export function isQwenImage(model: string): boolean {
+  return model.startsWith('qwen-image')
+}
+
+/** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image. */
+function extractSyncImageUrl(output: Record<string, unknown>): string | undefined {
+  const choices = output.choices
+  if (!Array.isArray(choices) || choices.length === 0) return undefined
+  const message = (choices[0] as { message?: unknown } | null)?.message
+  if (typeof message !== 'object' || message === null) return undefined
+  const content = (message as { content?: unknown }).content
+  if (!Array.isArray(content)) return undefined
+  for (const part of content) {
+    if (typeof part === 'object' && part !== null && typeof (part as { image?: unknown }).image === 'string') {
+      return (part as { image: string }).image
+    }
+  }
+  return undefined
+}
+
 /**
  * DashScope answers in three shapes: `output.text` on the text endpoint's default
  * result format, `output.choices[0].message.content` as a bare string when
@@ -153,11 +186,12 @@ export function extractDashScopeText(output: Record<string, unknown>): string {
     .join('')
 }
 
-interface SyncTextResult {
-  text: string
+interface SyncResult {
+  text?: string
+  artifactUrl?: string
 }
 
-const syncResults = new Map<string, SyncTextResult>()
+const syncResults = new Map<string, SyncResult>()
 let syncCounter = 0
 
 export class DashScopeAdapter implements ProviderAdapter {
@@ -211,6 +245,15 @@ export class DashScopeAdapter implements ProviderAdapter {
       return { taskId }
     }
 
+    if (capability.modality === 'image' && isQwenImage(capability.model)) {
+      const output = (body?.output ?? {}) as Record<string, unknown>
+      const artifactUrl = extractSyncImageUrl(output)
+      if (!artifactUrl) throw new Error(sanitizeError(body ?? 'dashscope qwen-image response missing an image url'))
+      const taskId = `ds-sync-${++syncCounter}`
+      syncResults.set(taskId, { artifactUrl })
+      return { taskId }
+    }
+
     const output = (body?.output ?? {}) as Record<string, unknown>
     const taskId = output.task_id
     if (typeof taskId !== 'string') throw new Error(sanitizeError(body ?? 'dashscope response missing output.task_id'))
@@ -221,7 +264,9 @@ export class DashScopeAdapter implements ProviderAdapter {
     if (taskId.startsWith('ds-sync-')) {
       const cached = syncResults.get(taskId)
       if (!cached) return { status: 'failed', error: `dashscope: unknown sync task ${taskId}` }
-      return { status: 'completed', text: cached.text }
+      return cached.artifactUrl !== undefined
+        ? { status: 'completed', artifactUrl: cached.artifactUrl }
+        : { status: 'completed', text: cached.text }
     }
 
     const httpRequest = buildPollRequest(this.options.baseUrl, this.options.apiKey, taskId)

@@ -30,6 +30,8 @@ const dashscope: ProviderCatalog = {
     { model: 'qwen-vl-max', displayName: 'Qwen VL Max', modality: 'vlm', spec: { use: 'visual quality audits' } },
     { model: 'wanx2.1-t2i-turbo', displayName: 'Wanx 2.1 T2I Turbo', modality: 'image', spec: { resolutions: ['1024x1024', '720x1280', '1280x720'] } },
     { model: 'wanx2.1-t2i-plus', displayName: 'Wanx 2.1 T2I Plus', modality: 'image', spec: { resolutions: ['1024x1024', '720x1280', '1280x720'] } },
+    { model: 'qwen-image-3.0', displayName: 'Qwen Image 3.0', modality: 'image', spec: { note: 'synchronous multimodal endpoint, n fixed at 1' } },
+    { model: 'qwen-image-3.0-pro', displayName: 'Qwen Image 3.0 Pro', modality: 'image', spec: { note: 'synchronous multimodal endpoint, n fixed at 1' } },
     { model: 'wan2.2-t2v-plus', displayName: 'Wan 2.2 T2V Plus', modality: 't2v', spec: { durations: [5], resolutions: ['720P', '1080P'], note: 'text-to-video only, never for reference tasks' } },
     { model: 'wanx2.1-i2v-turbo', displayName: 'Wanx 2.1 I2V Turbo', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5], resolutions: ['720P'] } },
     { model: 'wanx2.1-i2v-plus', displayName: 'Wanx 2.1 I2V Plus', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5], resolutions: ['720P', '1080P'] } },
