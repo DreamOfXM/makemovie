@@ -1,8 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { FilmIcon, PencilIcon, WorkflowIcon } from 'lucide-react'
-import { toWorkflowStatus, type Asset, type GenerationArtifact, type Storyboard } from '@/lib/api'
+import { ArchiveIcon, FilmIcon, PencilIcon, WorkflowIcon } from 'lucide-react'
+import { isLiveStoryboard, toWorkflowStatus, type Asset, type GenerationArtifact, type Storyboard } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { cn, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -10,7 +10,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ArtifactLightbox } from '@/components/artifact-lightbox'
+import { LineageBadge } from '@/components/lineage-badge'
 import { useArtifactUrl } from '@/components/generations/generations-panel'
 
 interface StoryboardCardProps {
@@ -25,13 +27,16 @@ interface StoryboardCardProps {
 /**
  * A content-first storyboard: the full shot script, the source excerpt it came
  * from, and the generated first frame / video inline, rather than a one-line
- * row in a table.
+ * row in a table. A superseded shot renders the same content as read-only history,
+ * because the first frames and video it carries were paid for.
  */
 export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAssets, onEdit, onChangeStatus }: StoryboardCardProps) {
   const { t } = useI18n()
   const status = toWorkflowStatus(storyboard.status)
   const [savingAsset, setSavingAsset] = useState<string | null>(null)
 
+  const superseded = !isLiveStoryboard(storyboard)
+  const editable = canWrite && !superseded
   const links = storyboard.assets ?? []
   const boundIds = new Set(links.map(link => link.assetId))
 
@@ -48,7 +53,7 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
   }
 
   return (
-    <Card>
+    <Card className={cn(superseded && 'border-dashed bg-muted/30 shadow-none')}>
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="font-mono">
@@ -56,18 +61,22 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
           </Badge>
           <span className="text-base">{storyboard.title}</span>
           <StatusBadge status={status} label={t(`status.${status}`)} />
+          {superseded && <SupersededBadge revision={storyboard.revision ?? 1} />}
+          <LineageBadge taskId={storyboard.generationTaskId} />
           <span className="text-muted-foreground text-xs font-normal">{formatDuration(storyboard.durationMs)}</span>
         </CardTitle>
-        <CardAction>
-          <div className="flex gap-1">
-            <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.editTitle')} disabled={!canWrite} onClick={onEdit}>
-              <PencilIcon />
-            </Button>
-            <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.changeStatus')} onClick={onChangeStatus}>
-              <WorkflowIcon />
-            </Button>
-          </div>
-        </CardAction>
+        {!superseded && (
+          <CardAction>
+            <div className="flex gap-1">
+              <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.editTitle')} disabled={!editable} onClick={onEdit}>
+                <PencilIcon />
+              </Button>
+              <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.changeStatus')} onClick={onChangeStatus}>
+                <WorkflowIcon />
+              </Button>
+            </div>
+          </CardAction>
+        )}
       </CardHeader>
       <CardContent className="space-y-4">
         {(storyboard.firstFrame || storyboard.video) && (
@@ -83,7 +92,7 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
 
         <div>
           <p className="text-muted-foreground mb-1 text-xs font-medium">{t('storyboards.assets')}</p>
-          {!canWrite ? (
+          {!editable ? (
             boundIds.size === 0 ? (
               <p className="text-muted-foreground text-xs">{t('storyboards.noAssets')}</p>
             ) : (
@@ -159,6 +168,24 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function SupersededBadge({ revision }: { revision: number }) {
+  const { t } = useI18n()
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex" tabIndex={0}>
+          <Badge variant="outline" className="text-muted-foreground gap-1 font-normal">
+            <ArchiveIcon />
+            {t('storyboards.superseded')} · {t('storyboards.revision', { revision })}
+          </Badge>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{t('storyboards.supersededHint')}</TooltipContent>
+    </Tooltip>
   )
 }
 

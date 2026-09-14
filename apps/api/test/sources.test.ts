@@ -24,6 +24,8 @@ interface VersionSummary {
   status: string
   contentLength: number
   content?: string
+  // Only script versions trace back to a generating task.
+  generationTaskId?: string | null
 }
 
 const sha256 = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
@@ -265,7 +267,7 @@ describe('script versions', () => {
     expect(versions.map(version => version.contentLength)).toEqual([sourceContentV2.length, sourceContentV1.length])
     expect(versions.map(version => version.status)).toEqual(['DRAFT', 'APPROVED'])
     for (const version of versions) {
-      expect(Object.keys(version).sort()).toEqual(['checksum', 'contentLength', 'id', 'status', 'version'])
+      expect(Object.keys(version).sort()).toEqual(['checksum', 'contentLength', 'generationTaskId', 'id', 'status', 'version'])
     }
   })
 
@@ -281,6 +283,7 @@ describe('script versions', () => {
       status: 'APPROVED',
       contentLength: sourceContentV1.length,
       content: sourceContentV1,
+      generationTaskId: null,
     })
 
     expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)

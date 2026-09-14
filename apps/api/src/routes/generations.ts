@@ -1,17 +1,16 @@
 import type { FastifyInstance } from 'fastify'
 import type { Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, TaskStatus, WorkflowStatus } from '@studio/db'
 import { syncBatchStatus } from '@studio/db'
-import { createPipelineQueue, enqueue, type PipelinePayload } from '@studio/jobs'
-import { advancePipeline, generationStages, isGenerationStage, toApiStage, triggerStage, type GenerationStage } from '@studio/pipeline'
+import { COMPOSITION_STEP, advancePipeline, createComposition, generationStages, isGenerationStage, liveStoryboards, toApiStage, triggerStage, type GenerationStage } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
+import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
 import { toArtifactDto, type ArtifactDto } from './artifacts.js'
 
-type PipelineQueue = ReturnType<typeof createPipelineQueue>
-
 interface QcDto {
   kind: string
-  score: number
+  /** Null when the checker could not judge the artifact — not a zero, which would read as a failed audit. */
+  score: number | null
   status: WorkflowStatus
 }
 
@@ -77,7 +76,7 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     artifacts: task.artifacts.map(toArtifactDto),
-    qc: check ? { kind: check.kind, score: check.score ?? 0, status: check.status } : null,
+    qc: check ? { kind: check.kind, score: check.score, status: check.status } : null,
   }
 }
 
@@ -115,18 +114,7 @@ async function toCompositionDto(db: PrismaClient, composition: Composition): Pro
 }
 
 export async function generationRoutes(app: FastifyInstance): Promise<void> {
-  // Lazily created: an instance that never triggers a generation keeps no Redis
-  // connection open, and the one queue it does create is closed with the app.
-  let queue: PipelineQueue | undefined
-  app.addHook('onClose', async () => {
-    await queue?.close()
-  })
-  function pipeline(): PipelineQueue {
-    queue ??= createPipelineQueue()
-    return queue
-  }
-
-  const enqueueJob = (payload: PipelinePayload): Promise<void> => enqueue(pipeline(), payload)
+  const enqueueJob = pipelineJobs(app)
 
   app.post<{ Params: { episodeId: string }; Body: GenerationBody }>(
     '/episodes/:episodeId/generations',
@@ -141,10 +129,11 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
-  // Advances the pipeline one step: triggers the next stage whose prerequisites
-  // are met and which has not run yet. This is the "one-click" entry point that
-  // lets the pipeline flow instead of re-triggering every stage by hand; the
-  // worker relays through the same advancePipeline when a batch completes.
+  // Advances the pipeline one step: triggers the next stage whose prerequisites are
+  // met and which has not run yet, and once every stage has run, composes the
+  // episode. This is the "one-click" entry point that lets the pipeline flow instead
+  // of re-triggering every stage by hand; the worker relays through the same
+  // advancePipeline when a batch completes.
   app.post<{ Params: { episodeId: string } }>(
     '/episodes/:episodeId/run-pipeline',
     { preHandler: requirePermission('generation:trigger') },
@@ -154,6 +143,10 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const result = await advancePipeline({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, episode.id)
       if (!result.ok) return reply.code(result.code).send({ error: result.error })
+      if (result.step === 'composition') {
+        const composition = await app.db.composition.findUniqueOrThrow({ where: { id: result.compositionId } })
+        return reply.code(201).send({ stage: COMPOSITION_STEP, composition: await toCompositionDto(app.db, composition) })
+      }
       return reply.code(result.created ? 201 : 200).send({ stage: result.stage, batch: await toBatchDto(app.db, result.batchId) })
     },
   )
@@ -196,25 +189,21 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // A human may compose at any point: the compose worker parks the composition in
+  // BLOCKED when a clip is missing, and BLOCKED stays retriggerable. The manifest
+  // lists the live shots only — concatenating superseded ones would block forever on
+  // clips nobody is going to make.
   app.post<{ Params: { episodeId: string } }>(
     '/episodes/:episodeId/compositions',
     { preHandler: requirePermission('generation:trigger') },
     async (request, reply) => {
       const auth = request.auth!
-      const episode = await app.db.episode.findFirst({
-        where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
-        include: { storyboards: { orderBy: { number: 'asc' }, select: { id: true } } },
-      })
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
-      const composition = await app.db.composition.create({
-        data: {
-          episodeId: episode.id,
-          status: 'RUNNING',
-          manifest: JSON.stringify({ storyboardIds: episode.storyboards.map(storyboard => storyboard.id) }),
-        },
-      })
-      await enqueue(pipeline(), { kind: 'compose-episode', compositionId: composition.id, episodeId: episode.id, organizationId: auth.organizationId })
-      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'composition.trigger', entityType: 'composition', entityId: composition.id, payload: { storyboards: episode.storyboards.length } })
+      const storyboards = await liveStoryboards(app.db, episode.id)
+      const compositionId = await createComposition({ db: app.db, enqueueJob }, auth.organizationId, episode.id, storyboards.map(storyboard => storyboard.id))
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'composition.trigger', entityType: 'composition', entityId: compositionId, payload: { storyboards: storyboards.length } })
+      const composition = await app.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
       return reply.code(201).send({ composition: await toCompositionDto(app.db, composition) })
     },
   )

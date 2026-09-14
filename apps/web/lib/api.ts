@@ -182,6 +182,12 @@ export interface Storyboard {
   id: string
   episodeId: string
   scriptVersionId: string | null
+  /** Which breakdown of the episode this shot belongs to. A regenerate writes revision N+1. */
+  revision: number
+  /** Set once a newer revision replaced this shot. The row survives because its media was paid for. */
+  supersededAt: string | null
+  /** The generation task that wrote this shot; null means a human authored or edited it by hand. */
+  generationTaskId: string | null
   number: number
   title: string
   durationMs: number
@@ -193,6 +199,19 @@ export interface Storyboard {
   assets?: StoryboardAssetLink[]
   firstFrame?: GenerationArtifact | null
   video?: GenerationArtifact | null
+}
+
+/** Live shots are the current breakdown; superseded ones are readable history, never a count. */
+export function isLiveStoryboard(storyboard: Storyboard): boolean {
+  return !storyboard.supersededAt
+}
+
+/**
+ * `includeSuperseded` asks the API for the previous revisions too, so the console can show
+ * a shot list's history without a second request or a hand-edited URL.
+ */
+export function storyboardsPath(episodeId: string, includeSuperseded: boolean): string {
+  return `/episodes/${episodeId}/storyboards${includeSuperseded ? '?includeSuperseded=true' : ''}`
 }
 
 export interface AuditEvent {
@@ -227,7 +246,8 @@ export type GenerationTaskStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
 
 export interface GenerationQc {
   kind: string
-  score: number
+  /** Null when nothing judged the artifact; the console must not render that as a score. */
+  score: number | null
   status: string
 }
 
@@ -303,6 +323,8 @@ export interface Asset {
   name: string
   description: string
   status: string
+  /** The generation task that extracted this asset from the script; null means a human created it. */
+  generationTaskId: string | null
   versions: AssetVersion[]
 }
 

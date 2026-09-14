@@ -27,11 +27,19 @@ export const MOCK_SCRIPT_TEXT = `第一集 雨夜来客
 沈亦蹲下，从积水中捡起一张被撕去一半、浸湿泛黄的老照片。
 沈亦：照片背面有字……`
 
-export const MOCK_STORYBOARD_JSON = JSON.stringify([
-  { number: 1, title: '雨夜现场', description: '暴雨中的滨江老城区街道，霓虹灯在湿漉漉的地面投下斑驳光影。沈亦撑着黑伞走近警戒线，神情凝重。', sourceExcerpt: '雨夜，滨江市老城区发生一起离奇失踪案。', durationMs: 5000, continuityIn: '', continuityOut: '镜头缓缓推向地面' },
-  { number: 2, title: '半张照片', description: '特写：沈亦戴着手套，从积水中捡起一张被撕去一半、浸湿泛黄的老照片，背面隐约可见一行字。', sourceExcerpt: '只在地上捡到一张被雨水浸湿、撕去一半的老照片。', durationMs: 4000, continuityIn: '镜头缓缓推向地面', continuityOut: '切到照片背面特写' },
-  { number: 3, title: '暗中注视', description: '街对面的暗处，记者林晚晴举着相机拍下现场，随后转身消失在雨幕中。', sourceExcerpt: '调查记者林晚晴也在暗中追查同一桩旧案。', durationMs: 5000, continuityIn: '切到照片背面特写', continuityOut: '' },
-])
+export const MOCK_STORYBOARD_JSON = JSON.stringify({
+  shots: [
+    { number: 1, title: '雨夜现场', description: '暴雨中的滨江老城区街道，霓虹灯在湿漉漉的地面投下斑驳光影。沈亦撑着黑伞走近警戒线，神情凝重。', sourceExcerpt: '雨夜，滨江市老城区发生一起离奇失踪案。', durationMs: 5000, continuityIn: '', continuityOut: '镜头缓缓推向地面' },
+    { number: 2, title: '半张照片', description: '特写：沈亦戴着手套，从积水中捡起一张被撕去一半、浸湿泛黄的老照片，背面隐约可见一行字。', sourceExcerpt: '只在地上捡到一张被雨水浸湿、撕去一半的老照片。', durationMs: 4000, continuityIn: '镜头缓缓推向地面', continuityOut: '切到照片背面特写' },
+    { number: 3, title: '暗中注视', description: '街对面的暗处，记者林晚晴举着相机拍下现场，随后转身消失在雨幕中。', sourceExcerpt: '调查记者林晚晴也在暗中追查同一桩旧案。', durationMs: 5000, continuityIn: '切到照片背面特写', continuityOut: '' },
+  ],
+  assets: [
+    { kind: 'character', name: '沈亦', description: '三十岁出头的刑警，短发利落，深色风衣，习惯随身带一把黑伞，眼神冷静克制。' },
+    { kind: 'character', name: '林晚晴', description: '调查记者，二十五岁左右，齐肩黑发被雨水打湿，穿卡其色冲锋衣，胸前挂着单反相机。' },
+    { kind: 'prop', name: '半张老照片', description: '一张被撕去右半、浸湿泛黄的黑白老照片，边角卷曲，背面有一行褪色的钢笔字。' },
+    { kind: 'scene', name: '滨江老城区雨夜街道', description: '南方老城区的窄街，两侧是贴满小广告的旧居民楼，霓虹招牌在积水中倒映，暴雨如注，尽头拉着黄黑警戒线。' },
+  ],
+})
 
 export class MockProviderAdapter implements ProviderAdapter {
   provider = 'mock'

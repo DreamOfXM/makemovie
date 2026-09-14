@@ -24,7 +24,11 @@ export function loadWorkerConfig(env: Record<string, string | undefined> = proce
 }
 
 function qcModeFrom(value: string | undefined): QcMode {
-  if (value === undefined || value === '') return 'random'
+  // The default has to be `pass`: the hash checker is a placeholder with no
+  // opinion about the media, so letting it reject artifacts at random would stall
+  // the automated chain — and with a real provider, re-buy work nobody faulted.
+  // `random` is still there to exercise the rework path on purpose.
+  if (value === undefined || value === '') return 'pass'
   if (value === 'random' || value === 'pass' || value === 'fail' || value === 'model') return value
   throw new Error(`STUDIO_QC_MODE must be one of random|pass|fail|model, got "${value}"`)
 }

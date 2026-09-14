@@ -113,26 +113,43 @@ describe('mock adapter lifecycle', () => {
     expect(result.status).toBe('failed')
   })
 
-  it('answers script and storyboard polls with parseable text', async () => {
+  it('answers a script poll with prose a human can approve, not JSON', async () => {
     const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
-
     const script = capability({ provider: 'mock', model: 'mock-script', modality: 'text' })
-    const { taskId: scriptTask } = await adapter.submit(script, { model: 'mock-script', input: {}, parameters: {} })
-    expect((await adapter.poll(script, scriptTask)).status).toBe('running')
-    const scriptDone = await adapter.poll(script, scriptTask)
-    expect(scriptDone).toEqual({ status: 'completed', text: MOCK_SCRIPT_TEXT })
+    const { taskId } = await adapter.submit(script, { model: 'mock-script', input: {}, parameters: {} })
+    expect((await adapter.poll(script, taskId)).status).toBe('running')
+    const done = await adapter.poll(script, taskId)
+    expect(done).toEqual({ status: 'completed', text: MOCK_SCRIPT_TEXT })
+    expect(done.text!.trim().length).toBeGreaterThan(0)
+    expect(() => JSON.parse(done.text!)).toThrow()
+  })
 
+  it('answers a storyboard poll with shots plus the assets they need', async () => {
+    const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
     const board = capability({ provider: 'mock', model: 'mock-storyboard', modality: 'text' })
-    const { taskId: boardTask } = await adapter.submit(board, { model: 'mock-storyboard', input: {}, parameters: {} })
-    await adapter.poll(board, boardTask)
-    const boardDone = await adapter.poll(board, boardTask)
-    expect(boardDone.status).toBe('completed')
-    expect(boardDone.text).toBe(MOCK_STORYBOARD_JSON)
-    const shots = JSON.parse(boardDone.text!) as Array<Record<string, unknown>>
-    expect(Array.isArray(shots)).toBe(true)
-    expect(shots.length).toBeGreaterThan(0)
-    expect(shots[0]).toHaveProperty('title')
-    expect(shots[0]).toHaveProperty('description')
+    const { taskId } = await adapter.submit(board, { model: 'mock-storyboard', input: {}, parameters: {} })
+    await adapter.poll(board, taskId)
+    const done = await adapter.poll(board, taskId)
+    expect(done.status).toBe('completed')
+    expect(done.text).toBe(MOCK_STORYBOARD_JSON)
+
+    const parsed = JSON.parse(done.text!) as {
+      shots: Array<Record<string, unknown>>
+      assets: Array<{ kind: string; name: string; description: string }>
+    }
+    expect(Array.isArray(parsed.shots)).toBe(true)
+    expect(parsed.shots.length).toBeGreaterThan(0)
+    expect(parsed.shots[0]).toHaveProperty('title')
+    expect(parsed.shots[0]).toHaveProperty('description')
+
+    expect(Array.isArray(parsed.assets)).toBe(true)
+    expect(parsed.assets.length).toBeGreaterThan(0)
+    for (const asset of parsed.assets) {
+      expect(['character', 'prop', 'scene']).toContain(asset.kind)
+      expect(asset.name.length).toBeGreaterThan(0)
+      expect(asset.description.length).toBeGreaterThan(0)
+    }
+    expect(new Set(parsed.assets.map(asset => asset.kind))).toEqual(new Set(['character', 'prop', 'scene']))
   })
 })
 

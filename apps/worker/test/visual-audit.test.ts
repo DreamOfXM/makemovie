@@ -96,8 +96,6 @@ describe('buildAuditPrompt', () => {
 })
 
 describe('HashQualityChecker', () => {
-  // Held as the interface: the hash checker scores the task id and attempt it was
-  // built with and ignores the artifact, but run-task always passes one.
   it('passes in pass mode and reworks in fail mode, both as fake-qc', async () => {
     const passing: QualityChecker = new HashQualityChecker('task-1', 1, 'pass')
     const passed = await passing.check(subject())
@@ -125,6 +123,21 @@ describe('HashQualityChecker', () => {
     expect(() => new HashQualityChecker('task-1', 1, 'model'))
       .toThrow(/cannot serve STUDIO_QC_MODE=model/)
   })
+
+  // task-1 attempt 1 hashes to 0.532, so the same checker rejects an image here:
+  // a script passing next to it shows the modality is what decided, not the score.
+  it('passes text and audio outright because there is no visual surface to score', async () => {
+    for (const mode of ['random', 'fail'] as const) {
+      const checker: QualityChecker = new HashQualityChecker('task-1', 1, mode)
+      expect((await checker.check(subject())).decision).toBe('rework')
+
+      const script = await checker.check(subject({ stage: 'SCRIPT', modality: 'text', mimeType: 'text/plain' }))
+      expect(script).toEqual({ kind: 'fake-qc', decision: 'pass', score: 1 })
+
+      const voice = await checker.check(subject({ stage: 'AUDIO', modality: 'tts', mimeType: 'audio/mpeg' }))
+      expect(voice).toEqual({ kind: 'fake-qc', decision: 'pass', score: 1 })
+    }
+  })
 })
 
 describe('worker qc mode', () => {
@@ -135,9 +148,10 @@ describe('worker qc mode', () => {
     expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: 'pass' }).qcMode).toBe('pass')
   })
 
-  it('defaults to random when unset or empty', () => {
-    expect(loadWorkerConfig(env).qcMode).toBe('random')
-    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: '' }).qcMode).toBe('random')
+  it('defaults to pass when unset or empty, so the placeholder never rejects on its own', () => {
+    expect(loadWorkerConfig(env).qcMode).toBe('pass')
+    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: '' }).qcMode).toBe('pass')
+    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: 'random' }).qcMode).toBe('random')
   })
 
   it('rejects anything else and lists every valid value', () => {

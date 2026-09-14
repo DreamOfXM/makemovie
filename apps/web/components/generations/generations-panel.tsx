@@ -295,7 +295,7 @@ function BatchCard({ batch, cancellingId, onCancel }: BatchCardProps) {
                 {task.provider || task.model ? `${task.provider ?? '—'} · ${task.model ?? '—'}` : '—'}
               </TableCell>
               <TableCell>
-                {task.qc ? (
+                {task.qc?.kind === 'visual-audit' && task.qc.score !== null ? (
                   <span
                     className={cn(
                       'text-xs font-medium tabular-nums',
@@ -304,6 +304,10 @@ function BatchCard({ batch, cancellingId, onCancel }: BatchCardProps) {
                     title={`${task.qc.kind} · ${task.qc.status}`}
                   >
                     {Math.round(task.qc.score * 100)}%
+                  </span>
+                ) : task.qc ? (
+                  <span className="text-muted-foreground text-xs" title={`${task.qc.kind} · ${task.qc.status}`}>
+                    {t('generations.qcUnaudited')}
                   </span>
                 ) : (
                   <span className="text-muted-foreground text-xs">—</span>

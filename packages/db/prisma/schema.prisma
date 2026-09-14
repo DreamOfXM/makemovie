@@ -133,7 +133,9 @@ model ScriptVersion {
   content String
   checksum String
   status WorkflowStatus @default(DRAFT)
+  generationTaskId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
   storyboards Storyboard[]
   @@unique([episodeId, version])
 }
@@ -145,7 +147,9 @@ model Asset {
   name String
   description String
   status WorkflowStatus @default(DRAFT)
+  generationTaskId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
   versions AssetVersion[]
   storyboardLinks StoryboardAsset[]
   @@unique([episodeId, kind, name])
@@ -168,6 +172,8 @@ model Storyboard {
   id String @id @default(cuid())
   episodeId String
   scriptVersionId String?
+  generationTaskId String?
+  revision Int @default(1)
   number Int
   title String
   durationMs Int
@@ -176,12 +182,16 @@ model Storyboard {
   continuityIn String
   continuityOut String
   status WorkflowStatus @default(DRAFT)
+  supersededAt DateTime?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   scriptVersion ScriptVersion? @relation(fields: [scriptVersionId], references: [id])
+  generationTask GenerationTask? @relation("StoryboardAuthor", fields: [generationTaskId], references: [id])
+  mediaTasks GenerationTask[] @relation("ShotMedia")
   assets StoryboardAsset[]
   batches GenerationBatch[]
   qualityChecks QualityCheck[]
-  @@unique([episodeId, number])
+  @@unique([episodeId, revision, number])
+  @@index([episodeId, supersededAt])
 }
 
 model StoryboardAsset {
@@ -214,6 +224,10 @@ model GenerationTask {
   stage Stage
   status TaskStatus @default(QUEUED)
   idempotencyKey String? @unique
+  /// The shot a FIRST_FRAME or VIDEO task was made for. A batch covers every shot it was
+  /// planned against, so without this the newest clip of a three-shot batch looks like the
+  /// clip of all three — and composition would cut one shot three times.
+  storyboardId String?
   provider String?
   model String?
   capabilitySnapshot String?
@@ -224,9 +238,14 @@ model GenerationTask {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   batch GenerationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  storyboard Storyboard? @relation("ShotMedia", fields: [storyboardId], references: [id])
   artifacts MediaArtifact[]
+  scriptVersions ScriptVersion[]
+  generatedStoryboards Storyboard[] @relation("StoryboardAuthor")
+  generatedAssets Asset[]
   @@index([organizationId, status])
   @@index([batchId, status])
+  @@index([storyboardId, stage, status])
 }
 
 model MediaArtifact {

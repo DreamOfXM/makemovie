@@ -18,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
+import { LineageBadge } from '@/components/lineage-badge'
 
 /** Summary row shared by GET source-versions and GET script-versions. */
 export interface VersionSummary {
@@ -26,6 +27,8 @@ export interface VersionSummary {
   checksum: string
   status: string
   contentLength: number
+  /** Only scripts carry lineage: the task that wrote the version, null when a human did. */
+  generationTaskId?: string | null
 }
 
 /** Single-version endpoints include the text the list summaries omit. */
@@ -34,6 +37,8 @@ type VersionDetail = VersionSummary & { content: string }
 interface ScriptApproveResponse {
   version: VersionDetail
   storyboardsUpdated: number
+  /** True when the approval started a regeneration of the breakdown instead of re-pointing shots. */
+  cascaded: boolean
 }
 
 const EMPTY_VERSIONS: VersionSummary[] = []
@@ -147,7 +152,9 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
         method: 'POST',
       })
       toast.success(
-        t('sources.scriptApproved', { version: version.version, count: result.storyboardsUpdated }),
+        result.cascaded
+          ? t('sources.scriptApprovedRegenerating', { version: version.version })
+          : t('sources.scriptApproved', { version: version.version, count: result.storyboardsUpdated }),
       )
       reloadAll()
     } catch (error) {
@@ -337,6 +344,8 @@ function VersionTable({
 
   const path = kind === 'source' ? 'source-versions' : 'script-versions'
   const editable = kind === 'script' && can('episode:write')
+  // A source version is always uploaded by a person, so an origin column there would only repeat itself.
+  const showLineage = kind === 'script'
 
   async function toggleView(version: VersionSummary) {
     setDraft(null)
@@ -399,6 +408,7 @@ function VersionTable({
             <TableRow className="hover:bg-transparent">
               <TableHead>{t('sources.version')}</TableHead>
               <TableHead className="w-32">{t('common.status')}</TableHead>
+              {showLineage && <TableHead className="w-32">{t('lineage.source')}</TableHead>}
               <TableHead className="text-right">{t('common.actions')}</TableHead>
             </TableRow>
           </TableHeader>
@@ -415,6 +425,11 @@ function VersionTable({
                   <TableCell>
                     <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />
                   </TableCell>
+                  {showLineage && (
+                    <TableCell>
+                      <LineageBadge taskId={version.generationTaskId} />
+                    </TableCell>
+                  )}
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => void toggleView(version)} disabled={detailLoading && openVersion === version.version}>
@@ -426,7 +441,7 @@ function VersionTable({
                 </TableRow>
                 {openVersion === version.version && (
                   <TableRow className="hover:bg-transparent">
-                    <TableCell colSpan={3} className="bg-muted/40 py-3">
+                    <TableCell colSpan={showLineage ? 4 : 3} className="bg-muted/40 py-3">
                       {detailLoading ? (
                         <p className="text-muted-foreground text-xs">{t('common.loading')}</p>
                       ) : detail === null ? null : draft === null ? (

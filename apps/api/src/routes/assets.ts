@@ -26,6 +26,7 @@ interface AssetDto {
   name: string
   description: string
   status: WorkflowStatus
+  generationTaskId: string | null
   versions: AssetVersionDto[]
 }
 
@@ -62,6 +63,7 @@ function toAssetDto(asset: AssetRow): AssetDto {
     name: asset.name,
     description: asset.description,
     status: asset.status,
+    generationTaskId: asset.generationTaskId,
     versions: asset.versions.map(toVersionDto),
   }
 }

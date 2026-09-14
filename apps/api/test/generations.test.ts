@@ -322,6 +322,17 @@ describe('artifact content', () => {
       downloadUrl: `/artifacts/${artifact.id}/content`,
     }])
     expect(task.qc).toEqual({ kind: 'visual', score: 0.9, status: 'COMPLETED' })
+
+    // An audit that could not happen writes a null score. It must stay null: a
+    // coerced 0 would render as a red 0%, i.e. a failed judgment nobody made.
+    await env.db.qualityCheck.create({
+      data: { status: 'NEEDS_REVIEW', kind: 'visual-audit', score: null, report: '{}', artifactId: artifact.id, batchId: null },
+    })
+    const unjudged = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const unjudgedTask = (unjudged.json() as { batches: BatchDto[] }).batches
+      .flatMap(batch => batch.tasks)
+      .find(candidate => candidate.id === videoTaskId)!
+    expect(unjudgedTask.qc).toEqual({ kind: 'visual-audit', score: null, status: 'NEEDS_REVIEW' })
   })
 })
 
@@ -576,13 +587,13 @@ describe('storyboard media', () => {
 
     const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId: mediaEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
     const firstFrameTask = await env.db.generationTask.create({
-      data: { organizationId, batchId: batch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${mediaEpisodeId}:IMAGE:${withMedia}` },
+      data: { organizationId, batchId: batch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', storyboardId: withMedia, idempotencyKey: `${mediaEpisodeId}:IMAGE:${withMedia}` },
     })
     const firstFrame = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: firstFrameTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/media-ep/ff/v1.png`, checksum: 'ff-1', mimeType: 'image/png', version: 1, width: 320, height: 240 },
     })
     const videoTask = await env.db.generationTask.create({
-      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', idempotencyKey: `${mediaEpisodeId}:VIDEO:${withMedia}` },
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', storyboardId: withMedia, idempotencyKey: `${mediaEpisodeId}:VIDEO:${withMedia}` },
     })
     const video = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: videoTask.id, stage: 'VIDEO', objectKey: `${organizationId}/media-ep/video/v1.mp4`, checksum: 'v-1', mimeType: 'video/mp4', version: 1, durationMs: 5000 },
@@ -611,18 +622,19 @@ describe('storyboard media', () => {
     const sbId = created.json().id as string
 
     // A regenerate is a separate batch whose task key carries an ':r1' revision
-    // suffix; both tasks resolve to the same storyboard via split(':')[2]. The
-    // base is stamped older so the newest revision must win in the media map.
+    // suffix; both tasks point at the same storyboard through their own
+    // `storyboardId`. The base is stamped older so the newest revision must win
+    // in the media map.
     const baseBatch = await env.db.generationBatch.create({ data: { organizationId, episodeId: revisionEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
     const baseTask = await env.db.generationTask.create({
-      data: { organizationId, batchId: baseBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}`, createdAt: new Date('2024-01-01T00:00:00Z') },
+      data: { organizationId, batchId: baseBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', storyboardId: sbId, idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}`, createdAt: new Date('2024-01-01T00:00:00Z') },
     })
     const baseArtifact = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: baseTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/rev/ff-base.png`, checksum: 'rev-base', mimeType: 'image/png', version: 1, width: 320, height: 240 },
     })
     const regenBatch = await env.db.generationBatch.create({ data: { organizationId, episodeId: revisionEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 1 } })
     const regenTask = await env.db.generationTask.create({
-      data: { organizationId, batchId: regenBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}:r1`, createdAt: new Date('2024-06-01T00:00:00Z') },
+      data: { organizationId, batchId: regenBatch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', storyboardId: sbId, idempotencyKey: `${revisionEpisodeId}:IMAGE:${sbId}:r1`, createdAt: new Date('2024-06-01T00:00:00Z') },
     })
     const regenArtifact = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: regenTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/rev/ff-regen.png`, checksum: 'rev-regen', mimeType: 'image/png', version: 1, width: 320, height: 240 },
@@ -634,6 +646,47 @@ describe('storyboard media', () => {
     const row = rows.find(candidate => candidate.id === sbId)!
     expect(row.firstFrame).toMatchObject({ id: regenArtifact.id, downloadUrl: `/artifacts/${regenArtifact.id}/content` })
     expect(row.firstFrame?.id).not.toBe(baseArtifact.id)
+  })
+
+  it('files a hand-added shot in the live revision and scopes number conflicts to it', async () => {
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 9, title: 'Hand Add EP' } })
+    expect(episode.statusCode).toBe(201)
+    const handEpisodeId = episode.json().id as string
+    const first = await env.app.inject({
+      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'Hand SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(first.statusCode).toBe(201)
+    expect(first.json().revision).toBe(1)
+
+    // Simulate a regenerate: revision 1 is archived and revision 2 is the
+    // breakdown in use. A shot added by hand now has to land in revision 2, or
+    // it sits outside the live list.
+    await env.db.storyboard.updateMany({ where: { episodeId: handEpisodeId, revision: 1 }, data: { supersededAt: new Date() } })
+    await env.db.storyboard.create({
+      data: { episodeId: handEpisodeId, revision: 2, number: 1, title: 'Regen SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+
+    const added = await env.app.inject({
+      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 2, title: 'Hand SB2', durationMs: 5000, description: 'an alley', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(added.statusCode).toBe(201)
+    expect(added.json().revision).toBe(2)
+    expect(added.json().supersededAt).toBeNull()
+
+    // Number 1 is taken in the live revision but free in the archived one, so
+    // the conflict is reported against the revision, not the episode.
+    const clash = await env.app.inject({
+      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'Hand SB1 dup', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(clash.statusCode).toBe(409)
+    expect(clash.json().error).toContain('already exists in this revision')
+
+    const live = await env.app.inject({ method: 'GET', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    const rows = live.json() as Array<{ revision: number; number: number }>
+    expect(rows.map(row => `${row.revision}.${row.number}`).sort()).toEqual(['2.1', '2.2'])
   })
 })
 
@@ -701,13 +754,19 @@ describe('run-pipeline', () => {
     expect(nothing.statusCode).toBe(409)
     expect(nothing.json().error).toBe('pipeline:nothingRunnable')
 
-    await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: 'a source document' } })
-    await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/source-versions/1/approve`, headers: authHeaders(editorToken), payload: {} })
+    // Approved in the store rather than through the endpoint: an approval request now
+    // starts the chain itself, and this test is about the button doing the advancing.
+    await env.db.sourceDocumentVersion.create({ data: { episodeId, version: 1, content: 'a source document', checksum: 'pipeline-src', status: 'APPROVED' } })
 
     const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('SCRIPT')
     expect((res.json().batch as BatchDto).stage).toBe('SCRIPT')
+
+    // Clicking again does not buy the same stage twice.
+    const again = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(again.statusCode).toBe(409)
+    expect(again.json().error).toBe('pipeline:nothingRunnable')
   })
 
   it('advances past IMAGE to VIDEO once first frames already ran', async () => {
@@ -785,5 +844,508 @@ describe('regenerate', () => {
     expect(byBatch.get(regenBatch.id)?.payload).toMatchObject({ stage: 'SCRIPT', revision: 1 })
     expect(byBatch.get(regen2Batch.id)?.payload).toMatchObject({ stage: 'SCRIPT', revision: 2 })
     expect(byBatch.has(baseBatch.id)).toBe(false)
+  })
+})
+
+interface StoryboardRowDto {
+  id: string
+  revision: number
+  number: number
+  title: string
+  scriptVersionId: string | null
+  generationTaskId: string | null
+  supersededAt: string | null
+}
+
+describe('storyboard revisions', () => {
+  const supersededStamp = new Date('2026-03-01T00:00:00Z')
+
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  async function addShots(targetEpisodeId: string, scriptVersionId?: string): Promise<string[]> {
+    const ids: string[] = []
+    for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
+      const created = await env.app.inject({
+        method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '', ...(scriptVersionId ? { scriptVersionId } : {}) },
+      })
+      expect(created.statusCode).toBe(201)
+      ids.push(created.json().id as string)
+    }
+    return ids
+  }
+
+  // A regenerate does not delete: the worker writes the new breakdown as the next
+  // revision and stamps every prior shot, so both revisions stay readable.
+  async function regenerateShots(targetEpisodeId: string, revision: number): Promise<{ superseded: string[]; live: string[] }> {
+    const prior = await env.db.storyboard.findMany({ where: { episodeId: targetEpisodeId, supersededAt: null }, orderBy: { number: 'asc' } })
+    await env.db.storyboard.createMany({
+      data: prior.map(shot => ({
+        episodeId: targetEpisodeId,
+        scriptVersionId: shot.scriptVersionId,
+        revision,
+        number: shot.number,
+        title: `${shot.title} r${revision}`,
+        durationMs: shot.durationMs,
+        description: shot.description,
+        sourceExcerpt: shot.sourceExcerpt,
+        continuityIn: shot.continuityIn,
+        continuityOut: shot.continuityOut,
+      })),
+    })
+    await env.db.storyboard.updateMany({ where: { id: { in: prior.map(shot => shot.id) } }, data: { supersededAt: supersededStamp } })
+    const live = await env.db.storyboard.findMany({ where: { episodeId: targetEpisodeId, supersededAt: null }, orderBy: { number: 'asc' } })
+    return { superseded: prior.map(shot => shot.id), live: live.map(shot => shot.id) }
+  }
+
+  async function newConnection(name: string): Promise<Connection> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    return connection
+  }
+
+  async function bindSlot(slot: string, capabilityId: string, scope?: string): Promise<void> {
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope } })
+    expect(binding.statusCode).toBe(201)
+  }
+
+  const capabilityOf = (connection: Connection, model: string) => connection.capabilities.find(capability => capability.model === model)!.id
+
+  it('lists the live shots with their lineage, and returns the superseded ones on request', async () => {
+    const { projectId: historyProjectId, episodeId: historyEpisodeId } = await newEpisode('Revision History Drama')
+    const firstRevision = await addShots(historyEpisodeId)
+    const { superseded, live } = await regenerateShots(historyEpisodeId, 2)
+    expect(superseded).toEqual(firstRevision)
+
+    const listed = await env.app.inject({ method: 'GET', url: `/episodes/${historyEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    expect(listed.statusCode).toBe(200)
+    const rows = listed.json() as StoryboardRowDto[]
+    expect(rows.map(row => row.id)).toEqual(live)
+    expect(rows.map(row => [row.revision, row.number])).toEqual([[2, 1], [2, 2]])
+    expect(rows.every(row => row.supersededAt === null && row.generationTaskId === null)).toBe(true)
+
+    const history = await env.app.inject({ method: 'GET', url: `/episodes/${historyEpisodeId}/storyboards?includeSuperseded=true`, headers: authHeaders(viewerToken) })
+    expect(history.statusCode).toBe(200)
+    const all = history.json() as StoryboardRowDto[]
+    expect(all.map(row => [row.revision, row.number])).toEqual([[1, 1], [1, 2], [2, 1], [2, 2]])
+    expect(all.filter(row => row.supersededAt !== null).map(row => row.id)).toEqual(firstRevision)
+    expect(all.find(row => row.id === firstRevision[0])!.supersededAt).toBe(supersededStamp.toISOString())
+
+    // The episode's nested shot list is what the console counts, so it describes the
+    // breakdown in use rather than its history.
+    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${historyProjectId}/episodes`, headers: authHeaders(viewerToken) })
+    expect(episodes.statusCode).toBe(200)
+    expect((episodes.json() as { id: string; storyboards: StoryboardRowDto[] }[])[0].storyboards.map(shot => shot.id)).toEqual(live)
+  })
+
+  it('targets only live shots with IMAGE and VIDEO, and refuses a superseded id asked for directly', async () => {
+    const { projectId: mediaProjectId, episodeId: mediaEpisodeId } = await newEpisode('Revision Media Drama')
+    const connection = await newConnection('revision-media')
+    await bindSlot('image_gen', capabilityOf(connection, 'mock-image'), mediaProjectId)
+    await bindSlot('video_t2v', capabilityOf(connection, 'mock-t2v'), mediaProjectId)
+    // Media stages are gated on an approved script.
+    await env.db.scriptVersion.create({ data: { episodeId: mediaEpisodeId, version: 1, content: 'a script', checksum: 'revision-media-script', status: 'APPROVED' } })
+    await addShots(mediaEpisodeId)
+    const { superseded, live } = await regenerateShots(mediaEpisodeId, 2)
+
+    for (const stage of ['IMAGE', 'VIDEO'] as const) {
+      const res = await env.app.inject({ method: 'POST', url: `/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+      expect(res.statusCode).toBe(201)
+      const batch = res.json().batch as BatchDto
+      expect(batch.plannedCount).toBe(2)
+
+      const linked = await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { storyboards: true } })
+      expect(linked.storyboards.map(shot => shot.id).sort()).toEqual([...live].sort())
+
+      // The key's entity segment is the storyboard, so this is also what the
+      // storyboard-media map would resolve these tasks back to.
+      const targeted = (await env.db.generationTask.findMany({ where: { batchId: batch.id } })).map(task => task.idempotencyKey!.split(':')[2]).sort()
+      expect(targeted).toEqual([...live].sort())
+      expect(targeted.some(id => superseded.includes(id))).toBe(false)
+    }
+
+    const explicit = await env.app.inject({
+      method: 'POST', url: `/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken),
+      payload: { stage: 'VIDEO', storyboardIds: [superseded[0]] },
+    })
+    expect(explicit.statusCode).toBe(400)
+    expect(explicit.json().error).toBe('storyboardIds must belong to this episode')
+  })
+
+  it('writes a composition manifest of live shots only', async () => {
+    const { episodeId: composeEpisodeId } = await newEpisode('Revision Compose Drama')
+    await addShots(composeEpisodeId)
+    const { superseded, live } = await regenerateShots(composeEpisodeId, 2)
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${composeEpisodeId}/compositions`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    const composition = res.json().composition as CompositionDto
+    const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    // A manifest listing the superseded duplicates would block forever on clips
+    // nobody is going to make.
+    expect(JSON.parse(stored.manifest)).toEqual({ storyboardIds: live })
+    expect(live.some(id => superseded.includes(id))).toBe(false)
+  })
+})
+
+describe('pipeline advance to composition', () => {
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  async function addShots(targetEpisodeId: string): Promise<string[]> {
+    const ids: string[] = []
+    for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
+      const created = await env.app.inject({
+        method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+      })
+      expect(created.statusCode).toBe(201)
+      ids.push(created.json().id as string)
+    }
+    return ids
+  }
+
+  // A succeeded VIDEO task for the shot, with a VIDEO artifact: exactly what the
+  // compose worker and the delivery gate look for when they pick a clip.
+  async function seedClip(targetEpisodeId: string, storyboardId: string): Promise<void> {
+    const batch = await env.db.generationBatch.create({
+      data: { organizationId, episodeId: targetEpisodeId, stage: 'VIDEO', status: 'COMPLETED', plannedCount: 1, storyboards: { connect: { id: storyboardId } } },
+    })
+    const task = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', storyboardId, idempotencyKey: `${targetEpisodeId}:VIDEO:${storyboardId}` },
+    })
+    await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: task.id, stage: 'VIDEO', objectKey: `${organizationId}/${targetEpisodeId}/clip/${storyboardId}/v1.mp4`, checksum: `clip-${storyboardId}`, mimeType: 'video/mp4', version: 1, durationMs: 5000 },
+    })
+  }
+
+  it('re-runs a media stage whose shots were all superseded', async () => {
+    const { projectId: staleProjectId, episodeId: staleEpisodeId } = await newEpisode('Stale Media Drama')
+    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'stale-media', apiKey: 'test-key' } })
+    expect(connection.statusCode).toBe(201)
+    const capabilities = (connection.json() as Connection).capabilities
+    await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'image_gen', capabilityId: capabilities.find(capability => capability.model === 'mock-image')!.id, projectId: staleProjectId } })
+    expect(binding.statusCode).toBe(201)
+
+    await env.db.scriptVersion.create({ data: { episodeId: staleEpisodeId, version: 1, content: 'a script', checksum: 'stale-media-script', status: 'APPROVED' } })
+    const firstRevision = await addShots(staleEpisodeId)
+    for (const stage of ['SCRIPT', 'STORYBOARD'] as const) {
+      await env.db.generationBatch.create({ data: { organizationId, episodeId: staleEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
+    }
+    // First frames already ran — for the breakdown the episode no longer uses.
+    const staleBatch = await env.db.generationBatch.create({
+      data: { organizationId, episodeId: staleEpisodeId, stage: 'FIRST_FRAME', status: 'COMPLETED', plannedCount: 2, storyboards: { connect: firstRevision.map(id => ({ id })) } },
+    })
+    await env.db.storyboard.createMany({
+      data: firstRevision.map((id, index) => ({ episodeId: staleEpisodeId, revision: 2, number: index + 1, title: `SB${index + 1} r2`, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' })),
+    })
+    await env.db.storyboard.updateMany({ where: { id: { in: firstRevision } }, data: { supersededAt: new Date('2026-03-01T00:00:00Z') } })
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${staleEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().stage).toBe('IMAGE')
+    const batch = res.json().batch as BatchDto
+    expect(batch.id).not.toBe(staleBatch.id)
+    const linked = await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { storyboards: true } })
+    expect(linked.storyboards.every(shot => shot.supersededAt === null && shot.revision === 2)).toBe(true)
+    expect(linked.storyboards).toHaveLength(2)
+    // The stale batch stays readable as the history of what was paid for.
+    expect(await env.db.generationBatch.findUniqueOrThrow({ where: { id: staleBatch.id }, include: { storyboards: true } })).toMatchObject({ status: 'COMPLETED' })
+  })
+
+  it('composes once every live shot has a clip, and re-composes after a regenerate supersedes them', async () => {
+    const { episodeId: terminalEpisodeId } = await newEpisode('Terminal Step Drama')
+    await env.db.scriptVersion.create({ data: { episodeId: terminalEpisodeId, version: 1, content: 'a script', checksum: 'terminal-script', status: 'APPROVED' } })
+    const live = await addShots(terminalEpisodeId)
+    for (const stage of ['SCRIPT', 'STORYBOARD', 'FIRST_FRAME'] as const) {
+      await env.db.generationBatch.create({ data: { organizationId, episodeId: terminalEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
+    }
+
+    // A shot without a clip leaves the pipeline idle: composing now would only park
+    // the master in BLOCKED.
+    await seedClip(terminalEpisodeId, live[0])
+    const idle = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(idle.statusCode).toBe(409)
+    expect(idle.json().error).toBe('pipeline:nothingRunnable')
+    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(0)
+
+    await seedClip(terminalEpisodeId, live[1])
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().stage).toBe('COMPOSITION')
+    const composition = res.json().composition as CompositionDto
+    expect(composition.status).toBe('RUNNING')
+    expect(composition.artifact).toBeNull()
+    const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(JSON.parse(stored.manifest)).toEqual({ storyboardIds: live })
+    const job = await queue.getJob(`compose-${composition.id}`)
+    expect(job?.name).toBe('compose-episode')
+    expect(job?.data as ComposeEpisodePayload).toMatchObject({ kind: 'compose-episode', compositionId: composition.id, episodeId: terminalEpisodeId, organizationId })
+
+    // Composition is the terminal step, so a second advance has nothing left to do
+    // rather than re-making a master that already exists.
+    const again = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(again.statusCode).toBe(409)
+    expect(again.json().error).toBe('pipeline:nothingRunnable')
+    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(1)
+
+    // A regenerate supersedes the breakdown that master was cut from, so the terminal
+    // step is worth taking again — otherwise an edited episode could never be re-cut.
+    await env.db.storyboard.updateMany({ where: { id: { in: live } }, data: { supersededAt: new Date('2026-03-01T00:00:00Z') } })
+    const revised: string[] = []
+    for (const [number, title] of [[1, 'SB1 r2'], [2, 'SB2 r2']] as const) {
+      const created = await env.db.storyboard.create({
+        data: { episodeId: terminalEpisodeId, revision: 2, number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+      })
+      revised.push(created.id)
+    }
+    for (const storyboardId of revised) await seedClip(terminalEpisodeId, storyboardId)
+
+    const recut = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(recut.statusCode).toBe(201)
+    expect(recut.json().stage).toBe('COMPOSITION')
+    const second = recut.json().composition as CompositionDto
+    expect(second.id).not.toBe(composition.id)
+    expect(JSON.parse((await env.db.composition.findUniqueOrThrow({ where: { id: second.id } })).manifest)).toEqual({ storyboardIds: revised })
+    // The superseded master is not deleted: it is the record of what was delivered.
+    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(2)
+
+    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=pipeline.advance', headers: authHeaders(ownerToken) })
+    expect(audit.statusCode).toBe(200)
+    const events = audit.json().events as { entityId: string; payload: { step?: string; compositionId?: string; storyboards?: number } }[]
+    expect(events.some(event => event.entityId === terminalEpisodeId && event.payload.step === 'COMPOSITION' && event.payload.compositionId === composition.id && event.payload.storyboards === 2)).toBe(true)
+  })
+})
+
+describe('script approval cascade', () => {
+  let cascadeEpisodeId: string
+  let approvedScriptId: string
+
+  it('re-runs STORYBOARD as a regenerate when the live shots trace an older script version', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Cascade Drama' } })
+    expect(project.statusCode).toBe(201)
+    const cascadeProjectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${cascadeProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Cascade EP1' } })
+    expect(episode.statusCode).toBe(201)
+    cascadeEpisodeId = episode.json().id as string
+
+    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'cascade-gen', apiKey: 'test-key' } })
+    expect(connection.statusCode).toBe(201)
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    const capability = (connection.json() as Connection).capabilities.find(candidate => candidate.model === 'mock-text')!
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id, projectId: cascadeProjectId } })
+    expect(binding.statusCode).toBe(201)
+
+    const scriptV1 = await env.db.scriptVersion.create({ data: { episodeId: cascadeEpisodeId, version: 1, content: '第一版剧本', checksum: 'cascade-v1', status: 'APPROVED' } })
+    const base = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    expect(base.statusCode).toBe(201)
+    const baseBatch = base.json().batch as BatchDto
+
+    // The worker wrote the breakdown out of version 1.
+    for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
+      const created = await env.app.inject({
+        method: 'POST', url: `/episodes/${cascadeEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '', scriptVersionId: scriptV1.id },
+      })
+      expect(created.statusCode).toBe(201)
+    }
+
+    // A human edits the script and approves the edit.
+    await env.db.scriptVersion.create({ data: { episodeId: cascadeEpisodeId, version: 2, content: '第二版剧本：追逐戏改到天台', checksum: 'cascade-v2', status: 'DRAFT' } })
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().cascaded).toBe(true)
+    expect(res.json().storyboardsUpdated).toBe(0)
+    const approved = res.json().version as { id: string; status: string }
+    expect(approved.status).toBe('APPROVED')
+    approvedScriptId = approved.id
+
+    // The cascade is a regenerate: a second STORYBOARD batch with revision-suffixed
+    // keys, enqueued like any other trigger, leaving the first batch intact.
+    const batches = await env.db.generationBatch.findMany({ where: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD' }, orderBy: { id: 'asc' } })
+    expect(batches).toHaveLength(2)
+    expect(batches[0].id).toBe(baseBatch.id)
+    const cascadeBatchId = batches[1].id
+    expect(cascadeBatchId).not.toBe(baseBatch.id)
+    const tasks = await env.db.generationTask.findMany({ where: { batchId: cascadeBatchId } })
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0].idempotencyKey).toBe(`${cascadeEpisodeId}:STORYBOARD:${cascadeEpisodeId}:r1`)
+    expect(await queue.getJob(`run-${tasks[0].id}-1`)).toBeTruthy()
+    expect((await env.db.generationTask.findMany({ where: { batchId: baseBatch.id } })).map(task => task.idempotencyKey)).toEqual([`${cascadeEpisodeId}:STORYBOARD:${cascadeEpisodeId}`])
+
+    // The breakdown being superseded keeps the version it was actually broken out of;
+    // the regeneration carries the approved one in its request snapshot, which is what
+    // the worker stamps on the revision it writes.
+    const live = await env.db.storyboard.findMany({ where: { episodeId: cascadeEpisodeId, supersededAt: null } })
+    expect(live.every(shot => shot.scriptVersionId === scriptV1.id)).toBe(true)
+    const cascadeSnapshot = JSON.parse(tasks[0].requestSnapshot ?? '') as { scriptVersionId?: string; input: { prompt: string } }
+    expect(cascadeSnapshot.scriptVersionId).toBe(approvedScriptId)
+    expect(cascadeSnapshot.input.prompt).toContain('第二版剧本')
+
+    const cascadeAudit = await env.app.inject({ method: 'GET', url: '/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
+    expect(cascadeAudit.statusCode).toBe(200)
+    const cascadeEvents = cascadeAudit.json().events as { entityId: string; entityType: string; payload: { episodeId: string; stage: string; batchId: string } }[]
+    const cascadeEvent = cascadeEvents.filter(event => event.entityId === approvedScriptId)
+    expect(cascadeEvent).toHaveLength(1)
+    expect(cascadeEvent[0]).toMatchObject({ entityType: 'ScriptVersion', payload: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD', batchId: cascadeBatchId } })
+
+    const regenerateAudit = await env.app.inject({ method: 'GET', url: '/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
+    const regenerateEvents = regenerateAudit.json().events as { entityId: string; payload: { stage: string } }[]
+    expect(regenerateEvents.some(event => event.entityId === cascadeBatchId && event.payload.stage === 'STORYBOARD')).toBe(true)
+  })
+
+  it('does not cascade when the live shots already trace the version being approved', async () => {
+    // The state the worker leaves behind once the regeneration lands: the live shots
+    // are the ones broken out of version 2, so there is nothing left to regenerate.
+    await env.db.storyboard.updateMany({ where: { episodeId: cascadeEpisodeId, supersededAt: null }, data: { scriptVersionId: approvedScriptId } })
+
+    const edited = await env.app.inject({ method: 'PATCH', url: `/episodes/${cascadeEpisodeId}/script-versions/2`, headers: authHeaders(editorToken), payload: { content: '第二版剧本：只改一句台词' } })
+    expect(edited.statusCode).toBe(200)
+    expect(edited.json().version.status).toBe('DRAFT')
+
+    const batchesBefore = await env.db.generationBatch.count({ where: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD' } })
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().cascaded).toBe(false)
+    expect(res.json().storyboardsUpdated).toBe(2)
+    // Re-approving the version the breakdown already came from must not pay for the
+    // same shots again.
+    expect(await env.db.generationBatch.count({ where: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD' } })).toBe(batchesBefore)
+
+    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
+    const events = audit.json().events as { entityId: string }[]
+    expect(events.filter(event => event.entityId === approvedScriptId)).toHaveLength(1)
+  })
+})
+
+describe('approval opens the next step', () => {
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  // Project scope, so these tests do not ride on the org-wide bindings the suite
+  // header made for other stages.
+  async function bindContentSlots(targetProjectId: string, name: string): Promise<void> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    for (const [slot, model] of [['script_text', 'mock-script'], ['storyboard_text', 'mock-storyboard']] as const) {
+      const capability = connection.capabilities.find(candidate => candidate.model === model)!
+      const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+      expect(binding.statusCode).toBe(201)
+    }
+  }
+
+  /** The advance an approval started, read straight from the audit trail. */
+  async function advanceStartedBy(episodeId: string): Promise<{ batchId: string; stage: string; userEmail: string | null }> {
+    const event = await env.db.auditEvent.findFirst({
+      where: { action: 'pipeline.advance', entityType: 'episode', entityId: episodeId },
+      orderBy: { id: 'desc' },
+      include: { user: { select: { email: true } } },
+    })
+    expect(event).toBeTruthy()
+    const payload = JSON.parse(event!.payload) as { stage: string; batchId: string }
+    return { ...payload, userEmail: event!.user?.email ?? null }
+  }
+
+  it('starts SCRIPT from the source approval alone, attributed to whoever approved', async () => {
+    const { projectId: sourceProjectId, episodeId: sourceEpisodeId } = await newEpisode('Approval Source Drama')
+    await bindContentSlots(sourceProjectId, 'approval-source')
+
+    const uploaded = await env.app.inject({ method: 'POST', url: `/episodes/${sourceEpisodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: '雨夜，滨江老城区。半张烧焦的老照片躺在积水里。' } })
+    expect(uploaded.statusCode).toBe(201)
+    expect(await env.db.generationBatch.count({ where: { episodeId: sourceEpisodeId } })).toBe(0)
+
+    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${sourceEpisodeId}/source-versions/1/approve`, headers: authHeaders(editorToken) })
+    expect(approved.statusCode).toBe(200)
+
+    // Uploading is not a decision, approving is — so the chain starts here, without a
+    // second click on **Advance pipeline**.
+    const advance = await advanceStartedBy(sourceEpisodeId)
+    expect(advance.stage).toBe('SCRIPT')
+    expect(advance.userEmail).toBe('gen-editor@example.com')
+
+    const batch = await env.db.generationBatch.findUniqueOrThrow({ where: { id: advance.batchId }, include: { tasks: true } })
+    expect(batch.stage).toBe('SCRIPT')
+    expect(batch.tasks).toHaveLength(1)
+    expect(await queue.getJob(`run-${batch.tasks[0].id}-1`)).toBeTruthy()
+    // The script is written from the words that were just signed off on.
+    const snapshot = JSON.parse(batch.tasks[0].requestSnapshot ?? '') as { input: { prompt: string } }
+    expect(snapshot.input.prompt).toContain('半张烧焦的老照片')
+  })
+
+  it('starts STORYBOARD from a script approval that has nothing to cascade, without buying another script', async () => {
+    const { projectId: scriptProjectId, episodeId: scriptEpisodeId } = await newEpisode('Approval Script Drama')
+    await bindContentSlots(scriptProjectId, 'approval-script')
+
+    // A script the human produced themselves: derived from the approved source, so no
+    // SCRIPT batch exists for the chain to skip past.
+    await env.db.sourceDocumentVersion.create({ data: { episodeId: scriptEpisodeId, version: 1, content: '雨夜追踪的源文档', checksum: 'approval-src', status: 'APPROVED' } })
+    const derived = await env.app.inject({ method: 'POST', url: `/episodes/${scriptEpisodeId}/script-versions`, headers: authHeaders(editorToken), payload: { sourceVersion: 1 } })
+    expect(derived.statusCode).toBe(201)
+    const scriptVersionId = (derived.json().version as { id: string }).id
+
+    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${scriptEpisodeId}/script-versions/1/approve`, headers: authHeaders(editorToken) })
+    expect(approved.statusCode).toBe(200)
+    expect(approved.json().storyboardsUpdated).toBe(0)
+
+    const advance = await advanceStartedBy(scriptEpisodeId)
+    expect(advance.stage).toBe('STORYBOARD')
+    const batch = await env.db.generationBatch.findUniqueOrThrow({ where: { id: advance.batchId }, include: { tasks: true } })
+    expect(batch.stage).toBe('STORYBOARD')
+    expect(await queue.getJob(`run-${batch.tasks[0].id}-1`)).toBeTruthy()
+    const snapshot = JSON.parse(batch.tasks[0].requestSnapshot ?? '') as { input: { prompt: string }; scriptVersionId?: string }
+    expect(snapshot.scriptVersionId).toBe(scriptVersionId)
+    expect(snapshot.input.prompt).toContain('雨夜追踪的源文档')
+
+    // The approved script is the output SCRIPT would have produced, so the chain does
+    // not pay for one and leave a draft the human never asked for.
+    expect(await env.db.generationBatch.count({ where: { episodeId: scriptEpisodeId, stage: 'SCRIPT' } })).toBe(0)
+    expect(await env.db.scriptVersion.count({ where: { episodeId: scriptEpisodeId } })).toBe(1)
+  })
+
+  it('still approves when the next step cannot be planned', async () => {
+    // A second organization: none of the suite's slot bindings reach it, so SCRIPT has
+    // no verified candidate to run on.
+    const other = await env.register('approval-unbound@example.com', 'Approval Unbound Org')
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(other.token), payload: { name: 'Approval Unbound Drama' } })
+    expect(project.statusCode).toBe(201)
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${project.json().id as string}/episodes`, headers: authHeaders(other.token), payload: { number: 1, title: 'EP1' } })
+    expect(episode.statusCode).toBe(201)
+    const unboundEpisodeId = episode.json().id as string
+
+    await env.app.inject({ method: 'POST', url: `/episodes/${unboundEpisodeId}/source-versions`, headers: authHeaders(other.token), payload: { content: 'a source with nowhere to run' } })
+    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${unboundEpisodeId}/source-versions/1/approve`, headers: authHeaders(other.token) })
+    // The approval is already persisted by the time the chain is asked to move, so a
+    // step that could not be started is logged, never thrown back as a failed approval.
+    expect(approved.statusCode).toBe(200)
+    expect(approved.json().version.status).toBe('APPROVED')
+    expect(await env.db.generationBatch.count({ where: { episodeId: unboundEpisodeId } })).toBe(0)
+    expect(await env.db.auditEvent.count({ where: { action: 'pipeline.advance', entityId: unboundEpisodeId } })).toBe(0)
   })
 })

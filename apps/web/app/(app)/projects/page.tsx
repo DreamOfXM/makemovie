@@ -12,7 +12,15 @@ import {
   WorkflowIcon,
 } from 'lucide-react'
 import { canTransition, minRoleFor, workflowStatuses, type WorkflowStatus } from '@studio/domain'
-import { toWorkflowStatus, type AssetsResponse, type Episode, type Project, type Storyboard } from '@/lib/api'
+import {
+  isLiveStoryboard,
+  storyboardsPath,
+  toWorkflowStatus,
+  type AssetsResponse,
+  type Episode,
+  type Project,
+  type Storyboard,
+} from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -54,6 +62,7 @@ import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
 import { StoryboardCard } from '@/components/storyboards/storyboard-card'
+import { StoryboardHistory } from '@/components/storyboards/storyboard-history'
 import { EpisodeStepper } from '@/components/episode/episode-stepper'
 
 type ProjectDialogState = { mode: 'create' } | { mode: 'rename'; project: Project } | null
@@ -92,9 +101,10 @@ export default function ProjectsPage() {
 
   // The enriched endpoint carries each storyboard's generated first frame / video, which
   // the episode embed does not. Refresh it while an episode is open so media shows up
-  // as generations complete.
+  // as generations complete. Superseded revisions ride along so history is one click
+  // away instead of a hand-edited URL.
   const loadStoryboards = useCallback(
-    () => (episodeId ? api<Storyboard[]>(`/episodes/${episodeId}/storyboards`) : Promise.resolve<Storyboard[]>([])),
+    () => (episodeId ? api<Storyboard[]>(storyboardsPath(episodeId, true)) : Promise.resolve<Storyboard[]>([])),
     [api, episodeId],
   )
   const storyboardsMedia = useAsync<Storyboard[]>(episodeId ? loadStoryboards : null, [])
@@ -107,9 +117,26 @@ export default function ProjectsPage() {
   // One list for the count, the empty state, and the cards. The episode embed is only
   // reloaded on an explicit refresh, so consulting it alone would hide shots the worker
   // wrote after an advance — the polled endpoint wins as soon as it has anything.
-  const storyboards = useMemo(
+  const allStoryboards = useMemo(
     () => (storyboardsMedia.data.length > 0 ? storyboardsMedia.data : (selectedEpisode?.storyboards ?? [])),
     [storyboardsMedia.data, selectedEpisode],
+  )
+  // The same list split by revision: a regenerate supersedes the previous breakdown instead
+  // of appending to it, so only live shots may feed the count, the badge, and the stepper.
+  const storyboards = useMemo(() => allStoryboards.filter(isLiveStoryboard), [allStoryboards])
+  const supersededStoryboards = useMemo(
+    () => allStoryboards.filter(storyboard => !isLiveStoryboard(storyboard)),
+    [allStoryboards],
+  )
+  const storyboardRevision = useMemo(
+    () => storyboards.reduce((highest, storyboard) => Math.max(highest, storyboard.revision ?? 1), 0),
+    [storyboards],
+  )
+  // Shot numbers are unique per revision, so a hand-added shot continues after every number
+  // the episode has ever used rather than colliding with a superseded one.
+  const nextStoryboardNumber = useMemo(
+    () => allStoryboards.reduce((highest, storyboard) => Math.max(highest, storyboard.number), 0) + 1,
+    [allStoryboards],
   )
   const nextEpisodeNumber = useMemo(
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
@@ -346,7 +373,10 @@ export default function ProjectsPage() {
                         <TableCell>
                           <Badge variant="secondary">
                             {t('projects.storyboardCount', {
-                              count: episode.id === episodeId ? storyboards.length : (episode.storyboards?.length ?? 0),
+                              count:
+                                episode.id === episodeId
+                                  ? storyboards.length
+                                  : (episode.storyboards?.filter(isLiveStoryboard).length ?? 0),
                             })}
                           </Badge>
                         </TableCell>
@@ -375,13 +405,21 @@ export default function ProjectsPage() {
           <div id="step-storyboards" className="scroll-mt-4">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle className="flex flex-wrap items-center gap-2">
                 <ClapperboardIcon className="text-muted-foreground size-4" />
                 {t('storyboards.title')}
+                {storyboards.length > 0 && (
+                  <Badge variant="tinted" className="font-normal">
+                    {t('storyboards.revision', { revision: storyboardRevision })}
+                  </Badge>
+                )}
               </CardTitle>
               <CardDescription>
                 {selectedEpisode
-                  ? `${t('projects.episode')} ${selectedEpisode.number} · ${selectedEpisode.title}`
+                  ? `${t('projects.episode')} ${selectedEpisode.number} · ${selectedEpisode.title} · ${t(
+                      'projects.storyboardCount',
+                      { count: storyboards.length },
+                    )}`
                   : t('projects.detailHint')}
               </CardDescription>
               {selectedEpisode && (
@@ -390,7 +428,7 @@ export default function ProjectsPage() {
                     action="storyboard:write"
                     size="sm"
                     variant="outline"
-                    onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: storyboards.length + 1 })}
+                    onClick={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
                   >
                     <PlusIcon />
                     {t('storyboards.new')}
@@ -403,7 +441,7 @@ export default function ProjectsPage() {
               <CardContent>
                 <EmptyState icon={<ClapperboardIcon />} title={t('storyboards.selectEpisode')} />
               </CardContent>
-            ) : storyboards.length === 0 ? (
+            ) : allStoryboards.length === 0 ? (
               <CardContent>
                 <EmptyState
                   icon={<ClapperboardIcon />}
@@ -421,17 +459,29 @@ export default function ProjectsPage() {
               </CardContent>
             ) : (
               <CardContent className="space-y-4">
-                {storyboards.map(storyboard => (
-                  <StoryboardCard
-                    key={storyboard.id}
-                    storyboard={storyboard}
-                    canWrite={can('storyboard:write')}
-                    episodeAssets={episodeAssets.data.assets}
-                    onBindAssets={bindStoryboardAssets}
-                    onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
-                    onChangeStatus={() => setStatusTarget(storyboard)}
-                  />
-                ))}
+                {storyboards.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">{t('storyboards.noLiveShots')}</p>
+                ) : (
+                  storyboards.map(storyboard => (
+                    <StoryboardCard
+                      key={storyboard.id}
+                      storyboard={storyboard}
+                      canWrite={can('storyboard:write')}
+                      episodeAssets={episodeAssets.data.assets}
+                      onBindAssets={bindStoryboardAssets}
+                      onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
+                      onChangeStatus={() => setStatusTarget(storyboard)}
+                    />
+                  ))
+                )}
+                <StoryboardHistory
+                  shots={supersededStoryboards}
+                  canWrite={can('storyboard:write')}
+                  episodeAssets={episodeAssets.data.assets}
+                  onBindAssets={bindStoryboardAssets}
+                  onEdit={storyboard => setStoryboardDialog({ mode: 'edit', storyboard })}
+                  onChangeStatus={storyboard => setStatusTarget(storyboard)}
+                />
               </CardContent>
             )}
           </Card>

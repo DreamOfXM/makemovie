@@ -26,6 +26,7 @@ interface AssetDto {
   description: string
   status: string
   versions: AssetVersionDto[]
+  generationTaskId: string | null
 }
 
 beforeAll(async () => {
@@ -118,7 +119,9 @@ describe('episode assets', () => {
     const created = await env.app.inject({ method: 'POST', url: assetsUrl, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(created.statusCode).toBe(201)
     const asset = created.json().asset as AssetDto
-    expect(Object.keys(asset).sort()).toEqual(['description', 'id', 'kind', 'name', 'status', 'versions'])
+    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'status', 'versions'])
+    // Authored by a human, so no task produced it yet.
+    expect(asset.generationTaskId).toBeNull()
     expect(asset.kind).toBe('character')
     expect(asset.name).toBe('小雨')
     expect(asset.description).toBe('雨夜中撑伞的少女')

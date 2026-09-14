@@ -53,7 +53,8 @@ export function auditPlanFor(modality: ModelModality): AuditPlan {
 /**
  * The default audit. Its score is a hash of the task id and attempt number, so it
  * is deterministic, free and needs no bound model — which is exactly why it stays
- * the default and exactly why the row it writes says `fake-qc`.
+ * the default, exactly why the row it writes says `fake-qc`, and exactly why it
+ * declines to score anything with no visual surface to stand in for.
  */
 export class HashQualityChecker implements QualityChecker {
   private readonly taskId: string
@@ -71,7 +72,12 @@ export class HashQualityChecker implements QualityChecker {
     this.mode = mode
   }
 
-  async check(): Promise<QcVerdict> {
+  async check(subject: QcSubject): Promise<QcVerdict> {
+    // The hash stands in for a visual audit, so it only gets to judge artifacts
+    // that have a visual surface. Scoring a script or a soundtrack with it would
+    // reject content on a number that is not a quality signal for it.
+    if (auditPlanFor(subject.modality) === 'none') return { kind: 'fake-qc', decision: 'pass', score: 1 }
+
     const score = qcScore(this.taskId, this.attempt, this.mode)
     if (score >= QC_THRESHOLD) return { kind: 'fake-qc', decision: 'pass', score }
     return {

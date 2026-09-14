@@ -20,6 +20,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
+import { LineageBadge } from '@/components/lineage-badge'
 import { ArtifactPreview } from '@/components/generations/generations-panel'
 
 /** Kinds the authoring form offers as presets; the API itself accepts free text. */
@@ -134,7 +135,11 @@ export function AssetsPanel({ episodeId }: AssetsPanelProps) {
         </CardContent>
       ) : (
         <CardContent className="space-y-4">
-          <div className="space-y-3">
+          <div className="space-y-3 rounded-lg border p-3">
+            <div>
+              <p className="text-sm font-medium">{t('assets.manualTitle')}</p>
+              <p className="text-muted-foreground text-xs">{t('assets.manualHint')}</p>
+            </div>
             <div className="grid gap-3 sm:grid-cols-[10rem_minmax(0,1fr)]">
               <Field label={t('assets.kindLabel')} htmlFor="assetKind">
                 <Select value={kind} onValueChange={value => setKind(value as AssetKind)}>
@@ -213,6 +218,7 @@ function AssetCard({ asset, busy, onApprove }: AssetCardProps) {
           <Badge variant="secondary">{translateEnum(t, 'assets.kind', asset.kind)}</Badge>
           {asset.name}
           <StatusBadge status={toneFor(asset.status)} label={t(`status.${toneFor(asset.status)}`)} />
+          <LineageBadge taskId={asset.generationTaskId} />
         </CardTitle>
         <CardDescription>{t('assets.versions', { count: asset.versions.length })}</CardDescription>
       </CardHeader>

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { Delivery, GenerationTask, MediaArtifact, PrismaClient, Stage, WorkflowStatus } from '@studio/db'
+import { composedStoryboardIds, liveStoryboards } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -58,7 +59,7 @@ interface DeliveryDto {
 type RejectBody = { reason?: string }
 
 // Newest task first so a manifest reads as "what we would ship today" downwards.
-type SucceededTask = GenerationTask & { artifacts: MediaArtifact[]; batch: { storyboards: { id: string }[] } }
+type SucceededTask = GenerationTask & { artifacts: MediaArtifact[] }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
@@ -98,14 +99,22 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
 
-      const storyboards = await app.db.storyboard.findMany({ where: { episodeId: episode.id }, orderBy: { number: 'asc' } })
+      // A delivery describes the episode as it ships, so it lists the live shots:
+      // demanding a clip for a superseded one would refuse every delivery of an
+      // episode whose breakdown was regenerated.
+      const storyboards = await liveStoryboards(app.db, episode.id)
+      // Shot-scoped tasks only: an episode-level task (a script, a breakdown, an asset
+      // reference) belongs to no single shot, and a batch covers every shot it was
+      // planned against, so resolving through the batch would list all of a batch's
+      // artifacts under each of its shots.
       const succeededTasks: SucceededTask[] = await app.db.generationTask.findMany({
-        where: { status: 'SUCCEEDED', batch: { episodeId: episode.id } },
-        include: { artifacts: true, batch: { select: { storyboards: { select: { id: true } } } } },
+        where: { status: 'SUCCEEDED', storyboardId: { not: null }, batch: { episodeId: episode.id } },
+        include: { artifacts: true },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       })
       const tasksOf = (storyboardId: string): SucceededTask[] =>
-        succeededTasks.filter(task => task.batch.storyboards.some(link => link.id === storyboardId))
+        succeededTasks.filter(task => task.storyboardId === storyboardId)
+      const composed = await composedStoryboardIds(app.db, episode.id)
 
       // Composition has no timestamp columns; cuid ids sort chronologically.
       const compositions = await app.db.composition.findMany({ where: { episodeId: episode.id }, orderBy: { id: 'desc' } })
@@ -123,10 +132,7 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       for (const storyboard of storyboards) {
         // The compose worker picks a clip by exactly this rule, so an episode that
         // cannot be composed cannot be delivered either.
-        const composed = tasksOf(storyboard.id).some(
-          task => task.stage === 'VIDEO' && task.artifacts.some(artifact => artifact.stage === 'VIDEO'),
-        )
-        if (!composed) reasons.push(`storyboard ${storyboard.number} has no succeeded video artifact`)
+        if (!composed.has(storyboard.id)) reasons.push(`storyboard ${storyboard.number} has no succeeded video artifact`)
       }
       if (reasons.length > 0 || !finished || !master) return reply.code(409).send({ error: 'delivery:notReady', reasons })
 

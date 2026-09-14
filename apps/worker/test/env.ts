@@ -71,7 +71,7 @@ export interface WorkerTestEnv {
   seed(input?: SeedInput): Promise<Seed>
   runPayload(seed: Seed, attempt?: number): RunTaskPayload
   composePayload(compositionId: string, seed: Seed): ComposeEpisodePayload
-  attachSucceededVideo(seed: Seed, storyboardId: string, version: number): Promise<void>
+  attachSucceededVideo(seed: Seed, storyboardId: string, version: number, options?: { durationMs?: number }): Promise<void>
   takeWaitingRunTasks(): Promise<RunTaskPayload[]>
   drain(): Promise<void>
   stop(): Promise<void>
@@ -209,7 +209,7 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
     composePayload(compositionId, seed) {
       return { kind: 'compose-episode', compositionId, episodeId: seed.episodeId, organizationId: seed.organizationId }
     },
-    async attachSucceededVideo(seed, storyboardId, version) {
+    async attachSucceededVideo(seed, storyboardId, version, options) {
       const batch = await db.generationBatch.create({
         data: {
           organizationId: seed.organizationId,
@@ -221,12 +221,12 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
         },
       })
       const task = await db.generationTask.create({
-        data: { organizationId: seed.organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', attempts: version },
+        data: { organizationId: seed.organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', attempts: version, storyboardId },
       })
       const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-seed-'))
       try {
         const source = path.join(workdir, 'clip.mp4')
-        const media = await synthesizeMockMedia('t2v', source, { durationMs: 1000 })
+        const media = await synthesizeMockMedia('t2v', source, { durationMs: options?.durationMs ?? 1000 })
         const stored = await storage.put(
           buildObjectKey({
             tenantId: seed.organizationId,

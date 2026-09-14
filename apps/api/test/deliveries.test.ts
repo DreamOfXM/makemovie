@@ -87,6 +87,8 @@ async function seedTask(
       storyboards: { connect: storyboardIndexes.map(index => ({ id: storyboardIds[index]! })) },
     },
   })
+  // One shot per call: the gate and the manifest both read a task's media off its
+  // own storyboardId, so a task without one belongs to no shot and is invisible.
   const task = await env.db.generationTask.create({
     data: {
       organizationId,
@@ -94,6 +96,7 @@ async function seedTask(
       stage,
       status: options.status ?? 'SUCCEEDED',
       createdAt: options.createdAt ?? at(0),
+      storyboardId: storyboardIds[storyboardIndexes[0]!] ?? null,
     },
   })
   const created: MediaArtifact[] = []

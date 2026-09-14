@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { PrismaClient } from '@studio/db'
 import type { ComposeEpisodePayload } from '@studio/jobs'
 import { buildObjectKey } from '@studio/media'
+import { manifestStoryboardIds } from '@studio/pipeline'
 import type { PipelineDeps } from './deps.js'
 
 const COMPOSITION_VERSION = 1
@@ -56,15 +57,14 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
   }
 }
 
+/**
+ * The shot's own newest clip. Filtering through the batch instead would hand every
+ * shot of a batch the same artifact — the mock's byte-identical clips hid that, and
+ * a real provider would have composed one shot three times.
+ */
 async function latestVideoArtifact(db: PrismaClient, storyboardId: string) {
   return db.mediaArtifact.findFirst({
-    where: { stage: 'VIDEO', task: { status: 'SUCCEEDED', stage: 'VIDEO', batch: { storyboards: { some: { id: storyboardId } } } } },
+    where: { stage: 'VIDEO', task: { status: 'SUCCEEDED', stage: 'VIDEO', storyboardId } },
     orderBy: { version: 'desc' },
   })
-}
-
-function manifestStoryboardIds(manifest: string): string[] {
-  const parsed = JSON.parse(manifest) as { storyboardIds?: unknown }
-  if (!Array.isArray(parsed.storyboardIds)) return []
-  return parsed.storyboardIds.filter((id): id is string => typeof id === 'string')
 }

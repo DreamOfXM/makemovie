@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
-import type { PrismaClient } from '@studio/db'
+import { Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
 import { can, canTransition, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { authenticate, requirePermission } from '../plugins/auth.js'
@@ -22,24 +22,23 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
 }
 
-// A task's idempotency key is `${episodeId}:${stage}:${entityId}` (a regenerate appends
-// a `:rN` revision segment), and for the per-storyboard IMAGE/VIDEO stages the entity is
-// the storyboard, so the third segment maps a succeeded task back to its storyboard. Tasks
-// are walked oldest-to-newest so the latest revision overwrites any stale one in the map.
+// Tasks are walked oldest-to-newest so the latest revision overwrites any stale one in
+// the map. The shot comes from the task's own `storyboardId`, not from a segment of its
+// idempotency key: that key is an anti-collision token, and reading a relation out of it
+// would silently detach every shot from its media the day the key format changed.
 async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }> {
   const firstFrame = new Map<string, ArtifactDto>()
   const video = new Map<string, ArtifactDto>()
   const tasks = await db.generationTask.findMany({
-    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO'] }, status: 'SUCCEEDED' },
+    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO'] }, status: 'SUCCEEDED', storyboardId: { not: null } },
     include: { artifacts: { orderBy: { version: 'desc' }, take: 1 } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
   for (const task of tasks) {
-    const storyboardId = task.idempotencyKey?.split(':')[2]
     const artifact = task.artifacts[0]
-    if (!storyboardId || !artifact) continue
-    if (task.stage === 'FIRST_FRAME') firstFrame.set(storyboardId, toArtifactDto(artifact))
-    else if (task.stage === 'VIDEO') video.set(storyboardId, toArtifactDto(artifact))
+    if (!task.storyboardId || !artifact) continue
+    if (task.stage === 'FIRST_FRAME') firstFrame.set(task.storyboardId, toArtifactDto(artifact))
+    else if (task.stage === 'VIDEO') video.set(task.storyboardId, toArtifactDto(artifact))
   }
   return { firstFrame, video }
 }
@@ -53,6 +52,55 @@ interface StoryboardAssetDto {
 }
 
 type StoryboardAssetLink = { role: string; asset: { id: string; kind: string; name: string; status: string } }
+
+type StoryboardRow = Prisma.StoryboardGetPayload<{ include: { assets: true } }>
+
+/**
+ * The shot as the console reads it. `revision` and `supersededAt` are what make a
+ * regenerated breakdown navigable: a superseded shot is history, still carrying the
+ * media it was paid for, and `generationTaskId` traces it to the task that wrote it.
+ */
+interface StoryboardDto {
+  id: string
+  episodeId: string
+  scriptVersionId: string | null
+  generationTaskId: string | null
+  revision: number
+  number: number
+  title: string
+  durationMs: number
+  description: string
+  sourceExcerpt: string
+  continuityIn: string
+  continuityOut: string
+  status: DbWorkflowStatus
+  supersededAt: string | null
+  assets: StoryboardRow['assets']
+  firstFrame: ArtifactDto | null
+  video: ArtifactDto | null
+}
+
+function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }): StoryboardDto {
+  return {
+    id: storyboard.id,
+    episodeId: storyboard.episodeId,
+    scriptVersionId: storyboard.scriptVersionId,
+    generationTaskId: storyboard.generationTaskId,
+    revision: storyboard.revision,
+    number: storyboard.number,
+    title: storyboard.title,
+    durationMs: storyboard.durationMs,
+    description: storyboard.description,
+    sourceExcerpt: storyboard.sourceExcerpt,
+    continuityIn: storyboard.continuityIn,
+    continuityOut: storyboard.continuityOut,
+    status: storyboard.status,
+    supersededAt: storyboard.supersededAt?.toISOString() ?? null,
+    assets: storyboard.assets,
+    firstFrame: media.firstFrame.get(storyboard.id) ?? null,
+    video: media.video.get(storyboard.id) ?? null,
+  }
+}
 
 function toStoryboardAssetDto(link: StoryboardAssetLink): StoryboardAssetDto {
   return { id: link.asset.id, kind: link.asset.kind, name: link.asset.name, status: link.asset.status, role: link.role }
@@ -106,7 +154,9 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       return app.db.episode.findMany({
         where: { projectId: project.id },
-        include: { storyboards: { orderBy: { number: 'asc' } } },
+        // Superseded shots are history, so an episode's shot list — and the count the
+        // console shows next to it — describes the breakdown in use.
+        include: { storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] } },
         orderBy: { number: 'asc' },
       })
     },
@@ -132,10 +182,19 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         if (!script) return reply.code(400).send({ error: 'scriptVersionId does not belong to this episode' })
       }
       try {
+        // A shot a human adds belongs to the breakdown currently in use, not to
+        // revision 1 — once the shot list has been regenerated, revision 1 is
+        // superseded and a new shot filed there would sit outside the live list.
+        const live = await app.db.storyboard.aggregate({
+          where: { episodeId: episode.id, supersededAt: null },
+          _max: { revision: true },
+        })
+        const revision = live._max.revision ?? 1
         const storyboard = await app.db.storyboard.create({
           data: {
             episodeId: episode.id,
             scriptVersionId: body.scriptVersionId || null,
+            revision,
             number: body.number as number,
             title: body.title.trim(),
             durationMs: body.durationMs as number,
@@ -145,29 +204,33 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
             continuityOut: body.continuityOut ?? '',
           },
         })
-        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'storyboard.create', entityType: 'Storyboard', entityId: storyboard.id, payload: { number: storyboard.number, title: storyboard.title } })
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'storyboard.create', entityType: 'Storyboard', entityId: storyboard.id, payload: { revision: storyboard.revision, number: storyboard.number, title: storyboard.title } })
         return reply.code(201).send(storyboard)
       } catch (error) {
-        if (isPrismaUniqueViolation(error)) return reply.code(409).send({ error: `Storyboard number ${body.number} already exists in this episode` })
+        if (isPrismaUniqueViolation(error)) return reply.code(409).send({ error: `Storyboard number ${body.number} already exists in this revision` })
         throw error
       }
     },
   )
 
-  app.get<{ Params: { episodeId: string } }>(
+  // The live shot list by default. `includeSuperseded=true` adds the revisions a
+  // regenerate replaced: superseding instead of deleting is only useful if the
+  // previous breakdown and the media it was paid for stay readable.
+  app.get<{ Params: { episodeId: string }; Querystring: { includeSuperseded?: string } }>(
     '/episodes/:episodeId/storyboards',
     { preHandler: requirePermission('read') },
     async (request, reply) => {
       const auth = request.auth!
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
-      const storyboards = await app.db.storyboard.findMany({ where: { episodeId: episode.id }, include: { assets: true }, orderBy: { number: 'asc' } })
+      const includeSuperseded = request.query?.includeSuperseded === 'true' || request.query?.includeSuperseded === '1'
+      const storyboards = await app.db.storyboard.findMany({
+        where: { episodeId: episode.id, ...(includeSuperseded ? {} : { supersededAt: null }) },
+        include: { assets: true },
+        orderBy: [{ revision: 'asc' }, { number: 'asc' }],
+      })
       const media = await storyboardMedia(app.db, episode.id)
-      return storyboards.map(storyboard => ({
-        ...storyboard,
-        firstFrame: media.firstFrame.get(storyboard.id) ?? null,
-        video: media.video.get(storyboard.id) ?? null,
-      }))
+      return storyboards.map(storyboard => toStoryboardDto(storyboard, media))
     },
   )
 
