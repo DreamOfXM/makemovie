@@ -203,6 +203,9 @@ importers:
       '@prisma/client':
         specifier: ^6.2.1
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
+      '@studio/domain':
+        specifier: workspace:*
+        version: link:../domain
     devDependencies:
       prisma:
         specifier: ^6.2.1
@@ -210,6 +213,9 @@ importers:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)(lightningcss@1.32.0)
 
   packages/domain:
     devDependencies:
