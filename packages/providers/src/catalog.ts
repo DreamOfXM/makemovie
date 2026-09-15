@@ -1,4 +1,5 @@
 import type { ModelModality } from '@studio/domain'
+import { SEEDANCE_DEFAULT_BASE_URL } from './seedance.js'
 
 export interface CatalogModel {
   model: string
@@ -40,6 +41,17 @@ const dashscope: ProviderCatalog = {
   ],
 }
 
+const seedance: ProviderCatalog = {
+  provider: 'seedance',
+  label: 'Volcano Ark (Doubao Seedance)',
+  defaultBaseUrl: SEEDANCE_DEFAULT_BASE_URL,
+  catalogVersion: '2026-09',
+  models: [
+    { model: 'doubao-seedance-1-0-pro-250528', displayName: 'Seedance 1.0 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'the returned video link is signed and lasts about a day, so the worker ingests it the moment the task settles' } },
+    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'image-to-video is not offered yet: Ark takes a first frame as a public URL and this product keeps its frames behind its own storage' } },
+  ],
+}
+
 const mock: ProviderCatalog = {
   provider: 'mock',
   label: 'Mock Provider (development & CI)',
@@ -61,6 +73,7 @@ const mock: ProviderCatalog = {
 
 const registry = new Map<string, ProviderCatalog>([
   [dashscope.provider, dashscope],
+  [seedance.provider, seedance],
   [mock.provider, mock],
 ])
 

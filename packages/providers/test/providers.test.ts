@@ -17,6 +17,7 @@ import {
   resetDashScopeSyncResults,
   resetMockTasks,
   sanitizeError,
+  SeedanceAdapter,
   validateReferenceRequest,
 } from '../src/index.js'
 
@@ -32,11 +33,21 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 }
 
 describe('catalog', () => {
-  it('lists dashscope and mock catalogs', () => {
+  it('lists dashscope, seedance and mock catalogs', () => {
     const providers = listCatalogs().map(c => c.provider).sort()
-    expect(providers).toEqual(['dashscope', 'mock'])
+    expect(providers).toEqual(['dashscope', 'mock', 'seedance'])
     expect(isKnownProvider('dashscope')).toBe(true)
+    expect(isKnownProvider('seedance')).toBe(true)
     expect(isKnownProvider('nope')).toBe(false)
+  })
+
+  it('seedance catalog advertises only the t2v endpoint it implements', () => {
+    const catalog = getCatalog('seedance')
+    expect(catalog).toBeDefined()
+    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v']))
+    for (const model of catalog!.models) {
+      expect(model.acceptsFirstFrame).toBeUndefined()
+    }
   })
 
   it('dashscope catalog only contains modalities with public endpoints', () => {
@@ -71,6 +82,7 @@ describe('createAdapter', () => {
   it('creates known adapters and rejects unknown providers', () => {
     expect(createAdapter('mock', { apiKey: 'k', baseUrl: 'mock://local' })).toBeInstanceOf(MockProviderAdapter)
     expect(createAdapter('dashscope', { apiKey: 'k', baseUrl: 'https://dashscope.aliyuncs.com' }).provider).toBe('dashscope')
+    expect(createAdapter('seedance', { apiKey: 'k', baseUrl: 'https://ark.cn-beijing.volces.com' })).toBeInstanceOf(SeedanceAdapter)
     expect(() => createAdapter('unknown', { apiKey: 'k', baseUrl: '' })).toThrow(/unknown provider/)
   })
 })

@@ -13,7 +13,7 @@ afterAll(async () => {
 
 const authHeaders = (token: string) => env.authHeaders(token)
 
-interface Connection { id: string; provider: string; name: string; capabilities: { id: string; model: string; modality: string }[] }
+interface Connection { id: string; provider: string; name: string; baseUrl: string; capabilities: { id: string; model: string; modality: string }[] }
 
 async function createMockConnection(token: string, name: string, apiKey = 'test-key'): Promise<Connection> {
   const res = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name, apiKey } })
@@ -26,10 +26,12 @@ describe('provider catalogs', () => {
     const owner = await env.register('mc-catalog@example.com', 'Catalog Org')
     const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
-    const catalogs = res.json() as { provider: string; models: { model: string }[] }[]
-    expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'mock'])
+    const catalogs = res.json() as { provider: string; defaultBaseUrl: string; models: { model: string }[] }[]
+    expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'mock', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
     expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
+    const seedance = catalogs.find(c => c.provider === 'seedance')!
+    expect(seedance.defaultBaseUrl).toBe('https://ark.cn-beijing.volces.com')
   })
 
   it('rejects anonymous access', async () => {
@@ -53,6 +55,24 @@ describe('provider connections', () => {
     const body = list.json() as Record<string, unknown>[]
     expect(body[0]).not.toHaveProperty('encryptedSecret')
     expect(body[0].apiKeySet).toBe(true)
+  })
+
+  it('creates a seedance connection over its two text-to-video models', async () => {
+    const owner = await env.register('mc-seedance@example.com', 'Seedance Org')
+    const res = await env.app.inject({
+      method: 'POST',
+      url: '/providers/connections',
+      headers: authHeaders(owner.token),
+      payload: { provider: 'seedance', name: 'ark-main', apiKey: 'test-ark-key' },
+    })
+    expect(res.statusCode).toBe(201)
+    const connection = res.json() as Connection
+    expect(connection.baseUrl).toBe('https://ark.cn-beijing.volces.com')
+    expect(connection.capabilities.map(c => c.model).sort()).toEqual(['doubao-seedance-1-0-pro-250528', 'doubao-seedance-1-5-pro-251215'])
+    expect(new Set(connection.capabilities.map(c => c.modality))).toEqual(new Set(['t2v']))
+
+    const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+    expect(stored.encryptedSecret).not.toContain('test-ark-key')
   })
 
   it('rejects duplicate names, unknown providers and missing keys', async () => {
