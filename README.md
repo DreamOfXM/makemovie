@@ -21,16 +21,19 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 **Model capability center**
 
-- Provider catalogs with capability slots: script text, storyboard text, image generation, video (T2V / I2V / R2V), voice, music, and visual audit
-- Bundled catalogs for Alibaba Cloud Bailian / DashScope (Qwen text and vision, Wanx and Qwen Image, `qwen3-tts-flash` voice, music), Volcano Ark Seedance and Kuaishou Kling video, and a mock provider
+- A readiness view that answers the only question an operator arrives with: **the chain resolves seven slots, four of them required, and the page scores those four and names the catalog that covers them on its own** — which in practice means one Alibaba Cloud Bailian connection and one key is enough for the whole chain. Every row says which stage consumes it and what its absence costs: a silent master, no score bed, shots left unaudited, or a composition that cannot cut
+- Capability slots for script text, storyboard text, image generation, video (T2V / I2V / R2V), voice, music, and visual audit; the two reference-video slots are listed as not yet wired into the chain rather than as something to go and buy
+- Bundled catalogs for Alibaba Cloud Bailian / DashScope (Qwen text and vision, Wanx and Qwen Image, `qwen3-tts-flash` voice, music), Volcano Ark Seedance and Kuaishou Kling video, OpenAI, Google Gemini, Anthropic, an OpenAI-compatible gateway for private endpoints, and a mock provider. The OpenAI, Gemini and Anthropic models are wired from published vendor documentation and covered by contract tests against a stubbed HTTP layer — they have **not** been run against a live account, and every one of their catalog entries carries that qualifier in its own spec detail. The gateway entry ships no model list and no default host on purpose: it is a protocol, not a vendor, so both are typed in on the connection
 - Provider credentials encrypted at rest (AES-256-GCM) and never returned by read endpoints; vendors that authenticate with an access key and a secret key store both halves
-- Entitlement probes that verify which models a key can actually call before you bind them
+- Two verification tiers: a connection probe that checks the credential against the vendor, and per-model verification where a request exists that names one model without generating from it. An endpoint that denies a model revokes the product's belief in that row; an image, video or audio endpoint has no such request, so those rows are labelled as needing one real generation instead of being given a check mark that was never earned
+- Models entered by hand on a connection, for gateways and fine-tuned checkpoints whose names no reviewed catalog can know
 - Slot bindings with ordered fallback candidates; project-level bindings override organization-level ones
 
 **Production pipeline**
 
 - Source and script versioning with checksums, duplicate detection, and explicit approval gates
 - AI content generation: the script is written from the approved source, the shot list and the cast/props/scenes are extracted from the approved script — each stage gated on its upstream approval
+- Content language set per project, independent of the console's own display language: a Chinese project is the unchanged default and an English project is prompted for English dialogue and narration, with the structured shot format held identical across both
 - Episode assets with generated reference images, approval as the likeness, and bindings to the shots that use them
 - Per-stage generation batches dispatched over BullMQ with idempotent triggers, candidate fallback, and automatic rework on quality rejection
 - Automated orchestration: a completed batch relays the next stage on its own, from script through voice and score to a composed master; a stage with nothing bound to it is stepped over rather than waited on, and **Advance pipeline** remains available for manual stepping
@@ -57,7 +60,7 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 | `apps/worker` | BullMQ consumer: provider calls, quality gates, content write-back, composition |
 | `packages/domain` | State machines, RBAC matrix, capability slots and binding rules |
 | `packages/pipeline` | Orchestration: stage gates, prompt building, batching, auto-advance, regenerate, cascade, composition planning |
-| `packages/providers` | Provider catalogs and adapters (Alibaba Cloud Bailian / DashScope, Volcano Ark Seedance, Kuaishou Kling, mock) |
+| `packages/providers` | Provider catalogs and adapters (Alibaba Cloud Bailian / DashScope, Volcano Ark Seedance, Kuaishou Kling, OpenAI, Google Gemini, Anthropic, any OpenAI-compatible gateway, mock) |
 | `packages/db` | Prisma schema, migrations, batch status rollup |
 | `packages/media` | Object storage backends, media synthesis for the mock provider, FFmpeg composition with voice, score and subtitles |
 | `packages/security` | Argon2id hashing, token hashing, AES-256-GCM secret encryption |
@@ -83,16 +86,16 @@ pnpm --filter @studio/db exec prisma migrate deploy
 pnpm dev                                              # api :4010 · web :3010 · worker
 ```
 
-Open http://localhost:3010 and create a workspace, then bind models in **Model center**:
+Open http://localhost:3010 and create a workspace, then configure models in **Model center**. The **Readiness** tab opens first and states what the chain needs: four required slots — `script_text`, `storyboard_text`, `image_gen`, `video_t2v` — plus three optional ones.
 
-1. Add a provider connection. Credentials are encrypted at rest with `STUDIO_MASTER_KEY`; a vendor that signs requests with an access key and a secret key asks for both.
-2. Run **Probe entitlements** to verify which models your key can call.
-3. Bind verified models to the capability slots. **Resolve candidates** shows the ordered fallback list the pipeline will use.
+1. Add a provider connection. Credentials are encrypted at rest with `STUDIO_MASTER_KEY`; a vendor that signs requests with an access key and a secret key asks for both. A DashScope connection alone covers all four required slots and the optional ones too. A gateway has no published model list, so add the model names it actually serves on the connection.
+2. Run **Probe** to check the credential, and **Verify this model** on any chat-family row to check that single model by name.
+3. Bind a verified model to each of the four required slots — those four are what the chain needs before it can cut anything. The three optional slots cost you output rather than blocking it: without `tts_voice` the master is cut silent, without `music_gen` there is no score bed, and without `visual_audit` shots stay unaudited rather than passing unexamined. **Resolve candidates** shows the ordered fallback list the pipeline will use.
 
 Produce an episode:
 
-4. Open a project, select an episode, and in **Sources & scripts** paste or upload the source text, then **Approve** it. The approval starts the chain: the script stage runs on its own and writes a script version from the approved source.
-5. Read the generated script (**View** expands the full text) and correct it in place if needed — saving recomputes the checksum and returns it to draft for re-approval — then **Approve** it. That approval sets the rest running: shot breakdown, asset extraction, reference images, first frames, clips, voice-over for the shots with dialogue, an optional background score, and the composed master. The **Generation** panel shows every stage, and each artifact becomes previewable as it lands. Bind the `tts_voice` and `music_gen` slots to hear the audio chain; without them the master is cut silent.
+4. Open a project — the content language is a project setting, chosen when you create or edit it, and decides what language the script and shots come back in — select an episode, and in **Sources & scripts** paste or upload the source text, then **Approve** it. The approval starts the chain: the script stage runs on its own and writes a script version from the approved source.
+5. Read the generated script (**View** expands the full text) and correct it in place if needed — saving recomputes the checksum and returns it to draft for re-approval — then **Approve** it. That approval sets the rest running: shot breakdown, asset extraction, reference images, first frames, clips, voice-over for the shots with dialogue, an optional background score, and the composed master. The **Generation** panel shows every stage, and each artifact becomes previewable as it lands. Bind the `tts_voice` and `music_gen` slots to hear the audio chain.
 6. Step in whenever you want. **Advance pipeline** pushes one step by hand, **Trigger generation** runs a single stage, **Regenerate** re-runs a stage after an edit as a new revision, and **Compose episode** cuts a master on demand.
 7. In **Deliveries**, package the episode. Packaging is refused with reasons until composition has completed and every live shot has a succeeded clip; then inspect or download the manifest and record an accept or reject. The composition card also downloads the master's subtitle track.
 
@@ -109,6 +112,7 @@ Triggering a stage twice returns the existing batch instead of queueing duplicat
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | Disk backend root; the API and the worker must share the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume) |
 | `STUDIO_QC_MODE` | `pass` | Quality gate: `pass` accepts every artifact, `fail` rejects every one, `random` scores a hash of task and attempt against the 0.7 threshold, `model` asks the bound `visual_audit` model |
 | `STUDIO_POLL_TIMEOUT_MS` | `900000` | How long the worker keeps polling one provider task before writing it off; text-to-video vendors routinely take several minutes |
+| `STUDIO_ALLOW_PRIVATE_PROVIDER_URLS` | off | Allow a provider connection to point at a private, loopback or link-local host. Off by default so the API refuses a gateway address that reaches the cloud metadata endpoint; turn it on only where the gateway is self-hosted on the same trusted network |
 | `S3_ENDPOINT` / `S3_BUCKET` / `S3_REGION` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | compose defaults | Used only when `STORAGE_BACKEND=s3`; the bucket must already exist |
 | `CORS_ORIGIN` | `http://localhost:3010` | Comma-separated allowed origins |
 | `SESSION_TTL_MS` | 7 days | Session lifetime |
@@ -131,7 +135,7 @@ The repository ships a mock provider used by the test suite and for exploring th
 pnpm test
 ```
 
-API integration tests boot an embedded PostgreSQL, apply the real migrations, and exercise auth, RBAC, tenant isolation, the state machine, the audit trail, the model capability center, generation batches, artifact streaming, versioning, assets, orchestration and acceptance-gated deliveries end to end — no Docker and no API key required. Worker tests cover candidate fallback, the quality gate with rework, the visual audit, per-shot voice, composition, AI content write-back and auto-advance, shelling out to a real `ffmpeg`. Media tests cover both storage backends and the two-pass composer, including the case where a voice line is longer or shorter than its shot. Provider tests replay each vendor's request shapes, task vocabulary and credential handling against stubbed HTTP, so no live key is ever involved. The mock provider stands in for live multimodal calls so the suite runs anywhere.
+API integration tests boot an embedded PostgreSQL, apply the real migrations, and exercise auth, RBAC, tenant isolation, the state machine, the audit trail, the model capability center, generation batches, artifact streaming, versioning, assets, orchestration and acceptance-gated deliveries end to end — no Docker and no API key required. Worker tests cover candidate fallback, the quality gate with rework, the visual audit, per-shot voice, composition, AI content write-back and auto-advance, shelling out to a real `ffmpeg`. Media tests cover both storage backends and the two-pass composer, including the case where a voice line is longer or shorter than its shot. Provider tests replay each vendor's request shapes, task vocabulary and credential handling against stubbed HTTP, so no live key is ever involved; the overseas adapters are covered the same way, which is exactly what "contract-tested, not account-verified" means — the request is right, the vendor's answer is a fixture. They also pin the two things a hand-entered model row depends on: that a denial naming the model revokes its verified stamp while a timeout leaves it alone, and that a gateway connection is refused without a base URL rather than defaulting to someone else's host. Prompt tests fix the Chinese templates byte for byte and assert that an English request appends its directive without dropping a single protocol key. The mock provider stands in for live multimodal calls so the suite runs anywhere.
 
 ## Roadmap
 
@@ -140,12 +144,13 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 - Audio quality control: loudness measurement, and an option to burn subtitles into the picture
 - Deep content audits: source coverage, script coverage, cross-shot continuity, audio sync
 - Visual-audit threshold calibrated against live vision-model scores
+- Split the connection-level entitlement stamp into credential-verified and model-verified, so one working key stops certifying every model name it happens to list
 - Edit cascade from an individual shot to its media
 - Per-edit wording history for hand-edited shots
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, model readiness and content language, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow, testing, pull-request checklist
 - [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — the production methodology the pipeline encodes
 
