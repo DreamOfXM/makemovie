@@ -271,6 +271,8 @@ export interface GenerationArtifact {
 export interface GenerationTask {
   id: string
   stage: GenerationStage
+  /** The shot this task made; null for episode-level work such as SCRIPT or the score. */
+  storyboardId: string | null
   status: GenerationTaskStatus
   attempts: number
   provider: string | null
@@ -297,6 +299,8 @@ export interface EpisodeComposition {
   artifact: GenerationArtifact | null
   /** Cue sheet for the master, null when the episode has no lines to subtitle. */
   subtitle: GenerationArtifact | null
+  /** The music bed actually mixed into this master, null when it went out without one. */
+  score: GenerationArtifact | null
 }
 
 export interface GenerationsResponse {

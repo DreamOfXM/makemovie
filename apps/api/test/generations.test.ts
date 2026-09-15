@@ -42,6 +42,7 @@ interface ArtifactDto {
 interface TaskDto {
   id: string
   stage: string
+  storyboardId: string | null
   status: string
   attempts: number
   provider: string | null
@@ -67,6 +68,7 @@ interface CompositionDto {
   status: string
   artifact: ArtifactDto | null
   subtitle: ArtifactDto | null
+  score: ArtifactDto | null
 }
 
 interface Connection {
@@ -164,6 +166,8 @@ describe('generation trigger', () => {
     const task = batch.tasks[0]
     expect(task.stage).toBe('SCRIPT')
     expect(task.status).toBe('QUEUED')
+    // Episode-level work belongs to no shot.
+    expect(task.storyboardId).toBeNull()
     expect(task.attempts).toBe(0)
     expect(task.provider).toBeNull()
     expect(task.artifacts).toEqual([])
@@ -198,6 +202,9 @@ describe('generation trigger', () => {
     expect(batch.stage).toBe('VIDEO')
     expect(batch.plannedCount).toBe(1)
     videoTaskId = batch.tasks[0].id
+    // The row the console builds its shot table from: this task is SB2's clip, not the
+    // batch's clip.
+    expect(batch.tasks[0].storyboardId).toBe(storyboardIds[1])
 
     const job = await queue.getJob(`run-${videoTaskId}-1`)
     const payload = job?.data as RunTaskPayload
@@ -359,7 +366,7 @@ describe('episode composition', () => {
     expect((listed.json() as { composition: CompositionDto | null }).composition?.id).toBe(composition.id)
   })
 
-  it('offers the subtitle track of a finished composition as its own download', async () => {
+  it('offers a finished composition its subtitle and score through the composition itself', async () => {
     // The cues are an artifact rather than a blob on the composition: a subtitle file
     // is reviewed and re-uploaded by a human like any other stage output.
     const master = await env.db.mediaArtifact.create({
@@ -370,8 +377,11 @@ describe('episode composition', () => {
     const subtitleArtifact = await env.db.mediaArtifact.create({
       data: { organizationId, stage: 'SUBTITLE', objectKey: subtitle.key, checksum: subtitle.checksum, mimeType: subtitle.mimeType, version: 1 },
     })
+    const score = await env.db.mediaArtifact.create({
+      data: { organizationId, stage: 'MUSIC', objectKey: `${organizationId}/comp/score/v1.m4a`, checksum: 'score-in-the-file', mimeType: 'audio/mp4', version: 1, durationMs: 6000 },
+    })
     const finished = await env.db.composition.create({
-      data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: master.id, subtitleArtifactId: subtitleArtifact.id },
+      data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: master.id, subtitleArtifactId: subtitleArtifact.id, scoreArtifactId: score.id },
     })
 
     const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
@@ -380,6 +390,17 @@ describe('episode composition', () => {
     expect(composition.id).toBe(finished.id)
     expect(composition.artifact).toMatchObject({ id: master.id, downloadUrl: `/artifacts/${master.id}/content` })
     expect(composition.subtitle).toMatchObject({ id: subtitleArtifact.id, mimeType: 'application/x-subrip', downloadUrl: `/artifacts/${subtitleArtifact.id}/content` })
+    // A newer score exists for this episode and is deliberately not the one named:
+    // a score bought after the compose is not in this file.
+    await env.db.mediaArtifact.create({
+      data: { organizationId, stage: 'MUSIC', objectKey: `${organizationId}/comp/score/v2.m4a`, checksum: 'score-bought-later', mimeType: 'audio/mp4', version: 2, durationMs: 6000 },
+    })
+    const relisted = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    expect((relisted.json() as { composition: CompositionDto | null }).composition?.score).toMatchObject({
+      id: score.id,
+      objectKey: `${organizationId}/comp/score/v1.m4a`,
+      downloadUrl: `/artifacts/${score.id}/content`,
+    })
 
     const downloaded = await env.app.inject({ method: 'GET', url: `/artifacts/${subtitleArtifact.id}/content`, headers: authHeaders(viewerToken) })
     expect(downloaded.statusCode).toBe(200)
@@ -1487,6 +1508,9 @@ describe('per-shot voice', () => {
 
     const tasks = await env.db.generationTask.findMany({ where: { batchId: batch.id }, orderBy: { id: 'asc' } })
     expect(tasks.map(task => task.storyboardId)).toEqual(speakingIds)
+    // The console reads the DTO, not the row: a voice that does not name its shot there
+    // is indistinguishable from another shot's voice.
+    expect(batch.tasks.map(task => task.storyboardId)).toEqual(speakingIds)
     expect(tasks.map(task => task.idempotencyKey)).toEqual(speakingIds.map(id => `${episodeId}:AUDIO:${id}`))
     // The shot's own words go to the synthesizer — not the title, not the episode name.
     expect(tasks.map(task => (JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string } }).input.prompt)).toEqual([

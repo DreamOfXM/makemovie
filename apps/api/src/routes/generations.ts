@@ -17,6 +17,10 @@ interface QcDto {
 interface TaskDto {
   id: string
   stage: GenerationStage
+  /** The shot this task made, null for episode-level work like SCRIPT or the score.
+   * Without it a batch that covered three shots renders as three rows none of which
+   * says which shot it is, and the console can only guess from the thumbnail. */
+  storyboardId: string | null
   status: TaskStatus
   attempts: number
   provider: string | null
@@ -42,6 +46,9 @@ interface CompositionDto {
   status: WorkflowStatus
   artifact: ArtifactDto | null
   subtitle: ArtifactDto | null
+  /** The music bed actually mixed into this master, through the composition's own
+   * lineage rather than "the newest score", so it cannot drift after a regenerate. */
+  score: ArtifactDto | null
 }
 
 type TaskRow = GenerationTask & { artifacts: MediaArtifact[] }
@@ -69,6 +76,7 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
   return {
     id: task.id,
     stage: toApiStage(task.stage),
+    storyboardId: task.storyboardId,
     status: task.status,
     attempts: task.attempts,
     provider: task.provider,
@@ -110,15 +118,17 @@ async function toBatchDto(db: PrismaClient, batchId: string): Promise<BatchDto> 
 }
 
 async function toCompositionDto(db: PrismaClient, composition: Composition): Promise<CompositionDto> {
-  const [artifact, subtitle] = await Promise.all([
+  const [artifact, subtitle, score] = await Promise.all([
     composition.artifactId ? db.mediaArtifact.findUnique({ where: { id: composition.artifactId } }) : null,
     composition.subtitleArtifactId ? db.mediaArtifact.findUnique({ where: { id: composition.subtitleArtifactId } }) : null,
+    composition.scoreArtifactId ? db.mediaArtifact.findUnique({ where: { id: composition.scoreArtifactId } }) : null,
   ])
   return {
     id: composition.id,
     status: composition.status,
     artifact: artifact ? toArtifactDto(artifact) : null,
     subtitle: subtitle ? toArtifactDto(subtitle) : null,
+    score: score ? toArtifactDto(score) : null,
   }
 }
 

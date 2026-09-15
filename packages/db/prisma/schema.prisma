@@ -228,9 +228,10 @@ model GenerationTask {
   stage Stage
   status TaskStatus @default(QUEUED)
   idempotencyKey String? @unique
-  /// The shot a FIRST_FRAME or VIDEO task was made for. A batch covers every shot it was
+  /// The shot a FIRST_FRAME, VIDEO or AUDIO task was made for. A batch covers every shot it was
   /// planned against, so without this the newest clip of a three-shot batch looks like the
-  /// clip of all three — and composition would cut one shot three times.
+  /// clip of all three — and composition would cut one shot three times, while the console
+  /// could not tell which voice belongs to which line.
   storyboardId String?
   provider String?
   model String?
