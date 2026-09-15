@@ -148,10 +148,11 @@ export function manifestStoryboardIds(manifest: string): string[] {
 /**
  * Whether the episode can be composed now. Composition has no provider, no prompt
  * and no capability slot, so it is planned apart from PIPELINE_STAGES. It is not
- * once-per-episode either: re-cutting the same shot list would only spend ffmpeg
- * time re-making a master that already exists, but a regenerate supersedes shots
- * and leaves that master cut from a breakdown the episode no longer uses, so a
- * changed shot list is worth composing again. Composing before every live shot has
+ * once-per-episode either: re-cutting the same shot list with the same audio would
+ * only spend ffmpeg time re-making a master that already exists, but two things make
+ * a fresh render worth it — a regenerate supersedes shots and leaves that master cut
+ * from a breakdown the episode no longer uses, and a line voiced after the master was
+ * planned is simply missing from it. Composing before every live shot has
  * a clip is skipped, since it is guaranteed to land in BLOCKED.
  */
 export async function planComposition(db: PrismaClient, episodeId: string): Promise<CompositionPlan> {
@@ -180,7 +181,15 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
   const storyboardIds = storyboards.map(storyboard => storyboard.id)
   const latest = await db.composition.findFirst({ where: { episodeId }, orderBy: { id: 'desc' } })
   if (latest && sameShots(manifestStoryboardIds(latest.manifest), storyboardIds)) {
-    return { ready: false, reason: 'composition:alreadyPlanned' }
+    // Same cut list, so re-composing would only re-render a master that exists —
+    // unless a shot got its voice after that master was planned. The composer mixes
+    // in whichever voices had landed when it ran, so a line voiced since then is
+    // missing from the file: the old master is a stale render, not finished work.
+    // Neither model carries a usable timestamp, and cuid ids sort chronologically.
+    const voicedSince = await db.generationTask.count({
+      where: { batch: { episodeId }, stage: 'AUDIO', status: 'SUCCEEDED', id: { gt: latest.id }, artifacts: { some: { stage: 'AUDIO' } } },
+    })
+    if (voicedSince === 0) return { ready: false, reason: 'composition:alreadyPlanned' }
   }
   return { ready: true, storyboardIds }
 }

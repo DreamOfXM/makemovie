@@ -1098,7 +1098,7 @@ describe('pipeline advance to composition', () => {
     expect(await env.db.generationBatch.findUniqueOrThrow({ where: { id: staleBatch.id }, include: { storyboards: true } })).toMatchObject({ status: 'COMPLETED' })
   })
 
-  it('composes once every live shot has a clip, and re-composes after a regenerate supersedes them', async () => {
+  it('composes once every live shot has a clip, and re-composes after a late voice or a regenerate', async () => {
     const { episodeId: terminalEpisodeId } = await newEpisode('Terminal Step Drama')
     await env.db.scriptVersion.create({ data: { episodeId: terminalEpisodeId, version: 1, content: 'a script', checksum: 'terminal-script', status: 'APPROVED' } })
     const live = await addShots(terminalEpisodeId)
@@ -1134,6 +1134,25 @@ describe('pipeline advance to composition', () => {
     expect(again.json().error).toBe('pipeline:nothingRunnable')
     expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(1)
 
+    // Until a line is voiced after that master was planned: the producer added a line,
+    // the voice landed, and the file on disk does not contain it. Leaving the episode
+    // on a silent master with no way back would trap the very edit the chain promises
+    // to carry through.
+    const voiceBatch = await env.db.generationBatch.create({
+      data: { organizationId, episodeId: terminalEpisodeId, stage: 'AUDIO', status: 'COMPLETED', plannedCount: 1, storyboards: { connect: { id: live[0] } } },
+    })
+    const voiceTask = await env.db.generationTask.create({ data: { organizationId, batchId: voiceBatch.id, stage: 'AUDIO', status: 'SUCCEEDED', storyboardId: live[0] } })
+    await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: voiceTask.id, stage: 'AUDIO', objectKey: `${organizationId}/comp/voice/v1.wav`, checksum: 'comp-voice', mimeType: 'audio/wav', version: 1, durationMs: 2000 },
+    })
+    await env.db.storyboard.update({ where: { id: live[0] }, data: { dialogue: '这条街不能待了。', speaker: '林澈' } })
+
+    const recutAfterVoice = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(recutAfterVoice.statusCode).toBe(201)
+    expect(recutAfterVoice.json().stage).toBe('COMPOSITION')
+    expect((recutAfterVoice.json().composition as CompositionDto).id).not.toBe(composition.id)
+    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(2)
+
     // A regenerate supersedes the breakdown that master was cut from, so the terminal
     // step is worth taking again — otherwise an edited episode could never be re-cut.
     await env.db.storyboard.updateMany({ where: { id: { in: live } }, data: { supersededAt: new Date('2026-03-01T00:00:00Z') } })
@@ -1152,8 +1171,8 @@ describe('pipeline advance to composition', () => {
     const second = recut.json().composition as CompositionDto
     expect(second.id).not.toBe(composition.id)
     expect(JSON.parse((await env.db.composition.findUniqueOrThrow({ where: { id: second.id } })).manifest)).toEqual({ storyboardIds: revised })
-    // The superseded master is not deleted: it is the record of what was delivered.
-    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(2)
+    // Superseded masters are not deleted: each is the record of what was delivered.
+    expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(3)
 
     const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=pipeline.advance', headers: authHeaders(ownerToken) })
     expect(audit.statusCode).toBe(200)
