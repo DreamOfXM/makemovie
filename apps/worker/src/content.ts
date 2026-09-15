@@ -42,6 +42,8 @@ async function recordScriptVersion(db: PrismaClient, task: ContentTask, text: st
 interface StoryboardShot {
   title?: unknown
   description?: unknown
+  dialogue?: unknown
+  speaker?: unknown
   sourceExcerpt?: unknown
   durationMs?: unknown
   continuityIn?: unknown
@@ -171,6 +173,8 @@ async function recordStoryboards(db: PrismaClient, task: ContentTask, text: stri
         title: asString(shot.title).trim() || `Shot ${number}`,
         durationMs: asDuration(shot.durationMs),
         description: asString(shot.description).trim(),
+        dialogue: asString(shot.dialogue).trim(),
+        speaker: asString(shot.speaker).trim() || null,
         sourceExcerpt: asString(shot.sourceExcerpt),
         continuityIn: asString(shot.continuityIn),
         continuityOut: asString(shot.continuityOut),

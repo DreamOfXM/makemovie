@@ -10,13 +10,16 @@ import type { Queue } from 'bullmq'
 import EmbeddedPostgres from 'embedded-postgres'
 import { PrismaClient, type Stage } from '@studio/db'
 import { createPipelineQueue, enqueue, type ComposeEpisodePayload, type PipelinePayload, type RunTaskCandidate, type RunTaskPayload } from '@studio/jobs'
-import { DiskStorage, FfmpegComposer, buildObjectKey, synthesizeMockMedia, type Storage } from '@studio/media'
+import { DiskStorage, FfmpegComposer, buildObjectKey, extensionFor, synthesizeMockMedia, type Storage } from '@studio/media'
 import { encryptSecret } from '@studio/security'
 import type { PipelineDeps } from '../src/deps.js'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 
 export const MASTER_KEY = '0'.repeat(64)
+// The mock provider materialises files with ffmpeg, which picks the container from
+// the output extension, so the seed helper needs the same modality map it uses.
+const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 'mp4', r2v: 'mp4', tts: 'wav', music: 'wav' }
 // Logical DB 5 keeps these tests away from the queue the API suite drives on DB 7.
 const REDIS_URL = 'redis://127.0.0.1:6380/5'
 
@@ -72,6 +75,7 @@ export interface WorkerTestEnv {
   runPayload(seed: Seed, attempt?: number): RunTaskPayload
   composePayload(compositionId: string, seed: Seed): ComposeEpisodePayload
   attachSucceededVideo(seed: Seed, storyboardId: string, version: number, options?: { durationMs?: number }): Promise<void>
+  attachSucceededMedia(seed: Seed, input: { stage: Stage; modality: string; storyboardId?: string; version?: number; durationMs?: number }): Promise<void>
   takeWaitingRunTasks(): Promise<RunTaskPayload[]>
   drain(): Promise<void>
   stop(): Promise<void>
@@ -210,32 +214,36 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
       return { kind: 'compose-episode', compositionId, episodeId: seed.episodeId, organizationId: seed.organizationId }
     },
     async attachSucceededVideo(seed, storyboardId, version, options) {
+      await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId, version, durationMs: options?.durationMs })
+    },
+    async attachSucceededMedia(seed, input) {
+      const version = input.version ?? 1
       const batch = await db.generationBatch.create({
         data: {
           organizationId: seed.organizationId,
           episodeId: seed.episodeId,
-          stage: 'VIDEO',
+          stage: input.stage,
           status: 'COMPLETED',
           plannedCount: 1,
-          storyboards: { connect: { id: storyboardId } },
+          ...(input.storyboardId ? { storyboards: { connect: { id: input.storyboardId } } } : {}),
         },
       })
       const task = await db.generationTask.create({
-        data: { organizationId: seed.organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', attempts: version, storyboardId },
+        data: { organizationId: seed.organizationId, batchId: batch.id, stage: input.stage, status: 'SUCCEEDED', attempts: version, ...(input.storyboardId ? { storyboardId: input.storyboardId } : {}) },
       })
       const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-seed-'))
       try {
-        const source = path.join(workdir, 'clip.mp4')
-        const media = await synthesizeMockMedia('t2v', source, { durationMs: options?.durationMs ?? 1000 })
+        const source = path.join(workdir, `clip.${MOCK_EXTENSION[input.modality] ?? 'bin'}`)
+        const media = await synthesizeMockMedia(input.modality, source, { durationMs: input.durationMs ?? 1000 })
         const stored = await storage.put(
           buildObjectKey({
             tenantId: seed.organizationId,
             projectId: seed.projectId,
             episodeId: seed.episodeId,
-            stage: 'VIDEO',
+            stage: input.stage,
             entityId: task.id,
             version,
-            extension: 'mp4',
+            extension: extensionFor(media.mimeType),
           }),
           new Uint8Array(await readFile(source)),
           media.mimeType,
@@ -244,7 +252,7 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
           data: {
             organizationId: seed.organizationId,
             taskId: task.id,
-            stage: 'VIDEO',
+            stage: input.stage,
             objectKey: stored.key,
             checksum: stored.checksum,
             mimeType: stored.mimeType,

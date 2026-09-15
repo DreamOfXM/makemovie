@@ -1,4 +1,8 @@
+import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
+import { rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { MOCK_SCRIPT_TEXT, MOCK_STORYBOARD_JSON, MOCK_VLM_VERDICT } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
@@ -371,7 +375,96 @@ describe('compose-episode', () => {
     expect(updated.artifactId).toBeNull()
     expect(await env.db.mediaArtifact.count({ where: { stage: 'COMPOSITION', organizationId: seed.organizationId } })).toBe(0)
   })
+
+  it('mixes per-shot voice and music and keeps the video stream untouched', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    const [first, second] = seed.storyboardIds as [string, string]
+    await env.db.storyboard.update({ where: { id: first }, data: { dialogue: '这条街不能待了。', speaker: '林晚' } })
+    await env.attachSucceededVideo(seed, first, 1, { durationMs: 1000 })
+    await env.attachSucceededVideo(seed, second, 1, { durationMs: 1000 })
+    await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: first })
+    await env.attachSucceededMedia(seed, { stage: 'MUSIC', modality: 'music', durationMs: 2000 })
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(updated.status).toBe('COMPLETED')
+    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio', 'subtitle'])
+
+    const subtitle = await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })
+    expect(subtitle.objectKey).toContain(`/SUBTITLE/${composition.id}/v1.srt`)
+    const cues = Buffer.from(await env.storage.read(subtitle.objectKey)).toString('utf8')
+    expect(cues).toContain('这条街不能待了。')
+    // Only the speaking shot is cued; the silent one carries no subtitle.
+    expect(cues.match(/-->/g)).toHaveLength(1)
+  })
+
+  it('leaves a dialogue-free episode silent', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    await env.attachSucceededVideo(seed, seed.storyboardIds[0]!, 1)
+    await env.attachSucceededVideo(seed, seed.storyboardIds[1]!, 1)
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(updated.status).toBe('COMPLETED')
+    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video'])
+    expect(await env.db.mediaArtifact.count({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })).toBe(0)
+  })
+
+  it('lays a music bed under a silent picture', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await env.attachSucceededVideo(seed, seed.storyboardIds[0]!, 1, { durationMs: 2000 })
+    await env.attachSucceededMedia(seed, { stage: 'MUSIC', modality: 'music', durationMs: 1000 })
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: (await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })).artifactId! } })
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio'])
+    // The looped bed has to cover the whole picture it sits under.
+    expect(master.durationMs).toBeGreaterThanOrEqual(1900)
+  })
+
+  it('subtitles a line whose voice never landed', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await env.db.storyboard.update({ where: { id: seed.storyboardIds[0]! }, data: { dialogue: '走吧。' } })
+    await env.attachSucceededVideo(seed, seed.storyboardIds[0]!, 1)
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(updated.status).toBe('COMPLETED')
+    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'subtitle'])
+    expect(Buffer.from(await env.storage.read((await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })).objectKey)).toString('utf8')).toContain('走吧。')
+  })
 })
+
+/** Stream kinds in container order — what the composer actually put into the file. */
+function streamTypes(bytes: Uint8Array): string[] {
+  const file = path.join(os.tmpdir(), `studio-probe-${randomUUID()}.bin`)
+  writeFileSync(file, bytes)
+  try {
+    const stdout = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file], { encoding: 'utf8' }) as string
+    return stdout.trim().split('\n').map(line => line.trim()).filter(Boolean)
+  } finally {
+    rmSync(file, { force: true })
+  }
+}
 
 /**
  * Binds a mock `vlm` model to the `visual_audit` slot. `entitlementVerifiedAt` has
@@ -475,7 +568,7 @@ describe('AI content generation', () => {
 describe('storyboard content contract', () => {
   const breakdown = {
     shots: [
-      { number: 1, title: 'Rainy street', description: 'neon bleeding into wet asphalt', sourceExcerpt: 'the street at night', durationMs: 4000, continuityIn: '', continuityOut: 'push in on the puddle' },
+      { number: 1, title: 'Rainy street', description: 'neon bleeding into wet asphalt', dialogue: '这条街不能待了。', speaker: '林晚', sourceExcerpt: 'the street at night', durationMs: 4000, continuityIn: '', continuityOut: 'push in on the puddle' },
       { number: 2, title: 'Half a photograph', description: 'a torn photo floating in the puddle', sourceExcerpt: 'only half a photo survived', durationMs: 5000, continuityIn: 'push in on the puddle', continuityOut: '' },
     ],
     assets: [
@@ -519,7 +612,9 @@ describe('storyboard content contract', () => {
       generationTaskId: seed.taskId,
       supersededAt: null,
     })
-    expect(boards[1]).toMatchObject({ revision: 1, number: 2, durationMs: 5000, continuityIn: 'push in on the puddle' })
+    expect(boards[1]).toMatchObject({ revision: 1, number: 2, durationMs: 5000, continuityIn: 'push in on the puddle', dialogue: '', speaker: null })
+    expect(boards[0]!.dialogue).toBe('这条街不能待了。')
+    expect(boards[0]!.speaker).toBe('林晚')
 
     const assets = await env.db.asset.findMany({ where: { episodeId: seed.episodeId }, orderBy: { name: 'asc' } })
     expect(assets.map(asset => [asset.kind, asset.name])).toEqual([
