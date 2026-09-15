@@ -29,9 +29,11 @@ export const MOCK_SCRIPT_TEXT = `第一集 雨夜来客
 
 export const MOCK_STORYBOARD_JSON = JSON.stringify({
   shots: [
-    { number: 1, title: '雨夜现场', description: '暴雨中的滨江老城区街道，霓虹灯在湿漉漉的地面投下斑驳光影。沈亦撑着黑伞走近警戒线，神情凝重。', sourceExcerpt: '雨夜，滨江市老城区发生一起离奇失踪案。', durationMs: 5000, continuityIn: '', continuityOut: '镜头缓缓推向地面' },
-    { number: 2, title: '半张照片', description: '特写：沈亦戴着手套，从积水中捡起一张被撕去一半、浸湿泛黄的老照片，背面隐约可见一行字。', sourceExcerpt: '只在地上捡到一张被雨水浸湿、撕去一半的老照片。', durationMs: 4000, continuityIn: '镜头缓缓推向地面', continuityOut: '切到照片背面特写' },
-    { number: 3, title: '暗中注视', description: '街对面的暗处，记者林晚晴举着相机拍下现场，随后转身消失在雨幕中。', sourceExcerpt: '调查记者林晚晴也在暗中追查同一桩旧案。', durationMs: 5000, continuityIn: '切到照片背面特写', continuityOut: '' },
+    { number: 1, title: '雨夜现场', description: '暴雨中的滨江老城区街道，霓虹灯在湿漉漉的地面投下斑驳光影。沈亦撑着黑伞走近警戒线，神情凝重。', dialogue: '又是这种天气。', speaker: '沈亦', sourceExcerpt: '雨夜，滨江市老城区发生一起离奇失踪案。', durationMs: 5000, continuityIn: '', continuityOut: '镜头缓缓推向地面' },
+    { number: 2, title: '半张照片', description: '特写：沈亦戴着手套，从积水中捡起一张被撕去一半、浸湿泛黄的老照片，背面隐约可见一行字。', dialogue: '照片背面有字……', speaker: '沈亦', sourceExcerpt: '只在地上捡到一张被雨水浸湿、撕去一半的老照片。', durationMs: 4000, continuityIn: '镜头缓缓推向地面', continuityOut: '切到照片背面特写' },
+    // The third shot has no line on purpose: the offline chain then covers a silent
+    // shot too, which must not owe a voice task.
+    { number: 3, title: '暗中注视', description: '街对面的暗处，记者林晚晴举着相机拍下现场，随后转身消失在雨幕中。', dialogue: '', speaker: null, sourceExcerpt: '调查记者林晚晴也在暗中追查同一桩旧案。', durationMs: 5000, continuityIn: '切到照片背面特写', continuityOut: '' },
   ],
   assets: [
     { kind: 'character', name: '沈亦', description: '三十岁出头的刑警，短发利落，深色风衣，习惯随身带一把黑伞，眼神冷静克制。' },
