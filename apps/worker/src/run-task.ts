@@ -227,6 +227,9 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
 }
 
 async function materialize(result: PollResult, modality: string, workdir: string): Promise<Material> {
+  // A vendor that returns bytes has already done the download the worker cannot: its
+  // media sits behind an authenticated GET or came inline as base64.
+  if (result.inlineArtifact) return { ...result.inlineArtifact }
   const artifactUrl = result.artifactUrl
   if (artifactUrl?.startsWith('mock://')) {
     const target = path.join(workdir, `artifact.${MOCK_EXTENSION[modality] ?? 'bin'}`)

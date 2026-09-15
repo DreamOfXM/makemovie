@@ -36,13 +36,30 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 }
 
 describe('catalog', () => {
-  it('lists dashscope, seedance, kling and mock catalogs', () => {
+  it('lists the domestic, overseas and mock catalogs', () => {
     const providers = listCatalogs().map(c => c.provider).sort()
-    expect(providers).toEqual(['dashscope', 'kling', 'mock', 'seedance'])
+    expect(providers).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'seedance'])
     expect(isKnownProvider('dashscope')).toBe(true)
     expect(isKnownProvider('seedance')).toBe(true)
     expect(isKnownProvider('kling')).toBe(true)
+    expect(isKnownProvider('openai')).toBe(true)
+    expect(isKnownProvider('google')).toBe(true)
+    expect(isKnownProvider('anthropic')).toBe(true)
     expect(isKnownProvider('nope')).toBe(false)
+  })
+
+  // The overseas adapters ship without ever having met a real account, and that is the
+  // one thing a reader of the model list must not have to guess.
+  it('says of every overseas model that it was never run against a live account', () => {
+    for (const provider of ['openai', 'google', 'anthropic']) {
+      const catalog = getCatalog(provider)
+      expect(catalog, provider).toBeDefined()
+      expect(catalog!.models.length, provider).toBeGreaterThan(0)
+      for (const model of catalog!.models) {
+        const spec = model.spec as { note?: string } | undefined
+        expect(`${provider}/${model.model} ${spec?.note ?? ''}`).toMatch(/never run against a live account/)
+      }
+    }
   })
 
   it('marks only kling as needing a second credential', () => {

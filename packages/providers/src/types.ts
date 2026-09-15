@@ -19,6 +19,13 @@ export interface SubmitResult {
 export interface PollResult {
   status: 'running' | 'completed' | 'failed'
   artifactUrl?: string
+  /**
+   * Media the vendor handed over in the response body or behind an authenticated
+   * download, so the worker cannot fetch it on its own. Bytes always travel with the
+   * type the vendor claimed for them — a URL can carry its own content type on the
+   * response, an inline payload has no response left to read.
+   */
+  inlineArtifact?: { bytes: Uint8Array; mimeType: string }
   text?: string
   error?: string
 }
@@ -53,6 +60,17 @@ export function sanitizeError(body: unknown): string {
   }
   const text = String(body)
   return text.slice(0, 500)
+}
+
+/**
+ * Vendors that do not take a URL for image input still agree on the payload: media type
+ * and base64, as two fields. The audit hands over a data URL, so the split happens here
+ * rather than in every adapter that needs it.
+ */
+export function parseDataUrl(value: string): { mimeType: string; base64: string } | undefined {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(value)
+  if (!match) return undefined
+  return { mimeType: match[1]!, base64: match[2]! }
 }
 
 export type { ModelCapability, ModelModality }

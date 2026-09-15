@@ -29,7 +29,7 @@ describe('provider catalogs', () => {
     const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
     const catalogs = res.json() as { provider: string; defaultBaseUrl: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
-    expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'kling', 'mock', 'seedance'])
+    expect(catalogs.map(c => c.provider).sort()).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
     expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
     const seedance = catalogs.find(c => c.provider === 'seedance')!
