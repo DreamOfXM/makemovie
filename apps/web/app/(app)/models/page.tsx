@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback } from 'react'
-import { BoxesIcon, CableIcon, RadioTowerIcon, RefreshCwIcon } from 'lucide-react'
-import type { Catalog, Connection } from '@/lib/api'
+import { useCallback, useState } from 'react'
+import { BoxesIcon, CableIcon, ListChecksIcon, RadioTowerIcon, RefreshCwIcon } from 'lucide-react'
+import type { Binding, Catalog, Connection } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -13,13 +13,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BindingsPanel } from '@/components/models/bindings-panel'
 import { CatalogsPanel } from '@/components/models/catalogs-panel'
 import { ConnectionsPanel } from '@/components/models/connections-panel'
+import { ReadinessPanel } from '@/components/models/readiness-panel'
+
+type ModelsTab = 'readiness' | 'connections' | 'bindings' | 'catalogs'
 
 export default function ModelsPage() {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
+  const [tab, setTab] = useState<ModelsTab>('readiness')
 
   const loadConnections = useCallback(() => api<Connection[]>('/providers/connections'), [api, organizationId])
   const connections = useAsync<Connection[]>(loadConnections, [])
+
+  const loadBindings = useCallback(() => api<Binding[]>('/bindings'), [api, organizationId])
+  const bindings = useAsync<Binding[]>(loadBindings, [])
 
   const loadCatalogs = useCallback(() => api<Catalog[]>('/providers/catalogs'), [api])
   const catalogs = useAsync<Catalog[]>(loadCatalogs, [])
@@ -35,6 +42,7 @@ export default function ModelsPage() {
             size="sm"
             onClick={() => {
               connections.reload()
+              bindings.reload()
               catalogs.reload()
             }}
           >
@@ -46,8 +54,12 @@ export default function ModelsPage() {
 
       <FlowGuide />
 
-      <Tabs defaultValue="connections">
+      <Tabs value={tab} onValueChange={value => setTab(value as ModelsTab)}>
         <TabsList>
+          <TabsTrigger value="readiness">
+            <ListChecksIcon />
+            {t('models.tab.readiness')}
+          </TabsTrigger>
           <TabsTrigger value="connections">
             <CableIcon />
             {t('models.tab.connections')}
@@ -61,11 +73,14 @@ export default function ModelsPage() {
             {t('models.tab.catalogs')}
           </TabsTrigger>
         </TabsList>
+        <TabsContent value="readiness">
+          <ReadinessPanel connections={connections} bindings={bindings} catalogs={catalogs.data} onGoto={setTab} />
+        </TabsContent>
         <TabsContent value="connections">
           <ConnectionsPanel connections={connections} catalogs={catalogs.data} />
         </TabsContent>
         <TabsContent value="bindings">
-          <BindingsPanel connections={connections} />
+          <BindingsPanel connections={connections} bindings={bindings} />
         </TabsContent>
         <TabsContent value="catalogs">
           <CatalogsPanel catalogs={catalogs} />

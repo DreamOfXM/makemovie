@@ -3,8 +3,9 @@
 import { useCallback, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { CircleAlertIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
-import { canBind, capabilitySlots, slotModality, type CapabilitySlot, type ModelModality } from '@studio/domain'
+import { capabilitySlots, slotModality, type CapabilitySlot } from '@studio/domain'
 import type { Binding, Connection, Project, ResolveResponse } from '@/lib/api'
+import { bindableCapabilities, candidatesForSlot, type BindableCapability } from '@/lib/models/readiness'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync, type AsyncState } from '@/lib/use-async'
@@ -42,62 +43,12 @@ import { GuardedButton, usePermission } from '@/components/permission'
 const ALL = '__all__'
 const ORG_SCOPE = '__org__'
 
-interface BindableCapability {
-  capabilityId: string
-  model: string
-  displayName: string | null
-  modality: string
-  connectionId: string
-  connectionName: string
-  provider: string
-  acceptsFirstFrame: boolean
-  acceptsReferenceImages: boolean
-  maxReferenceImages: number
-}
-
-/**
- * Only capabilities on an enabled connection whose entitlement the provider
- * confirmed are offered here — the same two rules `POST /bindings` enforces.
- */
-function bindableCapabilities(connections: Connection[]): BindableCapability[] {
-  return connections.flatMap(connection =>
-    connection.enabled
-      ? connection.capabilities
-          .filter(capability => capability.entitlementVerifiedAt)
-          .map(capability => ({
-            capabilityId: capability.id,
-            model: capability.model,
-            displayName: capability.displayName,
-            modality: capability.modality,
-            connectionId: connection.id,
-            connectionName: connection.name,
-            provider: connection.provider,
-            acceptsFirstFrame: capability.acceptsFirstFrame,
-            acceptsReferenceImages: capability.acceptsReferenceImages,
-            maxReferenceImages: capability.maxReferenceImages,
-          }))
-      : [],
-  )
-}
-
-function candidatesForSlot(pool: BindableCapability[], slot: CapabilitySlot): BindableCapability[] {
-  return pool.filter(item =>
-    canBind(slot, {
-      provider: item.provider,
-      model: item.model,
-      modality: item.modality as ModelModality,
-      acceptsFirstFrame: item.acceptsFirstFrame,
-      acceptsReferenceImages: item.acceptsReferenceImages,
-      maxReferenceImages: item.maxReferenceImages,
-    }).ok,
-  )
-}
-
 interface BindingsPanelProps {
   connections: AsyncState<Connection[]>
+  bindings: AsyncState<Binding[]>
 }
 
-export function BindingsPanel({ connections }: BindingsPanelProps) {
+export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -108,9 +59,6 @@ export function BindingsPanel({ connections }: BindingsPanelProps) {
   const [bindKey, setBindKey] = useState(0)
   const [unbindTarget, setUnbindTarget] = useState<Binding | null>(null)
   const [unbinding, setUnbinding] = useState(false)
-
-  const loadBindings = useCallback(() => api<Binding[]>('/bindings'), [api, organizationId])
-  const bindings = useAsync<Binding[]>(loadBindings, [])
 
   const loadProjects = useCallback(() => api<Project[]>('/projects'), [api, organizationId])
   const projects = useAsync<Project[]>(loadProjects, [])
