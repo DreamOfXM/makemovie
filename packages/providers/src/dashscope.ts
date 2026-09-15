@@ -6,7 +6,10 @@ const TEXT_PATH = '/api/v1/services/aigc/text-generation/generation'
 const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
 const IMAGE_PATH = '/api/v1/services/aigc/text2image/image-synthesis'
 const VIDEO_PATH = '/api/v1/services/aigc/video-generation/video-synthesis'
+const MUSIC_PATH = '/api/v1/services/audio/music/generation'
 const TASK_PATH = '/api/v1/tasks'
+
+const DEFAULT_TTS_VOICE = 'Cherry'
 
 export interface DashScopeHttpRequest {
   url: string
@@ -71,6 +74,18 @@ export function buildSubmitRequest(
     }
   }
 
+  // Also synchronous on the multimodal endpoint, but this one takes no `parameters`
+  // object: the caller's voice selection is resolved to a DashScope voice name here.
+  if (capability.modality === 'tts') {
+    const voice = typeof request.parameters.voice === 'string' ? request.parameters.voice : DEFAULT_TTS_VOICE
+    return {
+      url: `${base}${VLM_PATH}`,
+      method: 'POST',
+      headers,
+      body: { model: request.model, input: { text: prompt, voice, language_type: 'Chinese' } },
+    }
+  }
+
   headers['X-DashScope-Async'] = 'enable'
 
   if (capability.modality === 'image') {
@@ -99,6 +114,15 @@ export function buildSubmitRequest(
       method: 'POST',
       headers,
       body: { model: request.model, input: { prompt, img_url: imgUrl }, parameters: request.parameters },
+    }
+  }
+
+  if (capability.modality === 'music') {
+    return {
+      url: `${base}${MUSIC_PATH}`,
+      method: 'POST',
+      headers,
+      body: { model: request.model, input: { prompt }, parameters: request.parameters },
     }
   }
 
@@ -160,6 +184,15 @@ function extractSyncImageUrl(output: Record<string, unknown>): string | undefine
     if (typeof part === 'object' && part !== null && typeof (part as { image?: unknown }).image === 'string') {
       return (part as { image: string }).image
     }
+  }
+  return undefined
+}
+
+/** The sync TTS response carries the clip at output.audio.url. */
+function extractSyncAudioUrl(output: Record<string, unknown>): string | undefined {
+  const audio = output.audio
+  if (typeof audio === 'object' && audio !== null && typeof (audio as { url?: unknown }).url === 'string') {
+    return (audio as { url: string }).url
   }
   return undefined
 }
@@ -249,6 +282,15 @@ export class DashScopeAdapter implements ProviderAdapter {
       const output = (body?.output ?? {}) as Record<string, unknown>
       const artifactUrl = extractSyncImageUrl(output)
       if (!artifactUrl) throw new Error(sanitizeError(body ?? 'dashscope qwen-image response missing an image url'))
+      const taskId = `ds-sync-${++syncCounter}`
+      syncResults.set(taskId, { artifactUrl })
+      return { taskId }
+    }
+
+    if (capability.modality === 'tts') {
+      const output = (body?.output ?? {}) as Record<string, unknown>
+      const artifactUrl = extractSyncAudioUrl(output)
+      if (!artifactUrl) throw new Error(sanitizeError(body ?? 'dashscope tts response missing output.audio.url'))
       const taskId = `ds-sync-${++syncCounter}`
       syncResults.set(taskId, { artifactUrl })
       return { taskId }

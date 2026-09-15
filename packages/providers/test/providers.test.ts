@@ -48,8 +48,9 @@ describe('catalog', () => {
     expect(modalities.has('image')).toBe(true)
     expect(modalities.has('t2v')).toBe(true)
     expect(modalities.has('i2v')).toBe(true)
+    expect(modalities.has('tts')).toBe(true)
+    expect(modalities.has('music')).toBe(true)
     expect(modalities.has('r2v')).toBe(false)
-    expect(modalities.has('tts')).toBe(false)
   })
 
   it('every i2v catalog model accepts a first frame', () => {
@@ -255,9 +256,41 @@ describe('dashscope request building', () => {
       .toThrow(/firstFrameUrl/)
   })
 
+  it('builds a synchronous tts request on the multimodal endpoint', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'tts', model: 'qwen3-tts-flash' }), {
+      model: 'qwen3-tts-flash',
+      input: { prompt: '沈亦：照片背面有字……' },
+      parameters: {},
+    })
+    expect(req.url).toBe(`${base}/api/v1/services/aigc/multimodal-generation/generation`)
+    expect(req.headers['X-DashScope-Async']).toBeUndefined()
+    expect(req.body).toEqual({
+      model: 'qwen3-tts-flash',
+      input: { text: '沈亦：照片背面有字……', voice: 'Cherry', language_type: 'Chinese' },
+    })
+  })
+
+  it('lets a caller-supplied voice win on a tts request', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'tts', model: 'qwen3-tts-flash' }), {
+      model: 'qwen3-tts-flash',
+      input: { prompt: 'hello' },
+      parameters: { voice: 'Ethan' },
+    })
+    expect((req.body as { input: { voice: string } }).input.voice).toBe('Ethan')
+  })
+
+  it('builds an async music request on the music-generation endpoint', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'music', model: 'fun-music-v1' }), {
+      model: 'fun-music-v1',
+      input: { prompt: 'a tense noir chase' },
+      parameters: {},
+    })
+    expect(req.url).toBe(`${base}/api/v1/services/audio/music/generation`)
+    expect(req.headers['X-DashScope-Async']).toBe('enable')
+    expect(req.body).toMatchObject({ model: 'fun-music-v1', input: { prompt: 'a tense noir chase' } })
+  })
+
   it('rejects modalities without a public dashscope endpoint', () => {
-    expect(() => buildSubmitRequest(base, 'k', capability({ modality: 'tts' }), { model: 'm', input: {}, parameters: {} }))
-      .toThrow(/does not support modality/)
     expect(() => buildSubmitRequest(base, 'k', capability({ modality: 'r2v' }), { model: 'm', input: {}, parameters: {} }))
       .toThrow(/does not support modality/)
   })
@@ -389,6 +422,45 @@ describe('dashscope adapter submit and poll', () => {
     const { taskId } = await adapter.submit(cap, { model: 'qwen-image-3.0', input: { prompt: 'a red apple' }, parameters: {} })
     expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
     expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/qwen.png' })
+  })
+
+  it('voices a tts line from output.audio.url on the sync endpoint', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ output: { audio: { url: 'https://oss/dashscope/voice-1.mp3', expires_in: 86400 } }, request_id: 'r-tts' }),
+    })
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'tts', model: 'qwen3-tts-flash' })
+    const { taskId } = await adapter.submit(cap, { model: 'qwen3-tts-flash', input: { prompt: '沈亦：又是这种天气。' }, parameters: {} })
+    expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
+    expect(taskId).toMatch(/^ds-sync-/)
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/dashscope/voice-1.mp3' })
+  })
+
+  it('fails a tts submit when the audio url is missing', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ output: {}, request_id: 'r-tts-empty' }),
+    })
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'tts', model: 'qwen3-tts-flash' })
+    await expect(adapter.submit(cap, { model: 'qwen3-tts-flash', input: { prompt: 'hello' }, parameters: {} })).rejects.toThrow()
+  })
+
+  it('runs a music task through the async submit / status-poll lifecycle', async () => {
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'music', model: 'fun-music-v1' })
+    fetchMock
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ output: { task_id: 'music-task-1', task_status: 'PENDING' }, request_id: 'r-m' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ output: { task_id: 'music-task-1', task_status: 'RUNNING' } }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ output: { task_id: 'music-task-1', task_status: 'SUCCEEDED', results: [{ url: 'https://oss/dashscope/bgm.mp3' }] } }) })
+    const { taskId } = await adapter.submit(cap, { model: 'fun-music-v1', input: { prompt: 'a tense noir chase' }, parameters: {} })
+    expect(taskId).toBe('music-task-1')
+    expect(fetchMock.mock.calls[0][0]).toContain('/audio/music/generation')
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'running' })
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/dashscope/bgm.mp3' })
   })
 })
 

@@ -35,6 +35,8 @@ const dashscope: ProviderCatalog = {
     { model: 'wan2.2-t2v-plus', displayName: 'Wan 2.2 T2V Plus', modality: 't2v', spec: { durations: [5], resolutions: ['720P', '1080P'], note: 'text-to-video only, never for reference tasks' } },
     { model: 'wanx2.1-i2v-turbo', displayName: 'Wanx 2.1 I2V Turbo', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5], resolutions: ['720P'] } },
     { model: 'wanx2.1-i2v-plus', displayName: 'Wanx 2.1 I2V Plus', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5], resolutions: ['720P', '1080P'] } },
+    { model: 'qwen3-tts-flash', displayName: 'Qwen3 TTS Flash', modality: 'tts', spec: { voices: ['Cherry', 'Serena', 'Ethan', 'Chelsie', 'Ryan'], note: 'synchronous multimodal endpoint; audio url expires in ~24h so it must be downloaded promptly' } },
+    { model: 'fun-music-v1', displayName: 'Fun Music V1', modality: 'music', spec: { note: 'async audio endpoint; access requires an invitation from Aliyun (邀测) — a 403 is a missing grant, not a bug in this product' } },
   ],
 }
 
