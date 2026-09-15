@@ -304,17 +304,24 @@ export class FfmpegComposer implements Composer {
 
       const args = ['-y', '-v', 'error', '-i', master]
       if (audio) args.push('-i', audio)
-      if (srt) args.push('-i', srt)
       args.push('-map', '0:v:0')
-      let next = 1
-      if (audio) args.push('-map', `${next++}:a:0`)
-      if (srt) args.push('-map', `${next}:s:0`)
+      if (audio) args.push('-map', '1:a:0')
       args.push('-c:v', 'copy')
-      if (audio) args.push('-c:a', 'aac', '-b:a', '192k')
-      if (srt) args.push('-c:s', 'mov_text', '-metadata:s:s:0', 'language=zho')
-      if (audio) args.push('-shortest')
-      args.push(output)
-      await run('ffmpeg', args)
+      if (audio) args.push('-c:a', 'aac', '-b:a', '192k', '-shortest')
+      const staged = srt ? path.join(workdir, 'staged.mp4') : output
+      await run('ffmpeg', [...args, staged])
+
+      if (srt) {
+        // A copy-only second pass, because -shortest below would otherwise have to watch
+        // the subtitle stream too: the last cue ends with the last spoken line, and every
+        // silent shot after it would be cut off the end of the delivered picture.
+        await run('ffmpeg', [
+          '-y', '-v', 'error', '-i', staged, '-i', srt,
+          '-map', '0', '-map', '1:s:0',
+          '-c', 'copy', '-c:s', 'mov_text', '-metadata:s:s:0', 'language=zho',
+          output,
+        ])
+      }
       return { durationMs: await probeDuration(output) }
     } finally {
       await rm(workdir, { recursive: true, force: true })

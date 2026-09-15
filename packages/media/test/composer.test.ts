@@ -83,6 +83,28 @@ describe('ffmpeg composer', () => {
     expect(composed.durationMs).toBeLessThanOrEqual(2100)
   })
 
+  it('keeps silent shots that follow the last line', async () => {
+    const a = path.join(workdir, 'a.mp4')
+    const b = path.join(workdir, 'b.mp4')
+    const c = path.join(workdir, 'c.mp4')
+    await clip(a, 1)
+    await clip(b, 1)
+    await clip(c, 1)
+    const voice = path.join(workdir, 'voice.wav')
+    await tone(voice, 440, 1)
+    const srt = path.join(workdir, 'subs.srt')
+    await writeFile(srt, buildSrt([{ text: '只有第一镜有台词', fromMs: 0, toMs: 1000 }]))
+    const output = path.join(workdir, 'out.mp4')
+
+    const composed = await composer.compose({ clips: [a, b, c], voices: [voice, null, null], srt }, output)
+
+    const result = await probe(output)
+    expect(result.streams.map(s => s.codec_type)).toEqual(['video', 'audio', 'subtitle'])
+    // The cue stops at the end of the first shot; the two that follow are still the film.
+    expect(composed.durationMs).toBeGreaterThanOrEqual(2900)
+    expect(composed.durationMs).toBeLessThanOrEqual(3100)
+  })
+
   it('falls back to a music bed when nothing is spoken', async () => {
     const a = path.join(workdir, 'a.mp4')
     await clip(a, 2)
