@@ -13,7 +13,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ArtifactLightbox } from '@/components/artifact-lightbox'
 import { LineageBadge } from '@/components/lineage-badge'
-import { useArtifactUrl } from '@/components/generations/generations-panel'
+import { ArtifactPreview, useArtifactUrl } from '@/components/generations/generations-panel'
 
 interface StoryboardCardProps {
   storyboard: Storyboard
@@ -142,6 +142,23 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
           <p className="text-muted-foreground mb-1 text-xs font-medium">{t('storyboards.description')}</p>
           <p className="text-sm leading-relaxed whitespace-pre-wrap">{storyboard.description}</p>
         </div>
+
+        {storyboard.dialogue.trim() !== '' && (
+          <div>
+            <p className="text-muted-foreground mb-1 text-xs font-medium">{t('storyboards.dialogue')}</p>
+            <p className="text-sm leading-relaxed whitespace-pre-wrap">
+              {storyboard.speaker && <span className="text-muted-foreground mr-1.5 font-medium">[{storyboard.speaker}]</span>}
+              {storyboard.dialogue}
+            </p>
+            {/* The line is only half the story once it has been voiced: a human listens to
+                what the model actually said before it reaches the master. */}
+            {storyboard.voice && (
+              <div className="mt-2">
+                <ArtifactPreview artifact={storyboard.voice} />
+              </div>
+            )}
+          </div>
+        )}
 
         {storyboard.sourceExcerpt.trim() !== '' && (
           <div>

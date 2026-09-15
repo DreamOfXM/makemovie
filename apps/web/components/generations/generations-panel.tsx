@@ -258,10 +258,7 @@ function BatchCard({ batch, cancellingId, onCancel }: BatchCardProps) {
       <CardHeader className="px-4">
         <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
           <Badge variant="secondary">{translateEnum(t, 'generations.stage', batch.stage)}</Badge>
-          <StatusBadge
-            status={toneFor(batch.status)}
-            label={translateEnum(t, 'generations.status', batch.status)}
-          />
+          <StatusBadge status={toneFor(batch.status)} label={translateEnum(t, 'status', batch.status.toLowerCase())} />
         </CardTitle>
         <CardDescription>
           {t('generations.plannedCount', { count: batch.plannedCount })} · {formatDateTime(batch.createdAt, locale)}
@@ -436,6 +433,8 @@ function CompositionCard({ composition }: { composition: EpisodeComposition | nu
   const { t } = useI18n()
   const artifact = composition?.artifact ?? null
   const href = useArtifactUrl(artifact?.downloadUrl ?? null)
+  // Not every episode has lines, so a subtitle track is offered only when one exists.
+  const subtitleHref = useArtifactUrl(composition?.subtitle?.downloadUrl ?? null)
 
   return (
     <Card className="gap-4 py-4">
@@ -446,7 +445,7 @@ function CompositionCard({ composition }: { composition: EpisodeComposition | nu
           {composition && (
             <StatusBadge
               status={toneFor(composition.status)}
-              label={translateEnum(t, 'generations.status', composition.status)}
+              label={translateEnum(t, 'status', composition.status.toLowerCase())}
             />
           )}
         </CardTitle>
@@ -465,6 +464,16 @@ function CompositionCard({ composition }: { composition: EpisodeComposition | nu
                 <DownloadIcon className="size-3.5" />
                 {t('generations.download')}
               </a>
+              {subtitleHref && (
+                <a
+                  href={subtitleHref}
+                  download
+                  className="text-primary inline-flex items-center gap-1 text-xs underline-offset-4 hover:underline"
+                >
+                  <DownloadIcon className="size-3.5" />
+                  {t('generations.downloadSubtitle')}
+                </a>
+              )}
             </div>
           ) : (
             <p className="text-muted-foreground text-xs">{t('common.loading')}</p>

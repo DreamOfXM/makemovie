@@ -192,6 +192,10 @@ export interface Storyboard {
   title: string
   durationMs: number
   description: string
+  /** The line spoken in this shot; an empty string marks a deliberately silent shot. */
+  dialogue: string
+  /** Label for who speaks, nothing more: no voice is cloned from it and no model is picked by it. */
+  speaker: string | null
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
@@ -199,6 +203,7 @@ export interface Storyboard {
   assets?: StoryboardAssetLink[]
   firstFrame?: GenerationArtifact | null
   video?: GenerationArtifact | null
+  voice?: GenerationArtifact | null
 }
 
 /** Live shots are the current breakdown; superseded ones are readable history, never a count. */
@@ -239,7 +244,7 @@ export interface Membership {
 /* Generation pipeline                                                         */
 /* -------------------------------------------------------------------------- */
 
-export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
 export type GenerationStage = (typeof generationStages)[number]
 
 export type GenerationTaskStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED'
@@ -288,6 +293,8 @@ export interface EpisodeComposition {
   id: string
   status: string
   artifact: GenerationArtifact | null
+  /** Cue sheet for the master, null when the episode has no lines to subtitle. */
+  subtitle: GenerationArtifact | null
 }
 
 export interface GenerationsResponse {

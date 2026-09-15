@@ -395,6 +395,8 @@ export default function ProjectsPage() {
                 <EpisodeStepper
                   episodeId={selectedEpisode.id}
                   storyboardCount={storyboards.length}
+                  speakingShots={storyboards.filter(storyboard => storyboard.dialogue !== '').length}
+                  voicedShots={storyboards.filter(storyboard => storyboard.dialogue !== '' && storyboard.voice).length}
                   onAdvanced={refreshAfterAdvance}
                 />
               </div>
@@ -748,6 +750,8 @@ const emptyStoryboard = {
   title: '',
   durationMs: 3000,
   description: '',
+  dialogue: '',
+  speaker: '',
   sourceExcerpt: '',
   continuityIn: '',
   continuityOut: '',
@@ -771,6 +775,8 @@ function StoryboardDialog({ state, episodeId, onOpenChange, onDone }: Storyboard
             title: state.storyboard.title,
             durationMs: state.storyboard.durationMs,
             description: state.storyboard.description,
+            dialogue: state.storyboard.dialogue,
+            speaker: state.storyboard.speaker ?? '',
             sourceExcerpt: state.storyboard.sourceExcerpt,
             continuityIn: state.storyboard.continuityIn,
             continuityOut: state.storyboard.continuityOut,
@@ -796,6 +802,8 @@ function StoryboardDialog({ state, episodeId, onOpenChange, onDone }: Storyboard
             title: form.title,
             durationMs: form.durationMs,
             description: form.description,
+            dialogue: form.dialogue,
+            speaker: form.speaker,
             sourceExcerpt: form.sourceExcerpt,
             continuityIn: form.continuityIn,
             continuityOut: form.continuityOut,
@@ -839,7 +847,7 @@ function StoryboardDialog({ state, episodeId, onOpenChange, onDone }: Storyboard
                 id="shotDuration"
                 type="number"
                 min={1}
-                step={100}
+                step="any"
                 value={form.durationMs}
                 onChange={event => field('durationMs', Number(event.target.value))}
                 required
@@ -866,6 +874,26 @@ function StoryboardDialog({ state, episodeId, onOpenChange, onDone }: Storyboard
               required
             />
           </Field>
+
+          <div className="grid gap-4 sm:grid-cols-[10rem_minmax(0,1fr)]">
+            <Field label={t('storyboards.speaker')} htmlFor="shotSpeaker">
+              <Input
+                id="shotSpeaker"
+                value={form.speaker}
+                onChange={event => field('speaker', event.target.value)}
+                placeholder={t('common.optional')}
+              />
+            </Field>
+            <Field label={t('storyboards.dialogue')} htmlFor="shotDialogue" hint={t('storyboards.dialogueHint')}>
+              <Textarea
+                id="shotDialogue"
+                value={form.dialogue}
+                onChange={event => field('dialogue', event.target.value)}
+                rows={2}
+                placeholder={t('common.optional')}
+              />
+            </Field>
+          </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label={t('storyboards.continuityIn')} htmlFor="shotIn">

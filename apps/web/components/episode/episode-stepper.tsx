@@ -1,10 +1,10 @@
 'use client'
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { ArrowRightIcon, CheckIcon, LoaderCircleIcon, SparklesIcon } from 'lucide-react'
-import { ApiError, type GenerationBatch, type GenerationStage } from '@/lib/api'
-import { translateEnum, useI18n } from '@/lib/i18n'
+import { ApiError, type EpisodeComposition, type GenerationBatch, type GenerationStage } from '@/lib/api'
+import { translateEnum, type TranslateFn, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { cn } from '@/lib/utils'
@@ -12,19 +12,20 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { GuardedButton } from '@/components/permission'
 
-const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'generation', 'composition', 'delivery'] as const
+const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'generation', 'audio', 'composition', 'delivery'] as const
 type StepKey = (typeof STEP_KEYS)[number]
 type StepStatus = 'done' | 'current' | 'todo'
 
 // Where each step's content lives on the page, so clicking a step scrolls to it.
-// Source and script share the sources panel; generation and composition share the
-// generation panel.
+// Source and script share the sources panel; generation, audio and composition all
+// live in the one generations panel, which has a single anchor.
 const STEP_ANCHOR: Record<StepKey, string> = {
   source: 'step-source',
   script: 'step-source',
   assets: 'step-assets',
   storyboards: 'step-storyboards',
   generation: 'step-generation',
+  audio: 'step-generation',
   composition: 'step-generation',
   delivery: 'step-delivery',
 }
@@ -34,16 +35,23 @@ interface ProgressData {
   scriptApproved: boolean
   assetApproved: boolean
   hasGeneratedMedia: boolean
+  musicCompleted: boolean
   compositionCompleted: boolean
   hasDelivery: boolean
+  unsettled: boolean
 }
 
 /**
  * Composes the episode's production progress from the five read endpoints and
  * reduces it to per-step status plus the first incomplete step, so the workspace
  * can always tell the user where they are and what to do next.
+ *
+ * `speakingShots`/`voicedShots` come from the caller's shot list rather than from
+ * these endpoints: the generations listing has no per-shot voice, only the enriched
+ * storyboard DTO does. A shot with no line is silent by design and needs no voice,
+ * which is the same rule the composition gate applies.
  */
-export function useEpisodeProgress(episodeId: string | null, storyboardCount: number) {
+export function useEpisodeProgress(episodeId: string | null, storyboardCount: number, audio: { speakingShots: number; voicedShots: number }) {
   const { api } = useSession()
 
   const load = useCallback(async (): Promise<ProgressData | null> => {
@@ -64,12 +72,35 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
       hasGeneratedMedia: generations.batches.some(
         batch => (batch.stage === 'IMAGE' || batch.stage === 'VIDEO') && batch.tasks.some(task => task.status === 'SUCCEEDED'),
       ),
+      musicCompleted: generations.batches.some(
+        batch => batch.stage === 'MUSIC' && batch.tasks.length > 0 && batch.tasks.every(task => task.status === 'SUCCEEDED'),
+      ),
       compositionCompleted: generations.composition?.status === 'COMPLETED',
       hasDelivery: deliveries.deliveries.length > 0,
+      // Anything still in flight: the worker relays from a finished batch straight
+      // into planning the next one, so a task that is queued or running — or a
+      // composition being built — means the progress below is not the final word yet.
+      unsettled:
+        generations.batches.some(batch => batch.tasks.some(task => task.status === 'QUEUED' || task.status === 'RUNNING')) ||
+        generations.composition?.status === 'RUNNING',
     }
   }, [api, episodeId])
 
   const { data, loading, reload } = useAsync<ProgressData | null>(episodeId ? load : null, null)
+
+  // The chain runs unattended, so a stepper that read once would sit on the state it
+  // caught at page load while the worker is already two stages ahead. It refreshes on
+  // the same cadence as the panels below it and stops when nothing is in flight —
+  // including one last read at that moment, which is what catches the next batch the
+  // worker plans milliseconds after the previous task landed.
+  useEffect(() => {
+    if (!episodeId || !data?.unsettled) return
+    const timer = setInterval(reload, 3000)
+    return () => {
+      clearInterval(timer)
+      reload()
+    }
+  }, [episodeId, data?.unsettled, reload])
 
   const done: Record<StepKey, boolean> = {
     source: data?.sourceApproved ?? false,
@@ -77,6 +108,14 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
     assets: data?.assetApproved ?? false,
     storyboards: storyboardCount > 0,
     generation: data?.hasGeneratedMedia ?? false,
+    // A shot list that has not been written yet owes no audio; a silent one only
+    // becomes handled once the score ran or a master exists, because a composed
+    // silent episode is the chain declining sound on purpose.
+    audio:
+      storyboardCount > 0 &&
+      (audio.speakingShots > 0
+        ? audio.voicedShots >= audio.speakingShots
+        : Boolean(data && (data.musicCompleted || data.compositionCompleted))),
     composition: data?.compositionCompleted ?? false,
     delivery: data?.hasDelivery ?? false,
   }
@@ -89,22 +128,41 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
   return { loading, steps, nextStep: firstIncomplete, reload }
 }
 
+/**
+ * The compose gate refuses with a `composition:<what>` code. Only a code we wrote copy
+ * for becomes a sentence; an unknown one returns null, so the user gets the generic
+ * "nothing to do" message rather than a raw code presented as an explanation.
+ */
+function blockedMessage(error: ApiError, t: TranslateFn): string | null {
+  const reasons = Array.isArray(error.body?.reasons) ? error.body.reasons : []
+  for (const reason of reasons) {
+    if (typeof reason !== 'string' || !reason.startsWith('composition:')) continue
+    const key = `stepper.blocked.${reason.slice('composition:'.length)}`
+    if (t(key) !== key) return t(key)
+  }
+  return null
+}
+
 interface RunPipelineResponse {
-  stage: GenerationStage
-  batch: GenerationBatch
+  stage: GenerationStage | 'COMPOSITION'
+  batch?: GenerationBatch
+  composition?: EpisodeComposition
 }
 
 interface EpisodeStepperProps {
   episodeId: string
   storyboardCount: number
+  /** Live shots carrying a line, and how many of them already have their voice. */
+  speakingShots: number
+  voicedShots: number
   /** Lets the workspace refresh the panels it owns once the pipeline has moved forward. */
   onAdvanced?(): void
 }
 
-export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: EpisodeStepperProps) {
+export function EpisodeStepper({ episodeId, storyboardCount, speakingShots, voicedShots, onAdvanced }: EpisodeStepperProps) {
   const { t } = useI18n()
   const { api } = useSession()
-  const { loading, steps, nextStep, reload } = useEpisodeProgress(episodeId, storyboardCount)
+  const { loading, steps, nextStep, reload } = useEpisodeProgress(episodeId, storyboardCount, { speakingShots, voicedShots })
   const [advancing, setAdvancing] = useState(false)
 
   async function advance() {
@@ -115,9 +173,10 @@ export function EpisodeStepper({ episodeId, storyboardCount, onAdvanced }: Episo
       reload()
       onAdvanced?.()
     } catch (error) {
-      // Nothing runnable is a normal state — every stage has run or is waiting on a human approval.
+      // Nothing runnable is a normal state, but the gate also says when the real reason
+      // is a shot still missing its clip or its voice — that is not "up to date".
       if (error instanceof ApiError && error.message === 'pipeline:nothingRunnable') {
-        toast.message(t('stepper.advanceUpToDate'))
+        toast.message(blockedMessage(error, t) ?? t('stepper.advanceUpToDate'))
       } else {
         toast.error(error instanceof Error ? error.message : t('error.generic'))
       }
