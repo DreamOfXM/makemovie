@@ -1,19 +1,17 @@
 'use client'
 
 import { useState } from 'react'
-import { ArchiveIcon, FilmIcon, PencilIcon, WorkflowIcon } from 'lucide-react'
-import { isLiveStoryboard, toWorkflowStatus, type Asset, type GenerationArtifact, type Storyboard } from '@/lib/api'
+import { ArchiveIcon, PencilIcon, WorkflowIcon } from 'lucide-react'
+import { isLiveStoryboard, toWorkflowStatus, type Asset, type Storyboard } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { cn, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Skeleton } from '@/components/ui/skeleton'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { ArtifactLightbox } from '@/components/artifact-lightbox'
 import { LineageBadge } from '@/components/lineage-badge'
-import { ArtifactPreview, useArtifactUrl } from '@/components/generations/generations-panel'
+import { ArtifactMedia } from '@/components/generations/artifact-media'
 
 interface StoryboardCardProps {
   storyboard: Storyboard
@@ -82,10 +80,18 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
         {(storyboard.firstFrame || storyboard.video) && (
           <div className="flex flex-wrap gap-3">
             {storyboard.firstFrame && (
-              <StoryboardMedia artifact={storyboard.firstFrame} label={`${storyboard.title} · ${t('storyboards.firstFrame')}`} />
+              <ArtifactMedia
+                artifact={storyboard.firstFrame}
+                label={`${storyboard.title} · ${t('storyboards.firstFrame')}`}
+                className="max-h-56 rounded-lg"
+              />
             )}
             {storyboard.video && (
-              <StoryboardMedia artifact={storyboard.video} label={`${storyboard.title} · ${t('storyboards.video')}`} />
+              <ArtifactMedia
+                artifact={storyboard.video}
+                label={`${storyboard.title} · ${t('storyboards.video')}`}
+                className="max-h-56 rounded-lg"
+              />
             )}
           </div>
         )}
@@ -154,7 +160,7 @@ export function StoryboardCard({ storyboard, canWrite, episodeAssets, onBindAsse
                 what the model actually said before it reaches the master. */}
             {storyboard.voice && (
               <div className="mt-2">
-                <ArtifactPreview artifact={storyboard.voice} />
+                <ArtifactMedia artifact={storyboard.voice} label={`${storyboard.title} · ${t('generations.stage.AUDIO')}`} />
               </div>
             )}
           </div>
@@ -203,37 +209,5 @@ function SupersededBadge({ revision }: { revision: number }) {
       </TooltipTrigger>
       <TooltipContent>{t('storyboards.supersededHint')}</TooltipContent>
     </Tooltip>
-  )
-}
-
-function StoryboardMedia({ artifact, label }: { artifact: GenerationArtifact; label: string }) {
-  const href = useArtifactUrl(artifact.downloadUrl)
-  const [zoomed, setZoomed] = useState(false)
-
-  if (!href) return <Skeleton className="h-44 w-72 rounded-lg" />
-  if (artifact.mimeType.startsWith('image/')) {
-    return (
-      <>
-        {/* Previews are blob URLs from the API origin, so next/image cannot optimize them. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={href}
-          alt={label}
-          loading="lazy"
-          onClick={() => setZoomed(true)}
-          className="max-h-56 cursor-zoom-in rounded-lg border object-cover"
-        />
-        {zoomed && <ArtifactLightbox src={href} alt={label} onClose={() => setZoomed(false)} />}
-      </>
-    )
-  }
-  if (artifact.mimeType.startsWith('video/')) {
-    return <video src={href} controls preload="metadata" className="max-h-56 rounded-lg border" />
-  }
-  return (
-    <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
-      <FilmIcon className="size-3.5" />
-      {label}
-    </span>
   )
 }

@@ -21,7 +21,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
-import { ArtifactPreview } from '@/components/generations/generations-panel'
+import { ArtifactMedia } from '@/components/generations/artifact-media'
 
 /** Kinds the authoring form offers as presets; the API itself accepts free text. */
 const assetKinds = ['character', 'prop', 'scene'] as const
@@ -237,7 +237,9 @@ function AssetCard({ asset, busy, onApprove }: AssetCardProps) {
                     />
                   </div>
                   {version.description && <p className="text-muted-foreground text-xs">{version.description}</p>}
-                  {version.artifact && <ArtifactPreview artifact={version.artifact} />}
+                  {version.artifact && (
+                    <ArtifactMedia artifact={version.artifact} label={`${asset.name} · v${version.version}`} />
+                  )}
                 </div>
                 {version.status !== 'APPROVED' && (
                   <GuardedButton

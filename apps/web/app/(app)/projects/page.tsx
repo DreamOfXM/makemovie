@@ -493,7 +493,11 @@ export default function ProjectsPage() {
                 </div>
 
                 <div id="step-generation" className="scroll-mt-4">
-                  <GenerationsPanel episodeId={selectedEpisode.id} reloadToken={generationsToken} />
+                  <GenerationsPanel
+                    episodeId={selectedEpisode.id}
+                    reloadToken={generationsToken}
+                    storyboards={storyboards}
+                  />
                 </div>
                 <div id="step-delivery" className="scroll-mt-4">
                   <DeliveryPanel episodeId={selectedEpisode.id} />
