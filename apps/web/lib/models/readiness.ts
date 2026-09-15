@@ -54,7 +54,8 @@ export function candidatesForSlot(pool: BindableCapability[], slot: CapabilitySl
 
 export interface SlotUsage {
   /**
-   * The stages that actually resolve this slot, per `stageSlots` in the pipeline.
+   * The stages that actually resolve this slot: `stageSlots` in the pipeline for the one
+   * every stage plans against, plus VIDEO's optional lookup of a conditioning model beside it.
    * An empty list means no code path reads the slot, so nothing is waiting on it.
    */
   stages: readonly GenerationStage[]
@@ -69,7 +70,13 @@ const slotUsage: Record<CapabilitySlot, SlotUsage> = {
   storyboard_text: { stages: ['STORYBOARD'], qcOnly: false, required: true },
   image_gen: { stages: ['ASSET', 'IMAGE'], qcOnly: false, required: true },
   video_t2v: { stages: ['VIDEO'], qcOnly: false, required: true },
-  video_i2v: { stages: [], qcOnly: false, required: false },
+  // The optional half of VIDEO: when a model is bound here, each shot's own newest first
+  // frame — the one no review sent back — conditions its clip. With nothing bound the stage
+  // runs on `video_t2v` alone, exactly as it did before conditioning existed.
+  video_i2v: { stages: ['VIDEO'], qcOnly: false, required: false },
+  // Unwired because of our own upstream data, not the contract: the reference type exists
+  // and binds, but the pipeline attributes no asset to a shot, so the only
+  // `StoryboardAsset` rows that exist are the ones a human routed by hand.
   video_r2v: { stages: [], qcOnly: false, required: false },
   tts_voice: { stages: ['AUDIO'], qcOnly: false, required: false },
   music_gen: { stages: ['MUSIC'], qcOnly: false, required: false },

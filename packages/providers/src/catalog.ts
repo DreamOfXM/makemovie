@@ -58,7 +58,7 @@ const seedance: ProviderCatalog = {
   catalogVersion: '2026-09',
   models: [
     { model: 'doubao-seedance-1-0-pro-250528', displayName: 'Seedance 1.0 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'the returned video link is signed and lasts about a day, so the worker ingests it the moment the task settles' } },
-    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'image-to-video is not offered yet: Ark takes a first frame as a public URL and this product keeps its frames behind its own storage' } },
+    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'image-to-video is not offered yet: this adapter implements the text-to-video endpoint only' } },
   ],
 }
 
@@ -69,7 +69,7 @@ const kling: ProviderCatalog = {
   catalogVersion: '2026-09',
   requiresAccessKey: true,
   models: [
-    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'image-to-video works at the adapter level but no production stage can bind an i2v capability yet, so it is not listed here' } },
+    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'image-to-video is built in the adapter but gets no catalog row until the vendor model name is verified' } },
     { model: 'kling-v1-6', displayName: 'Kling 1.6', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'] } },
   ],
 }

@@ -57,6 +57,10 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
   const ready = readyCount(readiness)
   const requiredTotal = wiredRequiredSlots().length
   const gaps = gapSlots(readiness)
+  // The headline and the call to action answer the required half only. An unbound optional
+  // slot — voice, score, conditioning, the auditor — is a row in the table below with its own
+  // consequence, not a model this installation has to go and buy.
+  const requiredGaps = gaps.filter(item => item.usage.required)
   const coverage = bestCatalogCoverage(catalogs)
   const unwired = unwiredSlots(readiness)
 
@@ -65,7 +69,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            {gaps.length === 0 ? (
+            {requiredGaps.length === 0 ? (
               <CheckCircle2Icon className="text-success size-4" />
             ) : (
               <CircleAlertIcon className="text-warning size-4" />
@@ -73,12 +77,12 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
             {t('models.readiness.title')}
           </CardTitle>
           <CardDescription>
-            {gaps.length === 0
+            {requiredGaps.length === 0
               ? t('models.readiness.allReady', { total: requiredTotal })
               : t('models.readiness.gaps', { ready, total: requiredTotal })}
           </CardDescription>
           <CardAction>
-            <Badge variant={gaps.length === 0 ? 'success' : 'outline'}>
+            <Badge variant={requiredGaps.length === 0 ? 'success' : 'outline'}>
               {t('models.readiness.score', { ready, total: requiredTotal })}
             </Badge>
           </CardAction>
@@ -96,7 +100,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
                   })}
             </p>
           )}
-          {gaps.length === 0 ? (
+          {requiredGaps.length === 0 ? (
             <Button size="sm" asChild>
               <Link href="/projects">
                 <ArrowRightIcon />
@@ -105,13 +109,13 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
             </Button>
           ) : (
             <div className="flex flex-wrap gap-2">
-              {gaps.some(gap => gap.state === 'missing') && (
+              {requiredGaps.some(gap => gap.state === 'missing') && (
                 <Button size="sm" variant="outline" onClick={() => onGoto('connections')}>
                   <BoxesIcon />
                   {t('models.readiness.goConnections')}
                 </Button>
               )}
-              {gaps.some(gap => gap.state === 'needsBinding') && (
+              {requiredGaps.some(gap => gap.state === 'needsBinding') && (
                 <Button size="sm" onClick={() => onGoto('bindings')}>
                   {t('models.readiness.goBindings')}
                 </Button>
@@ -188,7 +192,7 @@ function badgeVariant(state: SlotReadiness['state']): 'success' | 'warning' | 'd
 }
 
 /**
- * What the user actually loses when a slot has no usable model. The three skippable
+ * What the user actually loses when a slot has no usable model. The four skippable
  * slots each degrade differently; a required one blocks its stage, which the usage
  * column already names.
  */
@@ -200,6 +204,8 @@ function consequenceCopy(t: TranslateFn, slot: CapabilitySlot): string {
       return t('models.readiness.consequence.music_gen')
     case 'visual_audit':
       return t('models.readiness.consequence.visual_audit')
+    case 'video_i2v':
+      return t('models.readiness.consequence.video_i2v')
     default:
       return t('models.readiness.consequenceRequired')
   }

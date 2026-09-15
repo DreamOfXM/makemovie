@@ -435,7 +435,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
 
     'models.readiness.title': 'What the production chain needs',
     'models.readiness.allReady': 'All {total} required slots have a usable model, so an episode can run end to end.',
-    'models.readiness.gaps': '{ready} of {total} required slots have a usable model. Fill the gaps below to run an episode end to end.',
+    'models.readiness.gaps': '{ready} of {total} required slots have a usable model. The slots listed below have nothing bound yet.',
     'models.readiness.score': '{ready} / {total} required',
     'models.readiness.coverAll': '{label} covers all {total} required slots on its own — one connection and one key is enough.',
     'models.readiness.coverSome': '{label} covers {covered} of {total} required slots; {slots} need another provider.',
@@ -457,7 +457,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'models.readiness.consequence.tts_voice': 'Without it the master track is silent — pictures and subtitles still render.',
     'models.readiness.consequence.music_gen': 'Without it the episode has no music bed.',
     'models.readiness.consequence.visual_audit': 'Without it shots stay unjudged; the audit never guesses a pass.',
-    'models.readiness.unwired': '{slots} are not wired into the pipeline yet, so no model is needed for them.',
+    'models.readiness.consequence.video_i2v': 'Without it clips are still generated for every shot, from the shot text alone — that description is then all that ties a character across shots.',
+    'models.readiness.unwired': '{slots} are resolved by no stage yet, so no model is needed for them.',
 
     'models.connections': 'Provider connections',
     'models.connectionsHint': 'Every connection owns the model capabilities listed in its provider catalog.',
@@ -1049,7 +1050,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
 
     'models.readiness.title': '生产线到底需要哪些模型',
     'models.readiness.allReady': '{total} 个必填槽位都已配齐可用模型，可以直接跑完整集。',
-    'models.readiness.gaps': '{total} 个必填槽位中就绪 {ready} 个，补齐下面的缺口才能跑完整集。',
+    'models.readiness.gaps': '{total} 个必填槽位中就绪 {ready} 个，下面列出的槽位尚未绑定任何模型。',
     'models.readiness.score': '必填 {ready} / {total}',
     'models.readiness.coverAll': '{label} 一个连接就能覆盖全部 {total} 个必填槽位，一把密钥即可跑通。',
     'models.readiness.coverSome': '{label} 覆盖 {covered}/{total} 个必填槽位，{slots} 需要其他厂商。',
@@ -1071,7 +1072,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'models.readiness.consequence.tts_voice': '缺它则母带无声，画面与字幕照常产出。',
     'models.readiness.consequence.music_gen': '缺它则成片没有配乐床。',
     'models.readiness.consequence.visual_audit': '缺它则镜头保持未审计，审计不会给出假通过。',
-    'models.readiness.unwired': '{slots} 尚未接入链路，无需为它们配置模型。',
+    'models.readiness.consequence.video_i2v': '缺它时每个镜头的片段仍会产出，但只依据镜头文字——角色跨镜头的一致就只剩这段描述。',
+    'models.readiness.unwired': '{slots} 暂不被任何阶段解析，因此无需为它们配置模型。',
 
     'models.connections': 'Provider 连接',
     'models.connectionsHint': '每个连接拥有其 Provider 目录中列出的全部模型能力。',

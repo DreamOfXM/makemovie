@@ -21,8 +21,8 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 **Model capability center**
 
-- A readiness view that answers the only question an operator arrives with: **the chain resolves seven slots, four of them required, and the page scores those four and names the catalog that covers them on its own** — which in practice means one Alibaba Cloud Bailian connection and one key is enough for the whole chain. Every row says which stage consumes it and what its absence costs: a silent master, no score bed, shots left unaudited, or a composition that cannot cut
-- Capability slots for script text, storyboard text, image generation, video (T2V / I2V / R2V), voice, music, and visual audit; the two reference-video slots are listed as not yet wired into the chain rather than as something to go and buy
+- A readiness view that answers the only question an operator arrives with: **the chain resolves eight slots, four of them required, and the page scores those four and names the catalog that covers them on its own** — which in practice means one Alibaba Cloud Bailian connection and one key is enough for the whole chain. Every row says which stage consumes it and what its absence costs: a silent master, no score bed, shots left unaudited, clips cut without their own first frame, or a composition that cannot cut
+- Capability slots for script text, storyboard text, image generation, video (T2V / I2V / R2V), voice, music, and visual audit; the reference-to-video slot is listed as not yet wired into the chain rather than as something to go and buy
 - Bundled catalogs for Alibaba Cloud Bailian / DashScope (Qwen text and vision, Wanx and Qwen Image, `qwen3-tts-flash` voice, music), Volcano Ark Seedance and Kuaishou Kling video, OpenAI, Google Gemini, Anthropic, an OpenAI-compatible gateway for private endpoints, and a mock provider. The OpenAI, Gemini and Anthropic models are wired from published vendor documentation and covered by contract tests against a stubbed HTTP layer — they have **not** been run against a live account, and every one of their catalog entries carries that qualifier in its own spec detail. The gateway entry ships no model list and no default host on purpose: it is a protocol, not a vendor, so both are typed in on the connection
 - Provider credentials encrypted at rest (AES-256-GCM) and never returned by read endpoints; vendors that authenticate with an access key and a secret key store both halves
 - Two verification tiers: a connection probe that checks the credential against the vendor, and per-model verification where a request exists that names one model without generating from it. An endpoint that denies a model revokes the product's belief in that row; an image, video or audio endpoint has no such request, so those rows are labelled as needing one real generation instead of being given a check mark that was never earned
@@ -36,6 +36,7 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Content language set per project, independent of the console's own display language: a Chinese project is the unchanged default and an English project is prompted for English dialogue and narration, with the structured shot format held identical across both
 - Episode assets with generated reference images, approval as the likeness, and bindings to the shots that use them
 - Per-stage generation batches dispatched over BullMQ with idempotent triggers, candidate fallback, and automatic rework on quality rejection
+- First-frame conditioning: with a model bound to `video_i2v`, a shot's own newest first frame that no review sent back is handed to the video model as its opening image, inline with the request, so the clip starts from that image rather than from the shot text alone; a shot whose frame is missing or unusable is still generated from its text
 - Automated orchestration: a completed batch relays the next stage on its own, from script through voice and score to a composed master; a stage with nothing bound to it is stepped over rather than waited on, and **Advance pipeline** remains available for manual stepping
 - Edit and regenerate: every stage's output stays editable; re-running a stage produces a new revision while prior revisions are kept for traceability
 - Script-approval cascade: approving an edited script regenerates the breakdown as a new shot revision, supersedes the shots it replaces, re-runs their media, and re-cuts the master
@@ -86,11 +87,11 @@ pnpm --filter @studio/db exec prisma migrate deploy
 pnpm dev                                              # api :4010 · web :3010 · worker
 ```
 
-Open http://localhost:3010 and create a workspace, then configure models in **Model center**. The **Readiness** tab opens first and states what the chain needs: four required slots — `script_text`, `storyboard_text`, `image_gen`, `video_t2v` — plus three optional ones.
+Open http://localhost:3010 and create a workspace, then configure models in **Model center**. The **Readiness** tab opens first and states what the chain needs: four required slots — `script_text`, `storyboard_text`, `image_gen`, `video_t2v` — plus four optional ones.
 
 1. Add a provider connection. Credentials are encrypted at rest with `STUDIO_MASTER_KEY`; a vendor that signs requests with an access key and a secret key asks for both. A DashScope connection alone covers all four required slots and the optional ones too. A gateway has no published model list, so add the model names it actually serves on the connection.
 2. Run **Probe** to check the credential, and **Verify this model** on any chat-family row to check that single model by name.
-3. Bind a verified model to each of the four required slots — those four are what the chain needs before it can cut anything. The three optional slots cost you output rather than blocking it: without `tts_voice` the master is cut silent, without `music_gen` there is no score bed, and without `visual_audit` shots stay unaudited rather than passing unexamined. **Resolve candidates** shows the ordered fallback list the pipeline will use.
+3. Bind a verified model to each of the four required slots — those four are what the chain needs before it can cut anything. The four optional slots cost you output rather than blocking it: without `tts_voice` the master is cut silent, without `music_gen` there is no score bed, without `visual_audit` shots stay unaudited rather than passing unexamined, and without `video_i2v` every clip is cut from its shot text instead of from that shot's own first frame. **Resolve candidates** shows the ordered fallback list the pipeline will use.
 
 Produce an episode:
 
@@ -140,7 +141,7 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 ## Roadmap
 
 - Speaker → voice registry and voice cloning, so a character keeps one voice across episodes
-- First-frame-driven video inside the pipeline; the Kling and Wanx image-to-video adapters already speak it, no stage binds them yet
+- Reference-to-video conditioning: the chain attributes cast and prop assets to each shot, so a clip can be driven by the characters in it and not only by its own first frame
 - Audio quality control: loudness measurement, and an option to burn subtitles into the picture
 - Deep content audits: source coverage, script coverage, cross-shot continuity, audio sync
 - Visual-audit threshold calibrated against live vision-model scores
