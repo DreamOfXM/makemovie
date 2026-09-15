@@ -3,9 +3,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { Prisma, syncBatchStatus } from '@studio/db'
 import type { RunTaskCandidate, RunTaskPayload } from '@studio/jobs'
-import { buildObjectKey, extensionFor, synthesizeMockMedia } from '@studio/media'
+import { buildObjectKey, extensionFor, REFERENCE_IMAGE_MAX_BYTES_10MB, synthesizeMockMedia, toDataUrl, toReferenceImage } from '@studio/media'
 import { advancePipeline } from '@studio/pipeline'
-import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
+import { createAdapter, type ModelCapability as ProviderCapability, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
 import { recordAssetVersion } from './asset-version.js'
 import { recordGeneratedContent } from './content.js'
@@ -45,10 +45,15 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
   await syncBatchStatus(deps.db, task.batchId)
 
   const errors: string[] = []
+  // What the shot's frame did across every candidate this task tried. It has to outlive a
+  // single attempt: the model that wanted the frame is not the one that ends up delivering
+  // the clip, and a text-only fallback that says nothing about the lost frame reads as if
+  // no conditioning was ever planned.
+  const referenceLog: ReferenceRecord[] = []
   for (const candidate of payload.candidates) {
     let outcome: CandidateOutcome
     try {
-      outcome = await runCandidate(task, candidate, payload, deps)
+      outcome = await runCandidate(task, candidate, payload, deps, referenceLog)
     } catch (error) {
       outcome = { status: 'next', error: `${label(candidate)}: ${errorMessage(error)}` }
     }
@@ -81,7 +86,13 @@ async function autoAdvance(deps: PipelineDeps, task: TaskRow): Promise<void> {
   }
 }
 
-async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload: RunTaskPayload, deps: PipelineDeps): Promise<CandidateOutcome> {
+async function runCandidate(
+  task: TaskRow,
+  candidate: RunTaskCandidate,
+  payload: RunTaskPayload,
+  deps: PipelineDeps,
+  referenceLog: ReferenceRecord[],
+): Promise<CandidateOutcome> {
   const connection = await deps.db.providerConnection.findUnique({ where: { id: candidate.connectionId } })
   if (!connection || !connection.enabled || connection.organizationId !== task.organizationId) {
     return { status: 'next', error: `${label(candidate)}: connection ${candidate.connectionId} unavailable` }
@@ -93,6 +104,17 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
 
   const capability = toCapability(connection.provider, capabilityRow)
   const request = parseRequest(task.requestSnapshot, candidate.model)
+  const frame = await resolveFrame(task, capability, capabilityRow.spec, deps)
+  let reference: Extract<FrameOutcome, { conditioned: true }> | undefined
+  if (frame) {
+    if (!frame.conditioned) {
+      referenceLog.push({ model: candidate.model, conditioned: false, reason: frame.reason })
+      return { status: 'next', error: `${label(candidate)}: ${frame.reason}` }
+    }
+    referenceLog.push({ model: candidate.model, conditioned: true })
+    request.input.media = [{ type: 'first_frame', url: frame.dataUrl }]
+    reference = frame
+  }
   const apiKey = decryptSecret(connection.encryptedSecret, deps.masterKey)
   const accessKey = connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, deps.masterKey) : undefined
   const adapter = createAdapter(connection.provider, { apiKey, accessKey, baseUrl: connection.baseUrl })
@@ -144,6 +166,7 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
       prompt: promptOf(request),
       workdir,
       durationMs: material.durationMs,
+      ...(reference ? { referenceDataUrl: reference.dataUrl } : {}),
     })
     await deps.db.qualityCheck.create({
       data: {
@@ -216,6 +239,9 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
           artifactId: artifact.id,
           artifactUrl: result.artifactUrl ?? null,
           qc: { score: verdict.score, threshold: QC_THRESHOLD },
+          // The frames are reported as ids and verdicts: their bytes would turn a per-task
+          // text column into a media store, and the artifact rows already hold them.
+          ...(referenceLog.length > 0 ? { reference: referenceLog } : {}),
         }),
       },
     })
@@ -244,6 +270,93 @@ async function materialize(result: PollResult, modality: string, workdir: string
   }
   if (typeof result.text === 'string') return { bytes: new TextEncoder().encode(result.text), mimeType: 'text/plain' }
   throw new Error('provider completed without an artifact')
+}
+
+/**
+ * What this candidate did with the shot's frame, or `null` when there was nothing to
+ * decide: no frame in the snapshot, or a candidate that cannot take one. `null` is what
+ * keeps the text-to-video path byte-identical to the one it had before conditioning existed.
+ */
+type FrameOutcome =
+  | { conditioned: true; dataUrl: string }
+  | { conditioned: false; reason: string }
+
+/** One line of that story as it is kept on the succeeded task. Never the image itself. */
+type ReferenceRecord =
+  | { model: string; conditioned: true }
+  | { model: string; conditioned: false; reason: string }
+
+/**
+ * Reads the shot's own frame out of storage and turns it into the conditioning image an
+ * image-to-video model is given.
+ *
+ * The gate that flattens a transparent PNG and refuses an oversized frame runs here rather
+ * than at plan time, because this is the first place the bytes are worth reading, and the
+ * ceiling it judges them against belongs to whichever model ends up running the shot.
+ *
+ * Nothing here fails a task. A frame that cannot be used comes back as a reason: the caller
+ * declines that candidate and the shot is made by a text-to-video model instead, because
+ * conditioning is a quality gain and not an availability precondition.
+ */
+async function resolveFrame(
+  task: TaskRow,
+  capability: ProviderCapability,
+  spec: unknown,
+  deps: PipelineDeps,
+): Promise<FrameOutcome | null> {
+  // A text-to-video candidate has no slot for a frame and the adapter says so; reading the
+  // bytes for it would spend storage traffic on an image nobody is going to look at.
+  if (capability.modality !== 'i2v') return null
+  const references = readFrameReferences(task.requestSnapshot)
+  if (references.length === 0) return null
+  const { artifactId } = references[0]
+
+  try {
+    const artifact = await deps.db.mediaArtifact.findFirst({
+      where: { id: artifactId, organizationId: task.organizationId },
+      select: { objectKey: true, mimeType: true },
+    })
+    if (!artifact) return { conditioned: false, reason: 'the referenced first frame is no longer stored' }
+
+    const bytes = await deps.storage.read(artifact.objectKey)
+    const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-reference-'))
+    try {
+      const frame = await toReferenceImage({
+        bytes,
+        mimeType: artifact.mimeType,
+        workdir,
+        // The bound model's own row carries the ceiling its generation publishes; a row
+        // that declares none gets the tightest one rather than the loosest.
+        limits: { maxBytes: referenceMaxBytes(spec) },
+      })
+      if (!frame.ok) return { conditioned: false, reason: frame.reason }
+      return { conditioned: true, dataUrl: toDataUrl(frame.bytes, frame.mimeType) }
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  } catch (error) {
+    return { conditioned: false, reason: errorMessage(error) }
+  }
+}
+
+function referenceMaxBytes(spec: unknown): number {
+  const declared = isRecord(spec) ? spec.referenceMaxBytes : undefined
+  return typeof declared === 'number' && Number.isInteger(declared) && declared > 0 ? declared : REFERENCE_IMAGE_MAX_BYTES_10MB
+}
+
+/** The frame references this task was planned with, as the pipeline wrote them. */
+function readFrameReferences(snapshot: string | null): { artifactId: string }[] {
+  if (!snapshot) return []
+  const parsed: unknown = JSON.parse(snapshot)
+  if (!isRecord(parsed) || !Array.isArray(parsed.referenceArtifacts)) return []
+  const references: { artifactId: string }[] = []
+  for (const entry of parsed.referenceArtifacts) {
+    if (!isRecord(entry) || entry.type !== 'first_frame' || typeof entry.artifactId !== 'string') {
+      throw new Error(`requestSnapshot carries a reference this worker cannot resolve: ${JSON.stringify(entry)}`)
+    }
+    references.push({ artifactId: entry.artifactId })
+  }
+  return references
 }
 
 function parseRequest(snapshot: string | null, fallbackModel: string): ProviderRequest {

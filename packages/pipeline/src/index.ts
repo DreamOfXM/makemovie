@@ -1,7 +1,7 @@
 import type { PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
 import type { CapabilitySlot, ContentLocale } from '@studio/domain'
-import { isContentLocale } from '@studio/domain'
+import { isContentLocale, planVideoModels } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
 import { buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
 
@@ -210,6 +210,44 @@ export async function createComposition(store: PipelineStore, organizationId: st
   return composition.id
 }
 
+/**
+ * The frame each shot may condition its own clip with: the newest FIRST_FRAME artifact of
+ * a task that succeeded **for that shot**, minus any artifact a quality check sent back for
+ * review. A frame an auditor or a human rejected is exactly the defect the review exists to
+ * catch, and conditioning a paid clip on it would propagate it into the finished film; a
+ * frame nobody judged at all is still usable, because the audit is optional and its absence
+ * is not a verdict. A shot with neither contributes no reference and is generated from text,
+ * which is what it did before conditioning existed.
+ */
+export async function usableFirstFrames(
+  db: PrismaClient,
+  organizationId: string,
+  episodeId: string,
+  storyboardIds: string[],
+): Promise<Map<string, string>> {
+  if (storyboardIds.length === 0) return new Map()
+  const artifacts = await db.mediaArtifact.findMany({
+    where: {
+      organizationId,
+      stage: 'FIRST_FRAME',
+      qualityChecks: { none: { status: 'NEEDS_REVIEW' } },
+      task: {
+        status: 'SUCCEEDED',
+        storyboardId: { in: storyboardIds },
+        batch: { episodeId },
+      },
+    },
+    select: { id: true, task: { select: { storyboardId: true } } },
+    orderBy: [{ createdAt: 'desc' }, { version: 'desc' }],
+  })
+  const newest = new Map<string, string>()
+  for (const artifact of artifacts) {
+    const shotId = artifact.task?.storyboardId
+    if (shotId && !newest.has(shotId)) newest.set(shotId, artifact.id)
+  }
+  return newest
+}
+
 interface GenerationTarget {
   entityId: string
   prompt: string
@@ -217,6 +255,8 @@ interface GenerationTarget {
   scriptVersionId?: string
   /** Set for the shot-scoped stages: the shot this task's artifact depicts. */
   storyboardId?: string
+  /** Set when this shot's own frame may condition its clip: the artifact to send. */
+  referenceArtifactId?: string
 }
 
 /** Everything a trigger needs: a database and a way to enqueue pipeline jobs. */
@@ -374,6 +414,14 @@ export async function triggerStage(
   const candidates = await resolveSlotCandidates(db, organizationId, episode.projectId, slot)
   if (candidates.length === 0) return { ok: false, code: 409, error: `no verified candidates for slot ${slot}` }
 
+  // Conditioning is the optional half of VIDEO: with a video_i2v bound, a shot's own
+  // approved frame becomes the input to its clip, which is what carries a character's face
+  // across a cut. The gate does not move — an installation that never bound the slot pays
+  // for exactly what it paid for before, and its snapshots keep the shape they had.
+  const conditioning = stage === 'VIDEO'
+    ? await resolveSlotCandidates(db, organizationId, episode.projectId, 'video_i2v')
+    : []
+
   // A voice task exists only to speak a line; voicing a silent shot would buy
   // audio of nothing, and composition never waits for it. AUDIO still connects
   // the shots it actually planned so a later dialogue edit re-opens the stage.
@@ -395,6 +443,16 @@ export async function triggerStage(
           storyboardId: storyboard.id,
         }))
       : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
+
+  // A frame is only looked up when a model was bound that can take it: resolving one for a
+  // request that would have to drop it spends a query to produce a number nobody reads.
+  const frames = conditioning.length > 0
+    ? await usableFirstFrames(db, organizationId, episode.id, targets.flatMap(target => target.storyboardId ? [target.storyboardId] : []))
+    : new Map<string, string>()
+  for (const target of targets) {
+    const artifactId = target.storyboardId ? frames.get(target.storyboardId) : undefined
+    if (artifactId) target.referenceArtifactId = artifactId
+  }
 
   const dbStage = stageDbValues[stage]
   // Carried only when it says something the provider would not otherwise know: a
@@ -433,7 +491,10 @@ export async function triggerStage(
             // in `input` because every adapter picks its input keys explicitly, while
             // `parameters` is forwarded to the vendor as-is — an unknown key there
             // could be rejected by a request the Chinese project already pays for.
-            requestSnapshot: JSON.stringify({ input: { prompt: target.prompt, ...localeField }, ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}) }),
+            // A reference is an id, not bytes: an approved 1080P frame encoded inline is
+            // megabytes, and the artifact row already carries its checksum and mime type.
+            // The key is written last so a task without one serialises exactly as before.
+            requestSnapshot: JSON.stringify({ input: { prompt: target.prompt, ...localeField }, ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}), ...(target.referenceArtifactId ? { referenceArtifacts: [{ type: 'first_frame', artifactId: target.referenceArtifactId }] } : {}) }),
           })),
         },
       },
@@ -442,8 +503,21 @@ export async function triggerStage(
     // Queued tasks roll the batch up to RUNNING; without this the batch would
     // read DRAFT until the worker happened to pick the first task up.
     await syncBatchStatus(db, batch.id)
+    // A shot holding its own frame tries the conditioning model first and keeps
+    // text-to-video behind it, so a conditioning model that is down still yields a
+    // picture — a lesser one, but the shot is not lost over a quality gain. Keyed by the
+    // task's own idempotency key, because the rows come back from the database in the
+    // order the database chose, not the order we wrote them in.
+    const perTask = new Map<string, RunTaskCandidate[]>()
+    if (conditioning.length > 0) {
+      targets.forEach((target, index) => {
+        const plan = planVideoModels([...conditioning, ...candidates], target.referenceArtifactId !== undefined)
+        perTask.set(idempotencyKeys[index], plan.candidates.map(toRunTaskCandidate))
+      })
+    }
+    const shared = candidates.map(toRunTaskCandidate)
     for (const task of batch.tasks) {
-      await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: candidates.map(toRunTaskCandidate) })
+      await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: perTask.get(task.idempotencyKey ?? '') ?? shared })
     }
     await audit(db, { organizationId, userId, action: options.regenerate ? 'generation.regenerate' : 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount, revision } })
     return { ok: true, batchId: batch.id, created: true }

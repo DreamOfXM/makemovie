@@ -38,11 +38,19 @@ describe('canTransition', () => {
 })
 
 describe('planVideoModels', () => {
-  it('excludes t2v when the task has reference input', () => {
+  it('puts the conditioning model first and keeps t2v as the fallback', () => {
     const t2v = capability({ model: 't2v-model', modality: 't2v' })
     const i2v = capability({ model: 'i2v-model', modality: 'i2v', acceptsFirstFrame: true })
     const plan = planVideoModels([t2v, i2v], true)
-    expect(plan.candidates.map(c => c.model)).toEqual(['i2v-model'])
+    expect(plan.candidates.map(c => c.model)).toEqual(['i2v-model', 't2v-model'])
+  })
+
+  it('offers only t2v for a shot with no frame', () => {
+    const t2v = capability({ model: 't2v-model', modality: 't2v' })
+    const i2v = capability({ model: 'i2v-model', modality: 'i2v', acceptsFirstFrame: true })
+    const r2v = capability({ model: 'r2v-model', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 4 })
+    const plan = planVideoModels([i2v, r2v, t2v], false)
+    expect(plan.candidates.map(c => c.model)).toEqual(['t2v-model'])
   })
 
   it('allows t2v only for tasks without reference input', () => {
@@ -51,9 +59,10 @@ describe('planVideoModels', () => {
     expect(plan.candidates.map(c => c.model)).toEqual(['t2v-model'])
   })
 
-  it('drops capabilities without verified entitlement', () => {
-    const unverified = capability({ model: 'unverified', modality: 'i2v', acceptsFirstFrame: true, entitlementVerifiedAt: null })
-    expect(planVideoModels([unverified], true).candidates).toHaveLength(0)
+  it('plans a candidate that carries only a model and a modality', () => {
+    // What resolveSlotCandidates actually hands over: no entitlement field, because it
+    // already filtered on one. A planner that required it would drop every shot.
+    expect(planVideoModels([{ model: 'i2v-model', modality: 'i2v' }], true).candidates).toEqual([{ model: 'i2v-model', modality: 'i2v' }])
   })
 
   it('deduplicates by model name and keeps order', () => {

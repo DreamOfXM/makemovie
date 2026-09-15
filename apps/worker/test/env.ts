@@ -66,6 +66,15 @@ export interface Seed {
   candidates: RunTaskCandidate[]
 }
 
+/**
+ * What a seeded artifact ended up being. A shot's own first frame is picked by id out of
+ * whatever artifacts the episode holds, so a test that plans against one has to name it.
+ */
+export interface AttachedMedia {
+  taskId: string
+  artifactId: string
+}
+
 export interface WorkerTestEnv {
   db: PrismaClient
   queue: Queue<PipelinePayload>
@@ -74,8 +83,8 @@ export interface WorkerTestEnv {
   seed(input?: SeedInput): Promise<Seed>
   runPayload(seed: Seed, attempt?: number): RunTaskPayload
   composePayload(compositionId: string, seed: Seed): ComposeEpisodePayload
-  attachSucceededVideo(seed: Seed, storyboardId: string, version: number, options?: { durationMs?: number }): Promise<void>
-  attachSucceededMedia(seed: Seed, input: { stage: Stage; modality: string; storyboardId?: string; version?: number; durationMs?: number }): Promise<void>
+  attachSucceededVideo(seed: Seed, storyboardId: string, version: number, options?: { durationMs?: number }): Promise<AttachedMedia>
+  attachSucceededMedia(seed: Seed, input: { stage: Stage; modality: string; storyboardId?: string; version?: number; durationMs?: number; source?: { bytes: Uint8Array; mimeType: string } }): Promise<AttachedMedia>
   takeWaitingRunTasks(): Promise<RunTaskPayload[]>
   drain(): Promise<void>
   stop(): Promise<void>
@@ -218,7 +227,7 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
       return { kind: 'compose-episode', compositionId, episodeId: seed.episodeId, organizationId: seed.organizationId }
     },
     async attachSucceededVideo(seed, storyboardId, version, options) {
-      await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId, version, durationMs: options?.durationMs })
+      return env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId, version, durationMs: options?.durationMs })
     },
     async attachSucceededMedia(seed, input) {
       const version = input.version ?? 1
@@ -237,8 +246,21 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
       })
       const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-seed-'))
       try {
-        const source = path.join(workdir, `clip.${MOCK_EXTENSION[input.modality] ?? 'bin'}`)
-        const media = await synthesizeMockMedia(input.modality, source, { durationMs: input.durationMs ?? 1000 })
+        // `source` is for the frames the generator cannot make: a reference gate is only
+        // worth testing against bytes whose format, size and alpha plane are the point.
+        let bytes: Uint8Array
+        let mimeType: string
+        let durationMs: number | undefined
+        if (input.source) {
+          bytes = input.source.bytes
+          mimeType = input.source.mimeType
+        } else {
+          const source = path.join(workdir, `clip.${MOCK_EXTENSION[input.modality] ?? 'bin'}`)
+          const media = await synthesizeMockMedia(input.modality, source, { durationMs: input.durationMs ?? 1000 })
+          bytes = new Uint8Array(await readFile(source))
+          mimeType = media.mimeType
+          durationMs = media.durationMs
+        }
         const stored = await storage.put(
           buildObjectKey({
             tenantId: seed.organizationId,
@@ -247,12 +269,12 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
             stage: input.stage,
             entityId: task.id,
             version,
-            extension: extensionFor(media.mimeType),
+            extension: extensionFor(mimeType),
           }),
-          new Uint8Array(await readFile(source)),
-          media.mimeType,
+          bytes,
+          mimeType,
         )
-        await db.mediaArtifact.create({
+        const artifact = await db.mediaArtifact.create({
           data: {
             organizationId: seed.organizationId,
             taskId: task.id,
@@ -261,9 +283,10 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
             checksum: stored.checksum,
             mimeType: stored.mimeType,
             version,
-            durationMs: media.durationMs,
+            durationMs,
           },
         })
+        return { taskId: task.id, artifactId: artifact.id }
       } finally {
         await rm(workdir, { recursive: true, force: true })
       }

@@ -8,7 +8,14 @@ import type { Readable } from 'node:stream'
 import { promisify } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
-const run = promisify(execFile)
+export * from './reference-image.js'
+
+/**
+ * The one child-process helper this package spawns through. Exported so sibling
+ * modules (`reference-image.ts`) probe and encode with the same call rather than each
+ * writing their own `execFile` wrapper.
+ */
+export const run = promisify(execFile)
 
 export interface MediaArtifact {
   key: string

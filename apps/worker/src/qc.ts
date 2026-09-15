@@ -22,6 +22,12 @@ export interface QcSubject {
   prompt: string
   workdir: string
   durationMs?: number
+  /**
+   * The shot's own frame, as the inline image this task actually sent to the video model.
+   * Present only when conditioning happened, and shared rather than re-encoded: an auditor
+   * that judges the clip against a different image than the model did is judging nothing.
+   */
+  referenceDataUrl?: string
 }
 
 /**

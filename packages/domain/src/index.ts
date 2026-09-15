@@ -83,20 +83,46 @@ export function canBind(slot: CapabilitySlot, capability: ModelCapability): Bind
   return { ok: true }
 }
 
-export interface GenerationPlan {
-  hasReferenceInput: boolean
-  candidates: ModelCapability[]
+/**
+ * The minimum a video-plan decision reads.
+ *
+ * Modality stays a plain string rather than `ModelModality` because a candidate resolved
+ * from a binding reads it out of a string column — claiming otherwise here would let the
+ * type say something the database does not enforce. Entitlement is deliberately absent:
+ * `resolveSlotCandidates` already dropped unverified capabilities, and re-checking a field
+ * the caller was never told to supply would silently return an empty plan.
+ */
+export interface VideoModelCandidate {
+  model: string
+  modality: string
 }
 
-export function planVideoModels(capabilities: ModelCapability[], hasReferenceInput: boolean): GenerationPlan {
-  const allowed = hasReferenceInput ? new Set<ModelModality>(['r2v', 'i2v']) : new Set<ModelModality>(['t2v', 'r2v', 'i2v'])
+export interface GenerationPlan<T extends VideoModelCandidate = VideoModelCandidate> {
+  hasReferenceInput: boolean
+  candidates: T[]
+}
+
+/**
+ * Which models may run a shot, in fallback order.
+ *
+ * A shot with no frame cannot be served by a model that requires one: it would reach the
+ * vendor, be refused, and cost the attempt. A shot with a frame prefers the models that can
+ * use it and keeps text-to-video behind them, so a conditioning model that is down still
+ * yields a picture — a lesser one, but the shot is not lost over a quality gain.
+ */
+export function planVideoModels<T extends VideoModelCandidate>(candidates: T[], hasReferenceInput: boolean): GenerationPlan<T> {
+  // i2v is the only conditioning slot the pipeline resolves today; a frame cannot be
+  // spent on a model that would refuse it.
+  const referenceCapable = (candidate: T): boolean => candidate.modality === 'i2v'
+  const allowed = (candidate: T): boolean => hasReferenceInput || candidate.modality === 't2v'
+  const ordered = hasReferenceInput ? [...candidates].sort((a, b) => Number(referenceCapable(b)) - Number(referenceCapable(a))) : candidates
   const seen = new Set<string>()
-  const candidates = capabilities.filter(capability => {
-    if (!allowed.has(capability.modality) || !capability.entitlementVerifiedAt || seen.has(capability.model)) return false
-    seen.add(capability.model)
+  const picked = ordered.filter(candidate => {
+    if (!allowed(candidate) || seen.has(candidate.model)) return false
+    seen.add(candidate.model)
     return true
   })
-  return { hasReferenceInput, candidates }
+  return { hasReferenceInput, candidates: picked }
 }
 
 export function canTransition(from: WorkflowStatus, to: WorkflowStatus): boolean {
