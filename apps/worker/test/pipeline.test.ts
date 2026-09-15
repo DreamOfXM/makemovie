@@ -395,7 +395,8 @@ describe('compose-episode', () => {
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio', 'subtitle'])
 
-    const subtitle = await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })
+    const subtitle = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.subtitleArtifactId! } })
+    expect(subtitle.stage).toBe('SUBTITLE')
     expect(subtitle.objectKey).toContain(`/SUBTITLE/${composition.id}/v1.srt`)
     const cues = Buffer.from(await env.storage.read(subtitle.objectKey)).toString('utf8')
     expect(cues).toContain('这条街不能待了。')
@@ -417,7 +418,7 @@ describe('compose-episode', () => {
     expect(updated.status).toBe('COMPLETED')
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video'])
-    expect(await env.db.mediaArtifact.count({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })).toBe(0)
+    expect(updated.subtitleArtifactId).toBeNull()
   })
 
   it('lays a music bed under a silent picture', async () => {

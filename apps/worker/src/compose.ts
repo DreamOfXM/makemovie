@@ -81,6 +81,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
     })
     // A separate artifact rather than a metadata blob: it downloads like any other
     // stage output and a human can open and check it.
+    let subtitleArtifactId: string | null = null
     if (srt) {
       const subtitleKey = buildObjectKey({
         tenantId: payload.organizationId,
@@ -92,7 +93,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
         extension: 'srt',
       })
       const storedSrt = await deps.storage.put(subtitleKey, new TextEncoder().encode(srt), 'application/x-subrip')
-      await deps.db.mediaArtifact.create({
+      const subtitle = await deps.db.mediaArtifact.create({
         data: {
           organizationId: payload.organizationId,
           stage: 'SUBTITLE',
@@ -102,8 +103,12 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
           version: COMPOSITION_VERSION,
         },
       })
+      subtitleArtifactId = subtitle.id
     }
-    await deps.db.composition.update({ where: { id: composition.id }, data: { status: 'COMPLETED', artifactId: artifact.id } })
+    await deps.db.composition.update({
+      where: { id: composition.id },
+      data: { status: 'COMPLETED', artifactId: artifact.id, subtitleArtifactId },
+    })
   } catch (error) {
     // BLOCKED (not FAILED) keeps the composition retriggerable once the missing clip lands.
     process.stderr.write(`compose ${composition.id} blocked: ${error instanceof Error ? error.message : String(error)}\n`)

@@ -66,6 +66,7 @@ interface CompositionDto {
   id: string
   status: string
   artifact: ArtifactDto | null
+  subtitle: ArtifactDto | null
 }
 
 interface Connection {
@@ -356,6 +357,33 @@ describe('episode composition', () => {
 
     const listed = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     expect((listed.json() as { composition: CompositionDto | null }).composition?.id).toBe(composition.id)
+  })
+
+  it('offers the subtitle track of a finished composition as its own download', async () => {
+    // The cues are an artifact rather than a blob on the composition: a subtitle file
+    // is reviewed and re-uploaded by a human like any other stage output.
+    const master = await env.db.mediaArtifact.create({
+      data: { organizationId, stage: 'COMPOSITION', objectKey: `${organizationId}/comp/master/v1.mp4`, checksum: 'comp-master', mimeType: 'video/mp4', version: 1, durationMs: 6000 },
+    })
+    const cues = '1\n00:00:00,000 --> 00:00:02,000\n这条街不能待了。\n'
+    const subtitle = await env.app.storage.put(`${organizationId}/comp/subtitle/v1.srt`, Buffer.from(cues, 'utf8'), 'application/x-subrip')
+    const subtitleArtifact = await env.db.mediaArtifact.create({
+      data: { organizationId, stage: 'SUBTITLE', objectKey: subtitle.key, checksum: subtitle.checksum, mimeType: subtitle.mimeType, version: 1 },
+    })
+    const finished = await env.db.composition.create({
+      data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: master.id, subtitleArtifactId: subtitleArtifact.id },
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    const composition = (res.json() as { composition: CompositionDto | null }).composition!
+    expect(composition.id).toBe(finished.id)
+    expect(composition.artifact).toMatchObject({ id: master.id, downloadUrl: `/artifacts/${master.id}/content` })
+    expect(composition.subtitle).toMatchObject({ id: subtitleArtifact.id, mimeType: 'application/x-subrip', downloadUrl: `/artifacts/${subtitleArtifact.id}/content` })
+
+    const downloaded = await env.app.inject({ method: 'GET', url: `/artifacts/${subtitleArtifact.id}/content`, headers: authHeaders(viewerToken) })
+    expect(downloaded.statusCode).toBe(200)
+    expect(downloaded.rawPayload.toString('utf8')).toBe(cues)
   })
 
   it('records trigger, cancel and composition events in the audit trail', async () => {
@@ -1534,6 +1562,8 @@ describe('per-shot voice', () => {
     const blocked = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(blocked.statusCode).toBe(409)
     expect(blocked.json().error).toBe('pipeline:nothingRunnable')
+    // The generic error says the chain has no next step; the reason says what is missing.
+    expect(blocked.json().reasons).toEqual(['composition:missingVoice'])
     expect(await env.db.composition.count({ where: { episodeId: voiceEpisodeId } })).toBe(0)
 
     await seedMedia(voiceEpisodeId, 'AUDIO', speakingIds[1])
@@ -1543,6 +1573,7 @@ describe('per-shot voice', () => {
     // stalling on a capability this installation never signed up for.
     expect(res.json().stage).toBe('COMPOSITION')
     const composition = res.json().composition as CompositionDto
+    expect(composition.subtitle).toBeNull()
     const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
     expect(JSON.parse(stored.manifest)).toEqual({ storyboardIds: [...speakingIds, ...silentIds] })
   })

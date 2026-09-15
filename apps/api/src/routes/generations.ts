@@ -41,6 +41,7 @@ interface CompositionDto {
   id: string
   status: WorkflowStatus
   artifact: ArtifactDto | null
+  subtitle: ArtifactDto | null
 }
 
 type TaskRow = GenerationTask & { artifacts: MediaArtifact[] }
@@ -109,8 +110,16 @@ async function toBatchDto(db: PrismaClient, batchId: string): Promise<BatchDto> 
 }
 
 async function toCompositionDto(db: PrismaClient, composition: Composition): Promise<CompositionDto> {
-  const artifact = composition.artifactId ? await db.mediaArtifact.findUnique({ where: { id: composition.artifactId } }) : null
-  return { id: composition.id, status: composition.status, artifact: artifact ? toArtifactDto(artifact) : null }
+  const [artifact, subtitle] = await Promise.all([
+    composition.artifactId ? db.mediaArtifact.findUnique({ where: { id: composition.artifactId } }) : null,
+    composition.subtitleArtifactId ? db.mediaArtifact.findUnique({ where: { id: composition.subtitleArtifactId } }) : null,
+  ])
+  return {
+    id: composition.id,
+    status: composition.status,
+    artifact: artifact ? toArtifactDto(artifact) : null,
+    subtitle: subtitle ? toArtifactDto(subtitle) : null,
+  }
 }
 
 export async function generationRoutes(app: FastifyInstance): Promise<void> {
@@ -142,7 +151,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const result = await advancePipeline({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, episode.id)
-      if (!result.ok) return reply.code(result.code).send({ error: result.error })
+      if (!result.ok) return reply.code(result.code).send({ error: result.error, ...(result.reasons ? { reasons: result.reasons } : {}) })
       if (result.step === 'composition') {
         const composition = await app.db.composition.findUniqueOrThrow({ where: { id: result.compositionId } })
         return reply.code(201).send({ stage: COMPOSITION_STEP, composition: await toCompositionDto(app.db, composition) })

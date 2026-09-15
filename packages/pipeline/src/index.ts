@@ -219,7 +219,7 @@ export type TriggerResult = { ok: true; batchId: string; created: boolean } | { 
 export type AdvanceResult =
   | { ok: true; step: 'stage'; stage: PipelineStage; batchId: string; created: boolean }
   | { ok: true; step: 'composition'; compositionId: string }
-  | { ok: false; code: number; error: string }
+  | { ok: false; code: number; error: string; reasons?: string[] }
 
 async function audit(db: PrismaClient, entry: { organizationId: string; userId: string | null; action: string; entityType: string; entityId: string; payload?: unknown }): Promise<void> {
   await db.auditEvent.create({
@@ -447,7 +447,9 @@ export async function triggerStage(
  * live shot already has the clip the compose worker needs; creating it early would
  * only park it in BLOCKED. `auto` marks the audit so a worker-initiated relay is
  * distinguishable from a human clicking "advance". Returns
- * `pipeline:nothingRunnable` when nothing can be started and nothing can be composed.
+ * `pipeline:nothingRunnable` when nothing can be started and nothing can be composed,
+ * with the composition gate's own reason alongside it — the generic error says the
+ * chain has no next step, `reasons` says what is still missing.
  */
 export async function advancePipeline(
   store: PipelineStore,
@@ -482,7 +484,7 @@ export async function advancePipeline(
   }
 
   const plan = await planComposition(store.db, episodeId)
-  if (!plan.ready) return { ok: false, code: 409, error: 'pipeline:nothingRunnable' }
+  if (!plan.ready) return { ok: false, code: 409, error: 'pipeline:nothingRunnable', reasons: [plan.reason] }
   const compositionId = await createComposition(store, organizationId, episodeId, plan.storyboardIds)
   await audit(store.db, {
     organizationId,

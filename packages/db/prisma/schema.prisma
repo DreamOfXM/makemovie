@@ -295,6 +295,7 @@ model Composition {
   status WorkflowStatus @default(DRAFT)
   manifest String
   artifactId String?
+  subtitleArtifactId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 
