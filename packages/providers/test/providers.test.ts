@@ -9,6 +9,7 @@ import {
   extractDashScopeText,
   getCatalog,
   isKnownProvider,
+  KlingAdapter,
   listCatalogs,
   MOCK_VLM_VERDICT,
   MOCK_SCRIPT_TEXT,
@@ -33,12 +34,25 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 }
 
 describe('catalog', () => {
-  it('lists dashscope, seedance and mock catalogs', () => {
+  it('lists dashscope, seedance, kling and mock catalogs', () => {
     const providers = listCatalogs().map(c => c.provider).sort()
-    expect(providers).toEqual(['dashscope', 'mock', 'seedance'])
+    expect(providers).toEqual(['dashscope', 'kling', 'mock', 'seedance'])
     expect(isKnownProvider('dashscope')).toBe(true)
     expect(isKnownProvider('seedance')).toBe(true)
+    expect(isKnownProvider('kling')).toBe(true)
     expect(isKnownProvider('nope')).toBe(false)
+  })
+
+  it('marks only kling as needing a second credential', () => {
+    for (const catalog of listCatalogs()) {
+      expect(catalog.requiresAccessKey ?? false).toBe(catalog.provider === 'kling')
+    }
+  })
+
+  it('kling catalog advertises only the video modalities a stage can bind', () => {
+    const catalog = getCatalog('kling')
+    expect(catalog).toBeDefined()
+    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v']))
   })
 
   it('seedance catalog advertises only the t2v endpoint it implements', () => {
@@ -83,6 +97,7 @@ describe('createAdapter', () => {
     expect(createAdapter('mock', { apiKey: 'k', baseUrl: 'mock://local' })).toBeInstanceOf(MockProviderAdapter)
     expect(createAdapter('dashscope', { apiKey: 'k', baseUrl: 'https://dashscope.aliyuncs.com' }).provider).toBe('dashscope')
     expect(createAdapter('seedance', { apiKey: 'k', baseUrl: 'https://ark.cn-beijing.volces.com' })).toBeInstanceOf(SeedanceAdapter)
+    expect(createAdapter('kling', { apiKey: 'secret', accessKey: 'public', baseUrl: 'https://api-beijing.klingai.com' })).toBeInstanceOf(KlingAdapter)
     expect(() => createAdapter('unknown', { apiKey: 'k', baseUrl: '' })).toThrow(/unknown provider/)
   })
 })

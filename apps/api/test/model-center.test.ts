@@ -27,11 +27,12 @@ describe('provider catalogs', () => {
     const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
     const catalogs = res.json() as { provider: string; defaultBaseUrl: string; models: { model: string }[] }[]
-    expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'mock', 'seedance'])
+    expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'kling', 'mock', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
     expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
     const seedance = catalogs.find(c => c.provider === 'seedance')!
     expect(seedance.defaultBaseUrl).toBe('https://ark.cn-beijing.volces.com')
+    expect(catalogs.find(c => c.provider === 'kling')!.defaultBaseUrl).toBe('https://api-beijing.klingai.com')
   })
 
   it('rejects anonymous access', async () => {

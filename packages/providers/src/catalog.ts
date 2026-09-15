@@ -1,4 +1,5 @@
 import type { ModelModality } from '@studio/domain'
+import { KLING_DEFAULT_BASE_URL } from './kling.js'
 import { SEEDANCE_DEFAULT_BASE_URL } from './seedance.js'
 
 export interface CatalogModel {
@@ -16,6 +17,8 @@ export interface ProviderCatalog {
   label: string
   defaultBaseUrl: string
   catalogVersion: string
+  /** True for vendors that authenticate with an access key + secret key pair, so the connection form asks for both halves. */
+  requiresAccessKey?: boolean
   models: CatalogModel[]
 }
 
@@ -52,6 +55,18 @@ const seedance: ProviderCatalog = {
   ],
 }
 
+const kling: ProviderCatalog = {
+  provider: 'kling',
+  label: 'Kuaishou Kling',
+  defaultBaseUrl: KLING_DEFAULT_BASE_URL,
+  catalogVersion: '2026-09',
+  requiresAccessKey: true,
+  models: [
+    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'image-to-video works at the adapter level but no production stage can bind an i2v capability yet, so it is not listed here' } },
+    { model: 'kling-v1-6', displayName: 'Kling 1.6', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'] } },
+  ],
+}
+
 const mock: ProviderCatalog = {
   provider: 'mock',
   label: 'Mock Provider (development & CI)',
@@ -74,6 +89,7 @@ const mock: ProviderCatalog = {
 const registry = new Map<string, ProviderCatalog>([
   [dashscope.provider, dashscope],
   [seedance.provider, seedance],
+  [kling.provider, kling],
   [mock.provider, mock],
 ])
 

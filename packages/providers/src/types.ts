@@ -32,6 +32,8 @@ export interface ProviderAdapter {
 
 export interface AdapterOptions {
   apiKey: string
+  /** Public half of a key pair, for providers that sign requests with an access key + secret key pair (Kling). */
+  accessKey?: string
   baseUrl: string
 }
 
