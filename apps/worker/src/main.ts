@@ -18,11 +18,15 @@ const deps: PipelineDeps = {
   composer: new FfmpegComposer(),
   masterKey: config.masterKey,
   qcMode: config.qcMode,
+  pollTimeoutMs: config.pollTimeoutMs,
   enqueueJob: payload => enqueue(queue, payload),
   // Opt-in: every other mode leaves this unset and run-task falls back to the hash
   // placeholder. Model mode costs a vision-model call per artifact and is not
   // deterministic, so it is never a CI default.
-  checker: config.qcMode === 'model' ? new ModelQualityChecker({ db, masterKey: config.masterKey }) : undefined,
+  checker:
+    config.qcMode === 'model'
+      ? new ModelQualityChecker({ db, masterKey: config.masterKey, pollTimeoutMs: config.pollTimeoutMs })
+      : undefined,
 }
 
 const worker = new Worker<PipelinePayload>(

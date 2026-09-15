@@ -120,6 +120,10 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
         composer: new FfmpegComposer(),
         masterKey: MASTER_KEY,
         qcMode: 'random',
+        // The mock settles on its second poll, so seconds are ample; keeping it low
+        // means a provider that never settles fails the test instead of parking the
+        // suite behind the 15-minute production ceiling.
+        pollTimeoutMs: 5_000,
         enqueueJob: payload => enqueue(queue, payload),
         ...overrides,
       }

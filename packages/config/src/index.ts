@@ -16,6 +16,12 @@ export interface AppConfig {
   masterKey: string
   corsOrigins: string[]
   sessionTtlMs: number
+  /**
+   * How long the worker keeps polling one provider task before it gives up.
+   * Seedance and Kling both need minutes for a single clip, so a ceiling sized for
+   * the mock would fail every real generation.
+   */
+  pollTimeoutMs: number
   port: number
   /** Root for generated media. The API streams from it and the worker writes into it, so both must agree. */
   artifactsDir: string
@@ -39,6 +45,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const sessionTtlMs = Number(env.SESSION_TTL_MS || 7 * 24 * 3600 * 1000)
   if (!Number.isFinite(sessionTtlMs) || sessionTtlMs <= 0) throw new Error('SESSION_TTL_MS must be a positive number')
 
+  const pollTimeoutMs = Number(env.STUDIO_POLL_TIMEOUT_MS || 15 * 60 * 1000)
+  if (!Number.isInteger(pollTimeoutMs) || pollTimeoutMs <= 0) throw new Error('STUDIO_POLL_TIMEOUT_MS must be a positive whole number of milliseconds')
+
   // Deliberately explicit rather than inferred from S3_ENDPOINT being set: that
   // variable has a non-empty default, so inference would flip every existing
   // deployment onto a backend it never asked for.
@@ -58,6 +67,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     masterKey: masterKey.toLowerCase(),
     corsOrigins: (env.CORS_ORIGIN || 'http://localhost:3010').split(',').map(origin => origin.trim()).filter(Boolean),
     sessionTtlMs,
+    pollTimeoutMs,
     port: Number(env.PORT || 4010),
     artifactsDir: env.STUDIO_ARTIFACTS_DIR || 'var/artifacts',
   }

@@ -10,6 +10,7 @@ export interface WorkerConfig {
   /** The shared config satisfies this; the worker only reads storage settings from it. */
   storage: StorageOptions
   qcMode: QcMode
+  pollTimeoutMs: number
 }
 
 export function loadWorkerConfig(env: Record<string, string | undefined> = process.env): WorkerConfig {
@@ -20,6 +21,7 @@ export function loadWorkerConfig(env: Record<string, string | undefined> = proce
     masterKey: shared.masterKey,
     storage: shared,
     qcMode: qcModeFrom(env.STUDIO_QC_MODE),
+    pollTimeoutMs: shared.pollTimeoutMs,
   }
 }
 

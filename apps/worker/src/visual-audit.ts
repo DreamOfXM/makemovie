@@ -17,7 +17,7 @@ export interface ModelCheckerOptions {
   db: PrismaClient
   masterKey: string
   pollIntervalMs?: number
-  pollTimeoutMs?: number
+  pollTimeoutMs: number
 }
 
 /**
@@ -30,7 +30,7 @@ export class ModelQualityChecker implements QualityChecker {
   private readonly db: PrismaClient
   private readonly masterKey: string
   private readonly pollIntervalMs?: number
-  private readonly pollTimeoutMs?: number
+  private readonly pollTimeoutMs: number
 
   constructor(options: ModelCheckerOptions) {
     this.db = options.db

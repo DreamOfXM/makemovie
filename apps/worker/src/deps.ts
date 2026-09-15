@@ -16,5 +16,5 @@ export interface PipelineDeps {
   // it itself when this is unset.
   checker?: QualityChecker
   pollIntervalMs?: number
-  pollTimeoutMs?: number
+  pollTimeoutMs: number
 }

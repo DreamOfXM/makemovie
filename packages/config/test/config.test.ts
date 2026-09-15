@@ -14,6 +14,7 @@ describe('loadConfig', () => {
     expect(config.masterKey).toBe('0'.repeat(64))
     expect(config.corsOrigins).toEqual(['http://localhost:3010'])
     expect(config.sessionTtlMs).toBe(7 * 24 * 3600 * 1000)
+    expect(config.pollTimeoutMs).toBe(15 * 60 * 1000)
     expect(config.port).toBe(4010)
   })
 
@@ -32,6 +33,16 @@ describe('loadConfig', () => {
 
   it('rejects a non-positive session TTL', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, SESSION_TTL_MS: '0' })).toThrow(/SESSION_TTL_MS/)
+  })
+
+  it('reads the poll deadline from the environment', () => {
+    expect(loadConfig({ DATABASE_URL: DB, STUDIO_POLL_TIMEOUT_MS: '60000' }).pollTimeoutMs).toBe(60_000)
+  })
+
+  it('rejects a poll deadline that is not a whole number of milliseconds', () => {
+    for (const value of ['0', '-1', '250.5', 'soon']) {
+      expect(() => loadConfig({ DATABASE_URL: DB, STUDIO_POLL_TIMEOUT_MS: value })).toThrow(/STUDIO_POLL_TIMEOUT_MS/)
+    }
   })
 
   it('defaults the storage backend to disk so the s3 settings stay inert', () => {

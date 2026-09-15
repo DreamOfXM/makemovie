@@ -4,11 +4,10 @@ import type { ModelModality } from '@studio/domain'
 import type { ModelCapability, PollResult, ProviderAdapter } from '@studio/providers'
 
 const POLL_INTERVAL_MS = 250
-const POLL_TIMEOUT_MS = 30_000
 
 export interface PollOptions {
   intervalMs?: number
-  timeoutMs?: number
+  timeoutMs: number
 }
 
 /**
@@ -20,10 +19,10 @@ export async function pollToSettled(
   adapter: ProviderAdapter,
   capability: ModelCapability,
   providerTaskId: string,
-  options: PollOptions = {},
+  options: PollOptions,
 ): Promise<PollResult> {
   const intervalMs = options.intervalMs ?? POLL_INTERVAL_MS
-  const timeoutMs = options.timeoutMs ?? POLL_TIMEOUT_MS
+  const timeoutMs = options.timeoutMs
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const result = await adapter.poll(capability, providerTaskId)

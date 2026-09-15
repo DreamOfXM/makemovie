@@ -205,7 +205,7 @@ describe('model-driven visual audit', () => {
     return env.deps({
       qcMode: 'model',
       pollIntervalMs: 10,
-      checker: checker ?? new ModelQualityChecker({ db: env.db, masterKey: MASTER_KEY, pollIntervalMs: 10 }),
+      checker: checker ?? new ModelQualityChecker({ db: env.db, masterKey: MASTER_KEY, pollIntervalMs: 10, pollTimeoutMs: 5_000 }),
     })
   }
 
