@@ -26,11 +26,12 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
 // the map. The shot comes from the task's own `storyboardId`, not from a segment of its
 // idempotency key: that key is an anti-collision token, and reading a relation out of it
 // would silently detach every shot from its media the day the key format changed.
-async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }> {
+async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto> }> {
   const firstFrame = new Map<string, ArtifactDto>()
   const video = new Map<string, ArtifactDto>()
+  const voice = new Map<string, ArtifactDto>()
   const tasks = await db.generationTask.findMany({
-    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO'] }, status: 'SUCCEEDED', storyboardId: { not: null } },
+    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO', 'AUDIO'] }, status: 'SUCCEEDED', storyboardId: { not: null } },
     include: { artifacts: { orderBy: { version: 'desc' }, take: 1 } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
@@ -39,8 +40,9 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
     if (!task.storyboardId || !artifact) continue
     if (task.stage === 'FIRST_FRAME') firstFrame.set(task.storyboardId, toArtifactDto(artifact))
     else if (task.stage === 'VIDEO') video.set(task.storyboardId, toArtifactDto(artifact))
+    else if (task.stage === 'AUDIO') voice.set(task.storyboardId, toArtifactDto(artifact))
   }
-  return { firstFrame, video }
+  return { firstFrame, video, voice }
 }
 
 interface StoryboardAssetDto {
@@ -70,6 +72,8 @@ interface StoryboardDto {
   title: string
   durationMs: number
   description: string
+  dialogue: string
+  speaker: string | null
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
@@ -78,9 +82,10 @@ interface StoryboardDto {
   assets: StoryboardRow['assets']
   firstFrame: ArtifactDto | null
   video: ArtifactDto | null
+  voice: ArtifactDto | null
 }
 
-function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto> }): StoryboardDto {
+function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto> }): StoryboardDto {
   return {
     id: storyboard.id,
     episodeId: storyboard.episodeId,
@@ -91,6 +96,8 @@ function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<str
     title: storyboard.title,
     durationMs: storyboard.durationMs,
     description: storyboard.description,
+    dialogue: storyboard.dialogue,
+    speaker: storyboard.speaker,
     sourceExcerpt: storyboard.sourceExcerpt,
     continuityIn: storyboard.continuityIn,
     continuityOut: storyboard.continuityOut,
@@ -99,6 +106,7 @@ function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<str
     assets: storyboard.assets,
     firstFrame: media.firstFrame.get(storyboard.id) ?? null,
     video: media.video.get(storyboard.id) ?? null,
+    voice: media.voice.get(storyboard.id) ?? null,
   }
 }
 
@@ -164,7 +172,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{
     Params: { episodeId: string }
-    Body: { number?: number; title?: string; durationMs?: number; description?: string; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string; scriptVersionId?: string }
+    Body: { number?: number; title?: string; durationMs?: number; description?: string; dialogue?: string; speaker?: string; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string; scriptVersionId?: string }
   }>(
     '/episodes/:episodeId/storyboards',
     { preHandler: requirePermission('storyboard:write') },
@@ -199,6 +207,10 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
             title: body.title.trim(),
             durationMs: body.durationMs as number,
             description: body.description.trim(),
+            // An empty line is a silent shot, not an unfilled one: AUDIO looks at this
+            // field to decide which shots are worth buying voice for.
+            dialogue: body.dialogue?.trim() ?? '',
+            speaker: body.speaker?.trim() || null,
             sourceExcerpt: body.sourceExcerpt ?? '',
             continuityIn: body.continuityIn ?? '',
             continuityOut: body.continuityOut ?? '',
@@ -236,7 +248,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch<{
     Params: { storyboardId: string }
-    Body: { title?: string; durationMs?: number; description?: string; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string }
+    Body: { title?: string; durationMs?: number; description?: string; dialogue?: string; speaker?: string | null; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string }
   }>(
     '/storyboards/:storyboardId',
     { preHandler: requirePermission('storyboard:write') },
@@ -255,6 +267,8 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         data.durationMs = body.durationMs
       }
       if (body.description !== undefined) data.description = body.description
+      if (body.dialogue !== undefined) data.dialogue = body.dialogue.trim()
+      if (body.speaker !== undefined) data.speaker = body.speaker?.trim() || null
       if (body.sourceExcerpt !== undefined) data.sourceExcerpt = body.sourceExcerpt
       if (body.continuityIn !== undefined) data.continuityIn = body.continuityIn
       if (body.continuityOut !== undefined) data.continuityOut = body.continuityOut

@@ -1349,3 +1349,221 @@ describe('approval opens the next step', () => {
     expect(await env.db.auditEvent.count({ where: { action: 'pipeline.advance', entityId: unboundEpisodeId } })).toBe(0)
   })
 })
+
+// The audio chain as the console drives it: which shots AUDIO plans, what the
+// synthesizer is actually asked to say, what a shot exposes back, and what
+// composition refuses to cut until the lines have landed.
+describe('per-shot voice', () => {
+  let voiceProjectId: string
+  let voiceEpisodeId: string
+  const speakingIds: string[] = []
+  const silentIds: string[] = []
+  let audioBatchId: string
+
+  interface ShotDto {
+    id: string
+    number: number
+    dialogue: string
+    speaker: string | null
+    voice: ArtifactDto | null
+  }
+
+  async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  // Project scope, so these bindings cannot change what the earlier tests resolve.
+  async function bindAudioSlot(targetProjectId: string, slot: 'tts_voice' | 'music_gen', model: string, name: string): Promise<void> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    const capability = connection.capabilities.find(candidate => candidate.model === model)!
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+    expect(binding.statusCode).toBe(201)
+  }
+
+  async function addShot(targetEpisodeId: string, number: number, dialogue: string, speaker?: string): Promise<string> {
+    const created = await env.app.inject({
+      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number, title: `SB${number}`, durationMs: 5000, description: 'a street', dialogue, speaker, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(created.statusCode).toBe(201)
+    return created.json().id as string
+  }
+
+  // A finished task that produced one artifact for one shot — the lineage both the
+  // composition gate and the shot DTO read.
+  async function seedMedia(targetEpisodeId: string, stage: 'VIDEO' | 'AUDIO', storyboardId: string): Promise<void> {
+    const batch = await env.db.generationBatch.create({
+      data: { organizationId, episodeId: targetEpisodeId, stage, status: 'COMPLETED', plannedCount: 1, storyboards: { connect: { id: storyboardId } } },
+    })
+    const task = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage, status: 'SUCCEEDED', storyboardId, idempotencyKey: `seed:${targetEpisodeId}:${stage}:${storyboardId}` },
+    })
+    await env.db.mediaArtifact.create({
+      data: {
+        organizationId,
+        taskId: task.id,
+        stage,
+        objectKey: `${organizationId}/${voiceProjectId}/${targetEpisodeId}/${stage}/${task.id}/v1.${stage === 'AUDIO' ? 'wav' : 'mp4'}`,
+        checksum: `${stage}-${task.id}`,
+        mimeType: stage === 'AUDIO' ? 'audio/wav' : 'video/mp4',
+        version: 1,
+        durationMs: 5000,
+      },
+    })
+  }
+
+  it('plans one voice task per speaking shot, with the line itself as the prompt', async () => {
+    const { projectId, episodeId } = await newEpisode('Voice Drama')
+    voiceProjectId = projectId
+    voiceEpisodeId = episodeId
+    await bindAudioSlot(projectId, 'tts_voice', 'mock-tts', 'voice-tts')
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '沈亦：照片背面有字……', checksum: 'voice-script', status: 'APPROVED' } })
+    speakingIds.push(await addShot(episodeId, 1, '这条街不能待了。', '林晚'))
+    speakingIds.push(await addShot(episodeId, 2, '我跟你走。'))
+    silentIds.push(await addShot(episodeId, 3, ''))
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    expect(res.statusCode).toBe(201)
+    const batch = res.json().batch as BatchDto
+    expect(batch.stage).toBe('AUDIO')
+    expect(batch.plannedCount).toBe(2)
+    audioBatchId = batch.id
+
+    const tasks = await env.db.generationTask.findMany({ where: { batchId: batch.id }, orderBy: { id: 'asc' } })
+    expect(tasks.map(task => task.storyboardId)).toEqual(speakingIds)
+    expect(tasks.map(task => task.idempotencyKey)).toEqual(speakingIds.map(id => `${episodeId}:AUDIO:${id}`))
+    // The shot's own words go to the synthesizer — not the title, not the episode name.
+    expect(tasks.map(task => (JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string } }).input.prompt)).toEqual([
+      '【林晚】这条街不能待了。',
+      '我跟你走。',
+    ])
+    expect((await queue.getJob(`run-${tasks[0].id}-1`))?.data).toMatchObject({ kind: 'run-task' })
+    const candidates = (await queue.getJob(`run-${tasks[0].id}-1`))?.data as RunTaskPayload
+    expect(candidates.candidates.map(candidate => candidate.model)).toEqual(['mock-tts'])
+
+    // The batch covers exactly the shots it planned, so a shot that gains a line
+    // later leaves the stage open again instead of reading as already done.
+    const linked = await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { storyboards: true } })
+    expect(linked.storyboards.map(storyboard => storyboard.id).sort()).toEqual([...speakingIds].sort())
+
+    // The silent shot is not silently dropped from the episode: it is still a shot,
+    // it simply owns no voice, so it owes no money.
+    const silent = await env.db.storyboard.findUniqueOrThrow({ where: { id: silentIds[0]! } })
+    expect(silent.dialogue).toBe('')
+    expect(silent.speaker).toBeNull()
+  })
+
+  it('re-triggering reuses the batch and only a regenerate buys fresh keys', async () => {
+    const again = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    expect(again.statusCode).toBe(200)
+    expect((again.json().batch as BatchDto).id).toBe(audioBatchId)
+
+    const regenerated = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO', regenerate: true } })
+    expect(regenerated.statusCode).toBe(201)
+    const fresh = regenerated.json().batch as BatchDto
+    expect(fresh.id).not.toBe(audioBatchId)
+    const tasks = await env.db.generationTask.findMany({ where: { batchId: fresh.id }, orderBy: { id: 'asc' } })
+    expect(tasks.map(task => task.idempotencyKey)).toEqual(speakingIds.map(id => `${voiceEpisodeId}:AUDIO:${id}:r1`))
+    // The first run stays as the record of what was paid for.
+    expect(await env.db.generationBatch.findUniqueOrThrow({ where: { id: audioBatchId } })).toMatchObject({ status: 'RUNNING' })
+  })
+
+  it('refuses to voice an episode whose shots all stay silent', async () => {
+    const { projectId, episodeId } = await newEpisode('Silent Drama')
+    await bindAudioSlot(projectId, 'tts_voice', 'mock-tts', 'silent-tts')
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '纯动作，无台词', checksum: 'silent-script', status: 'APPROVED' } })
+    await addShot(episodeId, 1, '')
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('episode has no shots with dialogue to voice')
+    expect(await env.db.generationBatch.count({ where: { episodeId } })).toBe(0)
+  })
+
+  it('exposes the line, its speaker and the shot voice, and lets a human rewrite them', async () => {
+    await seedMedia(voiceEpisodeId, 'AUDIO', speakingIds[0])
+
+    const listed = await env.app.inject({ method: 'GET', url: `/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
+    expect(listed.statusCode).toBe(200)
+    const shots = listed.json() as ShotDto[]
+    expect(shots).toHaveLength(3)
+    expect(shots[0]).toMatchObject({ number: 1, dialogue: '这条街不能待了。', speaker: '林晚' })
+    expect(shots[0]!.voice).toMatchObject({ mimeType: 'audio/wav', objectKey: expect.stringContaining('/AUDIO/') })
+    expect(shots[0]!.voice!.downloadUrl).toBe(`/artifacts/${shots[0]!.voice!.id}/content`)
+    // A shot that has not been voiced yet says so, rather than pretending.
+    expect(shots[1]!.voice).toBeNull()
+    expect(shots[2]!.dialogue).toBe('')
+
+    const edited = await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '  你先走。 ', speaker: '沈亦' } })
+    expect(edited.statusCode).toBe(200)
+    expect(edited.json().dialogue).toBe('你先走。')
+    expect(edited.json().speaker).toBe('沈亦')
+
+    const cleared = await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '', speaker: null } })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json()).toMatchObject({ dialogue: '', speaker: null })
+
+    // Put the line back: the composition assertions below depend on two speaking shots.
+    await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '我跟你走。', speaker: '' } })
+    const afterEdit = await env.app.inject({ method: 'GET', url: `/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
+    expect((afterEdit.json() as ShotDto[])[1]).toMatchObject({ dialogue: '我跟你走。', speaker: null })
+
+    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=storyboard.update', headers: authHeaders(ownerToken) })
+    const events = audit.json().events as { entityId: string; payload: { fields: string[] } }[]
+    expect(events.some(event => event.entityId === speakingIds[1] && event.payload.fields.includes('dialogue'))).toBe(true)
+  })
+
+  it('holds composition until every speaking shot has its voice, then cuts the master', async () => {
+    // Upstream stages marked as already run: the claim here is about the voice gate.
+    for (const stage of ['SCRIPT', 'STORYBOARD', 'FIRST_FRAME'] as const) {
+      await env.db.generationBatch.create({ data: { organizationId, episodeId: voiceEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
+    }
+    for (const storyboardId of [...speakingIds, ...silentIds]) await seedMedia(voiceEpisodeId, 'VIDEO', storyboardId)
+
+    // With a TTS bound, a shot whose line has no audio would compose into a master
+    // where that line is simply missing — so the chain waits instead.
+    const blocked = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.json().error).toBe('pipeline:nothingRunnable')
+    expect(await env.db.composition.count({ where: { episodeId: voiceEpisodeId } })).toBe(0)
+
+    await seedMedia(voiceEpisodeId, 'AUDIO', speakingIds[1])
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+    // music_gen is unbound here, so the chain walks past the music step rather than
+    // stalling on a capability this installation never signed up for.
+    expect(res.json().stage).toBe('COMPOSITION')
+    const composition = res.json().composition as CompositionDto
+    const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(JSON.parse(stored.manifest)).toEqual({ storyboardIds: [...speakingIds, ...silentIds] })
+  })
+
+  it('takes the music step once a generator is bound, from the approved script', async () => {
+    const { projectId, episodeId } = await newEpisode('Music Drama')
+    await bindAudioSlot(projectId, 'music_gen', 'mock-music', 'music-gen')
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '雨夜的滨江老城区，一桩离奇失踪案。', checksum: 'music-script', status: 'APPROVED' } })
+    await addShot(episodeId, 1, '')
+    for (const stage of ['SCRIPT', 'STORYBOARD'] as const) {
+      await env.db.generationBatch.create({ data: { organizationId, episodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
+    }
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'MUSIC' } })
+    expect(res.statusCode).toBe(201)
+    const batch = res.json().batch as BatchDto
+    expect(batch.stage).toBe('MUSIC')
+    expect(batch.plannedCount).toBe(1)
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: batch.tasks[0].id } })
+    // One bed for the episode, asked for in terms of the story it has to sit under.
+    expect((JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string } }).input.prompt).toContain('一桩离奇失踪案')
+    expect(task.storyboardId).toBeNull()
+  })
+})
