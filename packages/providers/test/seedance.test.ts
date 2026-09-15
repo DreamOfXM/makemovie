@@ -7,6 +7,7 @@ import {
   extractSeedanceVideoUrl,
   mergeSeedanceParameters,
   normalizeSeedanceStatus,
+  seedanceContent,
   SEEDANCE_DEFAULT_BASE_URL,
   SeedanceAdapter,
 } from '../src/seedance.js'
@@ -27,6 +28,10 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 
 function t2v(): ModelCapability {
   return capability({ modality: 't2v' })
+}
+
+function i2v(): ModelCapability {
+  return capability({ modality: 'i2v', acceptsFirstFrame: true })
 }
 
 function request(overrides: Partial<{ model: string; input: Record<string, unknown>; parameters: Record<string, unknown> }> = {}) {
@@ -55,6 +60,39 @@ describe('seedance request building', () => {
       model: 'doubao-seedance-1-0-pro-250528',
       content: [{ type: 'text', text: 'rain-soaked street at night, neon reflections' }],
     })
+  })
+
+  it('sends a first frame as an image_url content item', () => {
+    const req = buildSeedanceSubmitRequest(base, API_KEY, i2v(), request({
+      input: { prompt: 'the detective lifts the tape and steps through', media: [{ type: 'first_frame', url: 'data:image/png;base64,AAAA' }] },
+    }))
+    expect(req.body).toEqual({
+      model: 'doubao-seedance-1-0-pro-250528',
+      content: [
+        { type: 'text', text: 'the detective lifts the tape and steps through' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' }, role: 'first_frame' },
+      ],
+    })
+  })
+
+  it('keeps the role of every reference the vendor has a slot for', () => {
+    const content = seedanceContent('a cut between two frames', [
+      { type: 'first_frame', url: 'data:image/jpeg;base64,AAAA' },
+      { type: 'last_frame', url: 'data:image/jpeg;base64,BBBB' },
+      { type: 'reference_image', url: 'data:image/jpeg;base64,CCCC' },
+    ])
+    expect(content.map(item => item.role)).toEqual([undefined, 'first_frame', 'last_frame', 'reference_image'])
+    expect(content[1]).toEqual({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' }, role: 'first_frame' })
+  })
+
+  it('refuses a reference type Ark has no content role for', () => {
+    expect(() => seedanceContent('a lip-synced shot', [{ type: 'driving_audio', url: 'data:audio/wav;base64,AAAA' }])).toThrow('no content role for reference type "driving_audio"')
+  })
+
+  it('refuses media on a text-to-video model and demands it from an image-to-video one', () => {
+    const media = [{ type: 'first_frame', url: 'data:image/png;base64,AAAA' }]
+    expect(() => buildSeedanceSubmitRequest(base, API_KEY, t2v(), request({ input: { prompt: 'p', media } }))).toThrow('cannot receive reference media')
+    expect(() => buildSeedanceSubmitRequest(base, API_KEY, i2v(), request({ input: { prompt: 'p' } }))).toThrow('requires a first_frame reference')
   })
 
   it('trims a trailing slash off the base url', () => {
@@ -88,8 +126,8 @@ describe('seedance request building', () => {
     expect((req.body as { content: Array<{ text: string }> }).content).toEqual([{ type: 'text', text: '' }])
   })
 
-  it('rejects every modality but t2v', () => {
-    for (const modality of ['i2v', 'r2v', 'image', 'text', 'tts'] as const) {
+  it('rejects every modality but the two video ones', () => {
+    for (const modality of ['r2v', 'image', 'text', 'tts'] as const) {
       expect(() => buildSeedanceSubmitRequest(base, API_KEY, capability({ modality }), request())).toThrow(/does not support modality/)
     }
   })
@@ -156,8 +194,8 @@ describe('seedance adapter submit', () => {
   })
 
   it('refuses an unsupported modality without calling fetch', async () => {
-    await expect(adapter().submit(capability({ modality: 'i2v' }), request())).rejects.toThrow(/does not support modality/)
-    await expect(adapter().poll(capability({ modality: 'i2v' }), 'cgt-abc123')).rejects.toThrow(/does not support modality/)
+    await expect(adapter().submit(capability({ modality: 'r2v' }), request())).rejects.toThrow(/does not support modality/)
+    await expect(adapter().poll(capability({ modality: 'r2v' }), 'cgt-abc123')).rejects.toThrow(/does not support modality/)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

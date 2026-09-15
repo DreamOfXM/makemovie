@@ -58,7 +58,12 @@ const seedance: ProviderCatalog = {
   catalogVersion: '2026-09',
   models: [
     { model: 'doubao-seedance-1-0-pro-250528', displayName: 'Seedance 1.0 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'the returned video link is signed and lasts about a day, so the worker ingests it the moment the task settles' } },
-    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'image-to-video is not offered yet: this adapter implements the text-to-video endpoint only' } },
+    { model: 'doubao-seedance-1-0-pro-250528', displayName: 'Seedance 1.0 Pro', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'the same model id as the text-to-video row: Ark decides which one it is by whether the content array carries an image' } },
+    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 't2v', spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'also renders synchronous audio, which no stage of this pipeline asks for yet' } },
+    { model: 'doubao-seedance-1-5-pro-251215', displayName: 'Seedance 1.5 Pro', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'], note: 'first and last frame in one request; the pipeline sends a first frame only, because no stage produces a last frame' } },
+    { model: 'doubao-seedance-1-0-lite-i2v-250428', displayName: 'Seedance 1.0 Lite I2V', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5, 10], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '9:16', '1:1', 'adaptive'], note: 'the vendor also fuses several reference images through this id; this product does not offer that, because no stage attributes reference images to a shot' } },
+    { model: 'doubao-seedance-2-0-260128', displayName: 'Seedance 2.0', modality: 't2v', spec: { durations: [4, 15], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '9:16', '4:3', '3:4', '1:1', '21:9', 'adaptive'], note: 'open API access since 2026-02-24; a tenant granted later may need the dated variant of this id' } },
+    { model: 'doubao-seedance-2-0-260128', displayName: 'Seedance 2.0', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [4, 15], resolutions: ['480p', '720p', '1080p'], ratios: ['16:9', '9:16', '4:3', '3:4', '1:1', '21:9', 'adaptive'] } },
   ],
 }
 
@@ -69,8 +74,10 @@ const kling: ProviderCatalog = {
   catalogVersion: '2026-09',
   requiresAccessKey: true,
   models: [
-    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'image-to-video is built in the adapter but gets no catalog row until the vendor model name is verified' } },
+    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'the vendor ships newer generations than the two named here; their model_name literals are unverified in this repo, so they stay off the catalog rather than as rows a probe cannot explain' } },
+    { model: 'kling-v2-5-turbo', displayName: 'Kling 2.5 Turbo', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'same model_name as the text-to-video row, sent to the image2video resource instead; the adapter strips a data URL down to bare base64 because Kling takes the image inline' } },
     { model: 'kling-v1-6', displayName: 'Kling 1.6', modality: 't2v', spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'] } },
+    { model: 'kling-v1-6', displayName: 'Kling 1.6', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [5, 10], modes: ['std', 'pro'], aspectRatios: ['16:9', '9:16', '1:1'], note: 'takes a tail frame too, which no stage of this pipeline produces' } },
   ],
 }
 

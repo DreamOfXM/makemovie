@@ -1,13 +1,21 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { sanitizeError } from './types.js'
+import type { AdapterOptions, MediaReferenceType, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
 export const SEEDANCE_DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com'
 
 const TASKS_PATH = '/api/v3/contents/generations/tasks'
 const MODELS_PATH = '/api/v3/models'
 
-const SUPPORTED_MODALITIES = new Set<ModelModality>(['t2v'])
+const SUPPORTED_MODALITIES = new Set<ModelModality>(['t2v', 'i2v'])
+
+/**
+ * Ark asks for images inside the same `content` array as the prompt and says what each
+ * one is for with a `role`. The three roles below are the image ones; a reference video
+ * or audio clip has its own roles, which no stage of this pipeline produces yet, so the
+ * adapter refuses them by name instead of sending a content item the vendor would reject.
+ */
+const IMAGE_ROLES = new Set<MediaReferenceType>(['first_frame', 'last_frame', 'reference_image'])
 
 /** Only these keys are valid at the top level of the submit body; Ark rejects unknown ones, so anything else the caller passed is dropped. */
 const PARAMETERS = {
@@ -37,10 +45,11 @@ export function buildSeedanceSubmitRequest(
   request: ProviderRequest,
 ): SeedanceHttpRequest {
   assertSupported(capability)
+  validateReferenceRequest(capability, request.input)
   const prompt = typeof request.input.prompt === 'string' ? request.input.prompt : ''
   const body: Record<string, unknown> = {
     model: request.model,
-    content: [{ type: 'text', text: prompt }],
+    content: seedanceContent(prompt, readMediaReferences(request.input.media)),
     ...mergeSeedanceParameters(request.parameters),
   }
   return {
@@ -49,6 +58,18 @@ export function buildSeedanceSubmitRequest(
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body,
   }
+}
+
+/** Ark takes the frame as a `data:` URL, so no public object store is needed to condition a shot. */
+export function seedanceContent(prompt: string, media: readonly { type: MediaReferenceType; url: string }[]): Array<Record<string, unknown>> {
+  const content: Array<Record<string, unknown>> = [{ type: 'text', text: prompt }]
+  for (const reference of media) {
+    if (!IMAGE_ROLES.has(reference.type)) {
+      throw new Error(`seedance has no content role for reference type "${reference.type}"`)
+    }
+    content.push({ type: 'image_url', image_url: { url: reference.url }, role: reference.type })
+  }
+  return content
 }
 
 export function buildSeedancePollRequest(baseUrl: string, apiKey: string, taskId: string): SeedanceHttpRequest {

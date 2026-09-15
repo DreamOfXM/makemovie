@@ -66,7 +66,7 @@ describe('provider connections', () => {
     expect(body[0].apiKeySet).toBe(true)
   })
 
-  it('creates a seedance connection over its two text-to-video models', async () => {
+  it('creates a seedance connection over both video dialects of each model id', async () => {
     const owner = await env.register('mc-seedance@example.com', 'Seedance Org')
     const res = await env.app.inject({
       method: 'POST',
@@ -77,8 +77,18 @@ describe('provider connections', () => {
     expect(res.statusCode).toBe(201)
     const connection = res.json() as Connection
     expect(connection.baseUrl).toBe('https://ark.cn-beijing.volces.com')
-    expect(connection.capabilities.map(c => c.model).sort()).toEqual(['doubao-seedance-1-0-pro-250528', 'doubao-seedance-1-5-pro-251215'])
-    expect(new Set(connection.capabilities.map(c => c.modality))).toEqual(new Set(['t2v']))
+    // One model id appearing twice is the vendor's shape, not a duplication bug: Ark
+    // chooses text-to-video or image-to-video by whether the content array carries an
+    // image. Seeding survives only because a capability is keyed by model and modality.
+    expect(connection.capabilities.map(c => `${c.model}:${c.modality}`).sort()).toEqual([
+      'doubao-seedance-1-0-lite-i2v-250428:i2v',
+      'doubao-seedance-1-0-pro-250528:i2v',
+      'doubao-seedance-1-0-pro-250528:t2v',
+      'doubao-seedance-1-5-pro-251215:i2v',
+      'doubao-seedance-1-5-pro-251215:t2v',
+      'doubao-seedance-2-0-260128:i2v',
+      'doubao-seedance-2-0-260128:t2v',
+    ])
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.encryptedSecret).not.toContain('test-ark-key')
@@ -95,8 +105,14 @@ describe('provider connections', () => {
     expect(res.statusCode).toBe(201)
     const connection = res.json() as Connection
     expect(connection.baseUrl).toBe('https://api-beijing.klingai.com')
-    expect(connection.capabilities.map(c => c.model).sort()).toEqual(['kling-v1-6', 'kling-v2-5-turbo'])
-    expect(new Set(connection.capabilities.map(c => c.modality))).toEqual(new Set(['t2v']))
+    // One model_name answers both /v1/videos/text2video and /v1/videos/image2video, so
+    // each generation legitimately gets two capability rows.
+    expect(connection.capabilities.map(c => `${c.model}:${c.modality}`).sort()).toEqual([
+      'kling-v1-6:i2v',
+      'kling-v1-6:t2v',
+      'kling-v2-5-turbo:i2v',
+      'kling-v2-5-turbo:t2v',
+    ])
     expect(connection.apiKeySet).toBe(true)
     expect(connection.accessKeySet).toBe(true)
     expect(res.payload).not.toContain('test-ak')
@@ -379,6 +395,30 @@ describe('models entered by hand', () => {
     expect(badModality.statusCode).toBe(400)
     expect(badModality.json().error).toContain('r2v')
     expect((await addModel(owner.token, connection.id, { model: 'x'.repeat(121), modality: 'text' })).statusCode).toBe(400)
+  })
+
+  it('lets one vendor model name carry two modalities on the same connection', async () => {
+    const owner = await env.register('mc-two-modalities@example.com', 'Two Modalities Org')
+    const connection = await createMockConnection(owner.token, 'bimodal')
+
+    // Kling answers /v1/videos/text2video and /v1/videos/image2video for the same
+    // `model_name`, and Ark picks the Seedance dialect by whether the content array
+    // carries an image. Keying a capability by model alone made the second half of
+    // either vendor impossible to register, so the key is (connection, model, modality).
+    const textToVideo = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 't2v' })
+    expect(textToVideo.statusCode).toBe(201)
+    const imageToVideo = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 'i2v', acceptsFirstFrame: true })
+    expect(imageToVideo.statusCode).toBe(201)
+    expect(imageToVideo.json().id).not.toBe(textToVideo.json().id)
+
+    const repeat = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 'i2v' })
+    expect(repeat.statusCode).toBe(409)
+    expect(repeat.json().error).toContain('for the "i2v" modality')
+
+    const listed = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const rows = listed.json() as Connection[]
+    const both = rows.find(c => c.id === connection.id)!.capabilities.filter(c => c.model === 'kling-v1-6')
+    expect(both.map(c => c.modality).sort()).toEqual(['i2v', 't2v'])
   })
 
   it('refuses to store reference-input claims about a model that cannot take them', async () => {

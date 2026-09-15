@@ -82,15 +82,25 @@ describe('catalog', () => {
   it('kling catalog advertises only the video modalities a stage can bind', () => {
     const catalog = getCatalog('kling')
     expect(catalog).toBeDefined()
-    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v']))
+    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v', 'i2v']))
   })
 
-  it('seedance catalog advertises only the t2v endpoint it implements', () => {
+  it('seedance catalog advertises only the endpoints its adapter implements', () => {
     const catalog = getCatalog('seedance')
     expect(catalog).toBeDefined()
-    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v']))
-    for (const model of catalog!.models) {
-      expect(model.acceptsFirstFrame).toBeUndefined()
+    expect(new Set(catalog!.models.map(m => m.modality))).toEqual(new Set(['t2v', 'i2v']))
+    for (const model of catalog!.models.filter(m => m.modality === 'i2v')) {
+      expect(model.acceptsFirstFrame).toBe(true)
+    }
+  })
+
+  it('no catalog repeats a model at the same modality', () => {
+    // Creating a connection materialises every row, and a capability is keyed by
+    // model plus modality — a repeated pair would fail the insert and the user would
+    // never learn which line of the catalog caused it.
+    for (const catalog of listCatalogs()) {
+      const keys = catalog.models.map(model => `${model.model}:${model.modality}`)
+      expect(new Set(keys).size, catalog.provider).toBe(keys.length)
     }
   })
 

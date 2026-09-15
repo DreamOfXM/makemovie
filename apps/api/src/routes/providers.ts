@@ -228,7 +228,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(201).send(capability)
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-          return reply.code(409).send({ error: `model "${model}" is already configured on this connection` })
+          return reply.code(409).send({ error: `model "${model}" is already configured on this connection for the "${modality}" modality` })
         }
         throw error
       }

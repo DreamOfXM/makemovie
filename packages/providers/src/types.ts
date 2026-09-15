@@ -68,7 +68,13 @@ export type MediaReferenceType = typeof mediaReferenceTypes[number]
 
 export interface MediaReference {
   type: MediaReferenceType
-  /** A public URL or a `data:` URL — both vendors that take either accept both. */
+  /**
+   * A `data:` URL or a public one. Every vendor reached directly here takes either —
+   * DashScope documents both, Ark takes a data URL inside `content[].image_url`, and
+   * Kling's own API takes bare base64. Kling bought through the Aliyun-hosted gateway is
+   * the exception: that one documents HTTP(S) URLs only, so a gateway connection cannot
+   * reuse this path without a presigned link.
+   */
   url: string
 }
 
