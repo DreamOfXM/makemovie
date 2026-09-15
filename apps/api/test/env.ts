@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { FastifyInstance } from 'fastify'
 import EmbeddedPostgres from 'embedded-postgres'
-import { loadConfig } from '@studio/config'
+import { loadConfig, type AppConfig } from '@studio/config'
 import { PrismaClient } from '@studio/db'
 import { buildApp } from '../src/app.js'
 
@@ -34,6 +34,8 @@ async function acquirePort(): Promise<number> {
 export interface TestEnv {
   app: FastifyInstance
   db: PrismaClient
+  /** The config this app booted with; spread it to build a variant that differs by one setting. */
+  config: AppConfig
   register(email: string, organizationName: string): Promise<{ token: string; organization: { id: string; name: string }; role: string }>
   authHeaders(token: string): Record<string, string>
   stop(): Promise<void>
@@ -62,13 +64,14 @@ export async function startTestEnv(): Promise<TestEnv> {
   }
 
   const db = new PrismaClient({ datasources: { db: { url: databaseUrl } } })
-  const config = loadConfig({ DATABASE_URL: databaseUrl, STUDIO_ARTIFACTS_DIR: artifactsDir })
+  const config = loadConfig({ NODE_ENV: 'test', DATABASE_URL: databaseUrl, STUDIO_ARTIFACTS_DIR: artifactsDir })
   const app = await buildApp({ config, db, logger: false })
   await app.ready()
 
   return {
     app,
     db,
+    config,
     authHeaders(token: string) {
       return { authorization: `Bearer ${token}` }
     },

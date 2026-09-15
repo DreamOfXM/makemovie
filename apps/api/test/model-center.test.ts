@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { decryptSecret } from '@studio/security'
+import { buildApp } from '../src/app.js'
 import { startTestEnv, type TestEnv } from './env.js'
 
 let env: TestEnv
@@ -200,6 +201,87 @@ describe('provider connections', () => {
     expect(patchB.statusCode).toBe(404)
     const probeB = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(b.token) })
     expect(probeB.statusCode).toBe(404)
+  })
+})
+
+describe('provider base URLs', () => {
+  const create = (token: string, payload: Record<string, string>, app = env.app) =>
+    app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload })
+
+  it('refuses an address that would put a request on the worker’s own network', async () => {
+    const owner = await env.register('mc-url@example.com', 'Base URL Org')
+
+    const metadata = await create(owner.token, { provider: 'dashscope', name: 'via-metadata', apiKey: 'k', baseUrl: 'http://169.254.169.254' })
+    expect(metadata.statusCode).toBe(400)
+    expect(metadata.json().error).toContain('private, loopback or link-local')
+
+    const scheme = await create(owner.token, { provider: 'dashscope', name: 'via-file', apiKey: 'k', baseUrl: 'file:///etc/passwd' })
+    expect(scheme.statusCode).toBe(400)
+    expect(scheme.json().error).toContain('http(s)')
+
+    const credentials = await create(owner.token, { provider: 'dashscope', name: 'via-creds', apiKey: 'k', baseUrl: 'https://user:pw@api.example.com' })
+    expect(credentials.statusCode).toBe(400)
+    expect(credentials.json().error).toContain('credentials')
+
+    expect(await env.db.providerConnection.count({ where: { organizationId: owner.organization.id } })).toBe(0)
+  })
+
+  it('keeps a hand-typed public address exactly as it was entered', async () => {
+    const owner = await env.register('mc-url-ok@example.com', 'Base URL OK Org')
+    const res = await create(owner.token, { provider: 'dashscope', name: 'own-gateway', apiKey: 'k', baseUrl: 'https://api.example.com/v1' })
+    expect(res.statusCode).toBe(201)
+    // Adapters append their own path, so a normalising rewrite here would produce a
+    // double slash the gateway answers with a 404.
+    expect(res.json().baseUrl).toBe('https://api.example.com/v1')
+  })
+
+  it('refuses to move a live connection onto loopback unless the operator opted in', async () => {
+    const owner = await env.register('mc-url-patch@example.com', 'Base URL Patch Org')
+    const created = await create(owner.token, { provider: 'dashscope', name: 'patchable', apiKey: 'k' })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+
+    const denied = await env.app.inject({
+      method: 'PATCH',
+      url: `/providers/connections/${connection.id}`,
+      headers: authHeaders(owner.token),
+      payload: { baseUrl: 'http://127.0.0.1:18080/v1' },
+    })
+    expect(denied.statusCode).toBe(400)
+    expect(denied.json().error).toContain('STUDIO_ALLOW_PRIVATE_PROVIDER_URLS')
+
+    // The switch is a boot-time operator decision, so the variant app differs by
+    // nothing else — same database, same key material.
+    const permissive = await buildApp({ config: { ...env.config, allowPrivateProviderUrls: true }, db: env.db, logger: false })
+    await permissive.ready()
+    try {
+      const allowed = await permissive.inject({
+        method: 'PATCH',
+        url: `/providers/connections/${connection.id}`,
+        headers: authHeaders(owner.token),
+        payload: { baseUrl: 'http://127.0.0.1:18080/v1' },
+      })
+      expect(allowed.statusCode).toBe(200)
+      expect(allowed.json().baseUrl).toBe('http://127.0.0.1:18080/v1')
+    } finally {
+      await permissive.close()
+    }
+  })
+
+  it('leaves the mock provider’s address unchecked, since no request is ever made to it', async () => {
+    const owner = await env.register('mc-url-mock@example.com', 'Base URL Mock Org')
+    const connection = await createMockConnection(owner.token, 'mock-address')
+    expect(connection.baseUrl).toBe('mock://local')
+
+    // The console resends the stored address on every edit, so rejecting it here
+    // would make an existing mock connection impossible to rename.
+    const renamed = await env.app.inject({
+      method: 'PATCH',
+      url: `/providers/connections/${connection.id}`,
+      headers: authHeaders(owner.token),
+      payload: { name: 'mock-address', baseUrl: 'mock://local' },
+    })
+    expect(renamed.statusCode).toBe(200)
   })
 })
 

@@ -53,4 +53,11 @@ describe('loadConfig', () => {
     expect(loadConfig({ DATABASE_URL: DB, STORAGE_BACKEND: 's3' }).storageBackend).toBe('s3')
     expect(() => loadConfig({ DATABASE_URL: DB, STORAGE_BACKEND: 'gcs' })).toThrow(/STORAGE_BACKEND must be one of disk\|s3/)
   })
+
+  it('keeps private provider addresses refused until the operator opens them up', () => {
+    expect(loadConfig({ DATABASE_URL: DB }).allowPrivateProviderUrls).toBe(false)
+    expect(loadConfig({ DATABASE_URL: DB, STUDIO_ALLOW_PRIVATE_PROVIDER_URLS: '0' }).allowPrivateProviderUrls).toBe(false)
+    expect(loadConfig({ DATABASE_URL: DB, STUDIO_ALLOW_PRIVATE_PROVIDER_URLS: '1' }).allowPrivateProviderUrls).toBe(true)
+    expect(loadConfig({ DATABASE_URL: DB, STUDIO_ALLOW_PRIVATE_PROVIDER_URLS: 'TRUE' }).allowPrivateProviderUrls).toBe(true)
+  })
 })

@@ -15,6 +15,15 @@ export interface AppConfig {
   s3SecretKey: string
   masterKey: string
   corsOrigins: string[]
+  /**
+   * Permit provider connections whose base URL resolves to a private, loopback or
+   * link-local address. Off by default: the address is entered by a user and the
+   * worker then calls it with a decrypted API key in the header, so without this the
+   * instance is open to requests aimed at its own network — including the cloud
+   * metadata endpoint. Turn it on only where the model gateway is self-hosted inside
+   * the same trusted network as the worker.
+   */
+  allowPrivateProviderUrls: boolean
   sessionTtlMs: number
   /**
    * How long the worker keeps polling one provider task before it gives up.
@@ -66,6 +75,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     s3SecretKey: env.S3_SECRET_KEY || 'studio-password',
     masterKey: masterKey.toLowerCase(),
     corsOrigins: (env.CORS_ORIGIN || 'http://localhost:3010').split(',').map(origin => origin.trim()).filter(Boolean),
+    allowPrivateProviderUrls: ['1', 'true'].includes((env.STUDIO_ALLOW_PRIVATE_PROVIDER_URLS ?? '').trim().toLowerCase()),
     sessionTtlMs,
     pollTimeoutMs,
     port: Number(env.PORT || 4010),

@@ -7,7 +7,6 @@ import { createSession, revokeSession } from '../lib/sessions.js'
 import { authenticate } from '../plugins/auth.js'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const AUTH_RATE_LIMIT = { rateLimit: { max: 20, timeWindow: '5 minutes' } }
 
 function organizationSlug(name: string): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -15,9 +14,16 @@ function organizationSlug(name: string): string {
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
+  // Twenty attempts per five minutes is the policy for a signup form on the public
+  // internet. A test run creates a tenant per case, so it boots without the ceiling;
+  // every real environment keeps it.
+  const authRouteOptions: { config: { rateLimit: false | { max: number; timeWindow: string } } } = {
+    config: { rateLimit: app.config.nodeEnv === 'test' ? false : { max: 20, timeWindow: '5 minutes' } },
+  }
+
   app.post<{ Body: { email?: string; password?: string; name?: string; organizationName?: string } }>(
     '/register',
-    { config: AUTH_RATE_LIMIT },
+    authRouteOptions,
     async (request, reply) => {
       const { email, password, name, organizationName } = request.body ?? {}
       if (!email || !EMAIL_PATTERN.test(email)) return reply.code(400).send({ error: 'A valid email is required' })
@@ -52,7 +58,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{ Body: { email?: string; password?: string; organizationId?: string } }>(
     '/login',
-    { config: AUTH_RATE_LIMIT },
+    authRouteOptions,
     async (request, reply) => {
       const { email, password, organizationId } = request.body ?? {}
       if (!email || !password) return reply.code(400).send({ error: 'email and password are required' })

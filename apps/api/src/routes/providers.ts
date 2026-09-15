@@ -4,6 +4,7 @@ import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogM
 import { decryptSecret, encryptSecret } from '@studio/security'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
+import { checkProviderBaseUrl } from '../lib/providerUrl.js'
 
 interface ConnectionBody {
   provider?: string
@@ -50,16 +51,22 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     // Half a key pair can never be probed or run, and the adapter only reports it at call time.
     if (catalog.requiresAccessKey && !accessKey) return reply.code(400).send({ error: `${provider} signs requests with an access key + secret key pair, so accessKey is required as well as apiKey` })
 
+    const baseUrl = request.body?.baseUrl?.trim()
+    // Only a hand-typed address is checked; every catalog's own default is ours to
+    // begin with, and refusing it would make the provider unusable rather than safe.
+    if (baseUrl) {
+      const checked = checkBaseUrl(provider, baseUrl, app.config.allowPrivateProviderUrls)
+      if (!checked.ok) return reply.code(400).send({ error: checked.error })
+    }
     const existing = await app.db.providerConnection.findUnique({ where: { organizationId_name: { organizationId: auth.organizationId, name } } })
     if (existing) return reply.code(409).send({ error: 'a connection with this name already exists' })
 
-    const baseUrl = request.body?.baseUrl?.trim() || catalog.defaultBaseUrl
     const connection = await app.db.providerConnection.create({
       data: {
         organizationId: auth.organizationId,
         provider,
         name,
-        baseUrl,
+        baseUrl: baseUrl || catalog.defaultBaseUrl,
         encryptedSecret: encryptSecret(apiKey, app.config.masterKey),
         accessKeyEncrypted: accessKey ? encryptSecret(accessKey, app.config.masterKey) : null,
         capabilities: { create: catalog.models.map(toCapabilityData) },
@@ -85,9 +92,9 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         data.name = name
       }
       if (request.body?.baseUrl !== undefined) {
-        const baseUrl = request.body.baseUrl.trim()
-        if (!baseUrl) return reply.code(400).send({ error: 'baseUrl cannot be empty' })
-        data.baseUrl = baseUrl
+        const checked = checkBaseUrl(connection.provider, request.body.baseUrl, app.config.allowPrivateProviderUrls)
+        if (!checked.ok) return reply.code(400).send({ error: checked.error })
+        data.baseUrl = checked.url!
       }
       if (request.body?.enabled !== undefined) data.enabled = request.body.enabled
       if (request.body?.apiKey) data.encryptedSecret = encryptSecret(request.body.apiKey, app.config.masterKey)
@@ -158,6 +165,16 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       return { connectionId: connection.id, results }
     },
   )
+}
+
+/**
+ * Which connections get their address checked. The adapter is picked by provider and
+ * the mock one never opens a socket, so a mock baseUrl is a label rather than an
+ * address — checking it would only reject the `mock://local` the catalog ships.
+ */
+function checkBaseUrl(provider: string, supplied: string, allowPrivate: boolean) {
+  if (provider === 'mock') return { ok: true as const, url: supplied.trim() }
+  return checkProviderBaseUrl(supplied, { allowPrivate })
 }
 
 function toCapabilityData(model: CatalogModel) {
