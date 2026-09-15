@@ -315,6 +315,7 @@ model ProviderConnection {
   provider String
   name String
   encryptedSecret String
+  accessKeyEncrypted String?
   baseUrl String
   enabled Boolean @default(true)
   lastError String?

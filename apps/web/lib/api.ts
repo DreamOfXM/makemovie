@@ -58,6 +58,7 @@ export interface Catalog {
   label: string
   defaultBaseUrl: string
   catalogVersion: string
+  requiresAccessKey?: boolean
   models: CatalogModel[]
 }
 
@@ -83,6 +84,7 @@ export interface Connection {
   enabled: boolean
   lastError: string | null
   apiKeySet?: boolean
+  accessKeySet?: boolean
   createdAt: string
   capabilities: Capability[]
 }

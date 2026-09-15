@@ -396,11 +396,13 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
   const [provider, setProvider] = useState(editing?.provider ?? catalogs[0]?.provider ?? '')
   const [name, setName] = useState(editing?.name ?? '')
   const [apiKey, setApiKey] = useState('')
+  const [accessKey, setAccessKey] = useState('')
   const [baseUrl, setBaseUrl] = useState(editing?.baseUrl ?? '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const catalog = catalogs.find(item => item.provider === (editing ? editing.provider : provider))
+  const requiresAccessKey = Boolean(catalog?.requiresAccessKey)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -410,10 +412,12 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
       if (editing) {
         const body: Record<string, string> = { name, baseUrl }
         if (apiKey) body.apiKey = apiKey
+        if (accessKey) body.accessKey = accessKey
         await api(`/providers/connections/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) })
         toast.success(t('models.updated', { name }))
       } else {
         const body: Record<string, string> = { provider, name, apiKey }
+        if (accessKey) body.accessKey = accessKey
         if (baseUrl.trim()) body.baseUrl = baseUrl.trim()
         const created = await api<Connection>('/providers/connections', { method: 'POST', body: JSON.stringify(body) })
         toast.success(t('models.created', { name: created.name, count: created.capabilities.length }))
@@ -467,8 +471,27 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
             />
           </Field>
 
+          {requiresAccessKey && (
+            <Field
+              label={t('models.accessKey')}
+              htmlFor="connectionAccessKey"
+              required={!editing}
+              hint={editing ? t('models.accessKeyRotated') : t('models.keyPairHint')}
+            >
+              <Input
+                id="connectionAccessKey"
+                type="password"
+                value={accessKey}
+                onChange={event => setAccessKey(event.target.value)}
+                placeholder={t('models.accessKeyPlaceholder')}
+                required={!editing}
+                autoComplete="off"
+              />
+            </Field>
+          )}
+
           <Field
-            label={t('models.apiKey')}
+            label={requiresAccessKey ? t('models.secretKey') : t('models.apiKey')}
             htmlFor="connectionApiKey"
             required={!editing}
             hint={editing ? t('models.apiKeyRotated') : t('models.apiKeyHint')}
@@ -508,7 +531,7 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !name.trim() || (!editing && !apiKey)}>
+            <Button type="submit" disabled={busy || !name.trim() || (!editing && (!apiKey || (requiresAccessKey && !accessKey)))}>
               {busy ? t('common.saving') : editing ? t('common.save') : t('common.create')}
             </Button>
           </DialogFooter>

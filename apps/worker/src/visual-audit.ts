@@ -66,6 +66,7 @@ export class ModelQualityChecker implements QualityChecker {
     const capability = toCapability(connection.provider, row)
     const adapter = createAdapter(connection.provider, {
       apiKey: decryptSecret(connection.encryptedSecret, this.masterKey),
+      accessKey: connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, this.masterKey) : undefined,
       baseUrl: connection.baseUrl,
     })
     const request: ProviderRequest = {

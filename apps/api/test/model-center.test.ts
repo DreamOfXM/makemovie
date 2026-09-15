@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { decryptSecret } from '@studio/security'
 import { startTestEnv, type TestEnv } from './env.js'
 
 let env: TestEnv
@@ -13,7 +14,7 @@ afterAll(async () => {
 
 const authHeaders = (token: string) => env.authHeaders(token)
 
-interface Connection { id: string; provider: string; name: string; baseUrl: string; capabilities: { id: string; model: string; modality: string }[] }
+interface Connection { id: string; provider: string; name: string; baseUrl: string; apiKeySet?: boolean; accessKeySet?: boolean; capabilities: { id: string; model: string; modality: string }[] }
 
 async function createMockConnection(token: string, name: string, apiKey = 'test-key'): Promise<Connection> {
   const res = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name, apiKey } })
@@ -26,13 +27,14 @@ describe('provider catalogs', () => {
     const owner = await env.register('mc-catalog@example.com', 'Catalog Org')
     const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
-    const catalogs = res.json() as { provider: string; defaultBaseUrl: string; models: { model: string }[] }[]
+    const catalogs = res.json() as { provider: string; defaultBaseUrl: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
     expect(catalogs.map(c => c.provider).sort()).toEqual(['dashscope', 'kling', 'mock', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
     expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
     const seedance = catalogs.find(c => c.provider === 'seedance')!
     expect(seedance.defaultBaseUrl).toBe('https://ark.cn-beijing.volces.com')
     expect(catalogs.find(c => c.provider === 'kling')!.defaultBaseUrl).toBe('https://api-beijing.klingai.com')
+    expect(catalogs.filter(c => c.requiresAccessKey).map(c => c.provider)).toEqual(['kling'])
   })
 
   it('rejects anonymous access', async () => {
@@ -74,6 +76,96 @@ describe('provider connections', () => {
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.encryptedSecret).not.toContain('test-ark-key')
+  })
+
+  it('creates a kling connection over its access key + secret key pair and never echoes either half', async () => {
+    const owner = await env.register('mc-kling@example.com', 'Kling Org')
+    const res = await env.app.inject({
+      method: 'POST',
+      url: '/providers/connections',
+      headers: authHeaders(owner.token),
+      payload: { provider: 'kling', name: 'kling-main', apiKey: 'test-sk', accessKey: 'test-ak' },
+    })
+    expect(res.statusCode).toBe(201)
+    const connection = res.json() as Connection
+    expect(connection.baseUrl).toBe('https://api-beijing.klingai.com')
+    expect(connection.capabilities.map(c => c.model).sort()).toEqual(['kling-v1-6', 'kling-v2-5-turbo'])
+    expect(new Set(connection.capabilities.map(c => c.modality))).toEqual(new Set(['t2v']))
+    expect(connection.apiKeySet).toBe(true)
+    expect(connection.accessKeySet).toBe(true)
+    expect(res.payload).not.toContain('test-ak')
+    expect(res.payload).not.toContain('test-sk')
+
+    const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+    expect(stored.accessKeyEncrypted?.startsWith('v1.')).toBe(true)
+    expect(stored.accessKeyEncrypted).not.toContain('test-ak')
+    expect(stored.encryptedSecret).not.toContain('test-sk')
+
+    const list = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const rows = list.json() as Record<string, unknown>[]
+    expect(rows[0]).not.toHaveProperty('encryptedSecret')
+    expect(rows[0]).not.toHaveProperty('accessKeyEncrypted')
+    expect(rows[0].apiKeySet).toBe(true)
+    expect(rows[0].accessKeySet).toBe(true)
+    expect(list.payload).not.toContain('test-ak')
+    expect(list.payload).not.toContain('test-sk')
+  })
+
+  it('rejects a kling connection carrying only half of its key pair', async () => {
+    const owner = await env.register('mc-kling-half@example.com', 'Kling Half Org')
+    const res = await env.app.inject({
+      method: 'POST',
+      url: '/providers/connections',
+      headers: authHeaders(owner.token),
+      payload: { provider: 'kling', name: 'kling-no-ak', apiKey: 'test-sk' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toContain('access key + secret key pair')
+    expect(await env.db.providerConnection.count({ where: { organizationId: owner.organization.id } })).toBe(0)
+  })
+
+  it('creates a single-key connection with no second credential', async () => {
+    const owner = await env.register('mc-dashscope@example.com', 'DashScope Org')
+    const res = await env.app.inject({
+      method: 'POST',
+      url: '/providers/connections',
+      headers: authHeaders(owner.token),
+      payload: { provider: 'dashscope', name: 'bailian-main', apiKey: 'test-key' },
+    })
+    expect(res.statusCode).toBe(201)
+    const connection = res.json() as Connection
+    expect(connection.accessKeySet).toBe(false)
+    const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+    expect(stored.accessKeyEncrypted).toBeNull()
+  })
+
+  it('rotates the access key without touching the secret key', async () => {
+    const owner = await env.register('mc-kling-rotate@example.com', 'Kling Rotate Org')
+    const created = await env.app.inject({
+      method: 'POST',
+      url: '/providers/connections',
+      headers: authHeaders(owner.token),
+      payload: { provider: 'kling', name: 'kling-rotate', apiKey: 'test-sk', accessKey: 'test-ak' },
+    })
+    const connection = created.json() as Connection
+    const before = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+
+    const res = await env.app.inject({
+      method: 'PATCH',
+      url: `/providers/connections/${connection.id}`,
+      headers: authHeaders(owner.token),
+      payload: { accessKey: 'test-ak-rotated' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).not.toHaveProperty('accessKeyEncrypted')
+    expect(res.payload).not.toContain('test-ak-rotated')
+    expect(res.payload).not.toContain('test-sk')
+
+    const after = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+    expect(after.accessKeyEncrypted).not.toBeNull()
+    expect(after.accessKeyEncrypted).not.toBe(before.accessKeyEncrypted)
+    expect(decryptSecret(after.accessKeyEncrypted!, env.app.config.masterKey)).toBe('test-ak-rotated')
+    expect(after.encryptedSecret).toBe(before.encryptedSecret)
   })
 
   it('rejects duplicate names, unknown providers and missing keys', async () => {

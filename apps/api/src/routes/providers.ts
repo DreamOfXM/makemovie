@@ -9,6 +9,7 @@ interface ConnectionBody {
   provider?: string
   name?: string
   apiKey?: string
+  accessKey?: string
   baseUrl?: string
   enabled?: boolean
 }
@@ -20,6 +21,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       label: catalog.label,
       defaultBaseUrl: catalog.defaultBaseUrl,
       catalogVersion: catalog.catalogVersion,
+      requiresAccessKey: catalog.requiresAccessKey,
       models: catalog.models,
     }))
   })
@@ -31,7 +33,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { createdAt: 'desc' },
       include: { capabilities: { orderBy: { model: 'asc' } } },
     })
-    return connections.map(({ encryptedSecret, ...rest }) => ({ ...rest, apiKeySet: encryptedSecret.length > 0 }))
+    return connections.map(({ encryptedSecret, accessKeyEncrypted, ...rest }) => ({ ...rest, apiKeySet: encryptedSecret.length > 0, accessKeySet: Boolean(accessKeyEncrypted) }))
   })
 
   app.post<{ Body: ConnectionBody }>('/providers/connections', { preHandler: requirePermission('providers:manage') }, async (request, reply) => {
@@ -39,14 +41,18 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const provider = request.body?.provider?.trim()
     const name = request.body?.name?.trim()
     const apiKey = request.body?.apiKey
+    const accessKey = request.body?.accessKey
     if (!provider || !isKnownProvider(provider)) return reply.code(400).send({ error: 'provider must be one of the known catalogs' })
     if (!name) return reply.code(400).send({ error: 'name is required' })
     if (!apiKey) return reply.code(400).send({ error: 'apiKey is required' })
 
+    const catalog = getCatalog(provider)!
+    // Half a key pair can never be probed or run, and the adapter only reports it at call time.
+    if (catalog.requiresAccessKey && !accessKey) return reply.code(400).send({ error: `${provider} signs requests with an access key + secret key pair, so accessKey is required as well as apiKey` })
+
     const existing = await app.db.providerConnection.findUnique({ where: { organizationId_name: { organizationId: auth.organizationId, name } } })
     if (existing) return reply.code(409).send({ error: 'a connection with this name already exists' })
 
-    const catalog = getCatalog(provider)!
     const baseUrl = request.body?.baseUrl?.trim() || catalog.defaultBaseUrl
     const connection = await app.db.providerConnection.create({
       data: {
@@ -55,12 +61,13 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         name,
         baseUrl,
         encryptedSecret: encryptSecret(apiKey, app.config.masterKey),
+        accessKeyEncrypted: accessKey ? encryptSecret(accessKey, app.config.masterKey) : null,
         capabilities: { create: catalog.models.map(toCapabilityData) },
       },
       include: { capabilities: true },
     })
     await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.create', entityType: 'ProviderConnection', entityId: connection.id, payload: { provider, name, models: connection.capabilities.length } })
-    return reply.code(201).send({ ...connection, encryptedSecret: undefined, apiKeySet: true })
+    return reply.code(201).send({ ...connection, encryptedSecret: undefined, accessKeyEncrypted: undefined, apiKeySet: true, accessKeySet: Boolean(accessKey) })
   })
 
   app.patch<{ Params: { connectionId: string }; Body: ConnectionBody }>(
@@ -71,7 +78,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const connection = await app.db.providerConnection.findFirst({ where: { id: request.params.connectionId, organizationId: auth.organizationId } })
       if (!connection) return reply.code(404).send({ error: 'connection not found' })
 
-      const data: { name?: string; baseUrl?: string; encryptedSecret?: string; enabled?: boolean } = {}
+      const data: { name?: string; baseUrl?: string; encryptedSecret?: string; accessKeyEncrypted?: string; enabled?: boolean } = {}
       if (request.body?.name !== undefined) {
         const name = request.body.name.trim()
         if (!name) return reply.code(400).send({ error: 'name cannot be empty' })
@@ -84,10 +91,11 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       }
       if (request.body?.enabled !== undefined) data.enabled = request.body.enabled
       if (request.body?.apiKey) data.encryptedSecret = encryptSecret(request.body.apiKey, app.config.masterKey)
+      if (request.body?.accessKey) data.accessKeyEncrypted = encryptSecret(request.body.accessKey, app.config.masterKey)
 
       const updated = await app.db.providerConnection.update({ where: { id: connection.id }, data })
       await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.update', entityType: 'ProviderConnection', entityId: connection.id, payload: { fields: Object.keys(data), keyRotated: data.encryptedSecret !== undefined } })
-      return { ...updated, encryptedSecret: undefined }
+      return { ...updated, encryptedSecret: undefined, accessKeyEncrypted: undefined }
     },
   )
 
@@ -119,7 +127,8 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       if (!connection.enabled) return reply.code(409).send({ error: 'connection is disabled' })
 
       const apiKey = decryptSecret(connection.encryptedSecret, app.config.masterKey)
-      const adapter = createAdapter(connection.provider, { apiKey, baseUrl: connection.baseUrl })
+      const accessKey = connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, app.config.masterKey) : undefined
+      const adapter = createAdapter(connection.provider, { apiKey, accessKey, baseUrl: connection.baseUrl })
       const results = []
       let anyFailure = false
       for (const capability of connection.capabilities) {

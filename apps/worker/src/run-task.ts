@@ -94,7 +94,8 @@ async function runCandidate(task: TaskRow, candidate: RunTaskCandidate, payload:
   const capability = toCapability(connection.provider, capabilityRow)
   const request = parseRequest(task.requestSnapshot, candidate.model)
   const apiKey = decryptSecret(connection.encryptedSecret, deps.masterKey)
-  const adapter = createAdapter(connection.provider, { apiKey, baseUrl: connection.baseUrl })
+  const accessKey = connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, deps.masterKey) : undefined
+  const adapter = createAdapter(connection.provider, { apiKey, accessKey, baseUrl: connection.baseUrl })
 
   const submitted = await adapter.submit(capability, request)
   const result = await pollToSettled(adapter, capability, submitted.taskId, {
