@@ -26,7 +26,7 @@ interface DeliveryManifest {
   source: { version: number; checksum: string; status: string } | null
   script: { version: number; checksum: string; status: string } | null
   storyboards: { number: number; title: string; durationMs: number; artifacts: ManifestArtifact[] }[]
-  composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null }
+  composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null; tracks: ManifestArtifact[] }
   quality: { checks: number; approved: number; rejected: number; threshold: number }
   acceptance?: ManifestAcceptance
 }
@@ -286,7 +286,8 @@ describe('delivery acceptance gate', () => {
       height: 720,
       durationMs: 6100,
     })
-    expect(manifest.composition).toEqual({ objectKey: masterObjectKey, checksum: 'master-checksum', mimeType: 'video/mp4', durationMs: 9000 })
+    // No subtitle and no score were mixed in, so the master is stated as silent.
+    expect(manifest.composition).toEqual({ objectKey: masterObjectKey, checksum: 'master-checksum', mimeType: 'video/mp4', durationMs: 9000, tracks: [] })
     expect(manifest.quality).toEqual({ checks: 5, approved: 3, rejected: 2, threshold: 0.7 })
     expect(manifest.acceptance).toBeUndefined()
 
@@ -401,5 +402,35 @@ describe('delivery acceptance decisions', () => {
     expect(events.some(event => event.action === 'delivery.create' && event.entityType === 'delivery' && event.entityId === deliveryOneId)).toBe(true)
     expect(events.some(event => event.action === 'delivery.accept' && event.entityId === deliveryOneId)).toBe(true)
     expect(events.some(event => event.action === 'delivery.reject' && event.entityId === deliveryTwoId)).toBe(true)
+  })
+})
+
+// Last, because it packages a third delivery and the listing above counts them.
+describe('delivery audio tracks', () => {
+  it('names the audio that was mixed in, not whatever the newest of that stage is now', async () => {
+    const composition = await env.db.composition.findFirstOrThrow({ where: { episodeId } })
+    const seed = (stage: Stage, file: string, checksum: string, mimeType: string, durationMs: number | null) =>
+      env.db.mediaArtifact.create({
+        data: { organizationId, stage, objectKey: objectKey(stage.toLowerCase(), 'master', file), checksum, mimeType, version: 1, durationMs },
+      })
+    const subtitle = await seed('SUBTITLE', 'v1.srt', 'srt-checksum', 'application/x-subrip', null)
+    const score = await seed('MUSIC', 'v1.wav', 'score-in-the-file', 'audio/wav', 9000)
+    await env.db.composition.update({
+      where: { id: composition.id },
+      data: { subtitleArtifactId: subtitle.id, scoreArtifactId: score.id },
+    })
+    // Regenerating the score after the compose must not rewrite what the master holds.
+    await seedTask('MUSIC', [], [{
+      stage: 'MUSIC', objectKey: objectKey('music', 'master', 'v2.wav'), checksum: 'score-regenerated', mimeType: 'audio/wav', version: 2, durationMs: 9000,
+    }])
+
+    const res = await createDelivery(editorToken)
+    expect(res.statusCode).toBe(201)
+    const manifest = (res.json() as { delivery: DeliveryDto }).delivery.manifest
+    expect(manifest.composition.tracks.map(track => [track.stage, track.checksum])).toEqual([
+      ['SUBTITLE', 'srt-checksum'],
+      ['MUSIC', 'score-in-the-file'],
+    ])
+    expect(manifest.composition.tracks[1]).toEqual(expect.objectContaining({ objectKey: objectKey('music', 'master', 'v1.wav'), durationMs: 9000 }))
   })
 })

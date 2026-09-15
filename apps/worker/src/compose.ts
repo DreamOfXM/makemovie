@@ -107,7 +107,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
     }
     await deps.db.composition.update({
       where: { id: composition.id },
-      data: { status: 'COMPLETED', artifactId: artifact.id, subtitleArtifactId },
+      data: { status: 'COMPLETED', artifactId: artifact.id, subtitleArtifactId, scoreArtifactId: music?.id ?? null },
     })
   } catch (error) {
     // BLOCKED (not FAILED) keeps the composition retriggerable once the missing clip lands.

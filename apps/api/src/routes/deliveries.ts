@@ -45,7 +45,13 @@ interface DeliveryManifest {
   source: VersionRef | null
   script: VersionRef | null
   storyboards: ManifestStoryboard[]
-  composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null }
+  composition: {
+    objectKey: string
+    checksum: string
+    mimeType: string
+    durationMs: number | null
+    tracks: ManifestArtifact[]
+  }
   quality: { checks: number; approved: number; rejected: number; threshold: number }
   acceptance?: ManifestAcceptance
 }
@@ -136,9 +142,17 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       }
       if (reasons.length > 0 || !finished || !master) return reply.code(409).send({ error: 'delivery:notReady', reasons })
 
-      const [source, script] = await Promise.all([
+      const [source, script, subtitle, score] = await Promise.all([
         app.db.sourceDocumentVersion.findFirst({ where: { episodeId: episode.id }, orderBy: { version: 'desc' }, select: { version: true, checksum: true, status: true } }),
         app.db.scriptVersion.findFirst({ where: { episodeId: episode.id }, orderBy: { version: 'desc' }, select: { version: true, checksum: true, status: true } }),
+        // Through the composition, not "the newest of the stage": a score regenerated after
+        // the compose is not the one mixed into this file.
+        finished.subtitleArtifactId
+          ? app.db.mediaArtifact.findUnique({ where: { id: finished.subtitleArtifactId } })
+          : Promise.resolve(null),
+        finished.scoreArtifactId
+          ? app.db.mediaArtifact.findUnique({ where: { id: finished.scoreArtifactId } })
+          : Promise.resolve(null),
       ])
       // A check reaches the episode through whichever entity it judged.
       const grouped = await app.db.qualityCheck.groupBy({
@@ -167,7 +181,15 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
           durationMs: storyboard.durationMs,
           artifacts: tasksOf(storyboard.id).flatMap(task => task.artifacts.map(toManifestArtifact)),
         })),
-        composition: { objectKey: master.objectKey, checksum: master.checksum, mimeType: master.mimeType, durationMs: master.durationMs },
+        composition: {
+          objectKey: master.objectKey,
+          checksum: master.checksum,
+          mimeType: master.mimeType,
+          durationMs: master.durationMs,
+          // A silent master owes none of these and an audio master owes both; naming them
+          // here is what lets a reader know what the container holds without opening it.
+          tracks: [subtitle, score].filter((artifact): artifact is MediaArtifact => artifact !== null).map(toManifestArtifact),
+        },
         quality: {
           checks: grouped.reduce((sum, group) => sum + group._count._all, 0),
           approved: counts.APPROVED ?? 0,

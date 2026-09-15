@@ -68,7 +68,9 @@ interface DeliveryManifest {
   source: ManifestVersionRef | null
   script: ManifestVersionRef | null
   storyboards: ManifestStoryboard[]
-  composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null }
+  // Optional because a manifest packaged before tracks existed still loads; the UI reads
+  // an absent list as "not recorded" and an empty one as "the master is silent".
+  composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null; tracks?: ManifestArtifact[] }
   quality: { checks: number; approved: number; rejected: number; threshold: number }
   acceptance?: { acceptedAt?: string; rejectedAt?: string; reason: string | null }
 }
@@ -383,6 +385,26 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                     {manifest.composition.checksum.slice(0, 12)}
                   </span>
                 </span>
+                {manifest.composition.tracks && (
+                  manifest.composition.tracks.length === 0 ? (
+                    <span className="text-muted-foreground block text-xs">{t('delivery.silent')}</span>
+                  ) : (
+                    <div className="block space-y-1 pt-1">
+                      <span className="text-muted-foreground text-xs">{t('delivery.tracks')}</span>
+                      {manifest.composition.tracks.map(track => (
+                        <p key={`${track.objectKey}-${track.version}`} className="text-xs">
+                          <span className="font-medium">{track.stage ? translateEnum(t, 'generations.stage', track.stage) : '—'}</span>
+                          {' · '}
+                          <span className="font-mono break-all">{track.objectKey}</span>
+                          <span className="text-muted-foreground"> · </span>
+                          <span className="text-muted-foreground font-mono" title={track.checksum}>
+                            {track.checksum.slice(0, 12)}
+                          </span>
+                        </p>
+                      ))}
+                    </div>
+                  )
+                )}
               </DetailRow>
               <DetailRow label={t('delivery.quality')}>
                 <span className="text-sm">

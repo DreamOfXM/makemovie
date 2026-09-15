@@ -402,6 +402,10 @@ describe('compose-episode', () => {
     expect(cues).toContain('这条街不能待了。')
     // Only the speaking shot is cued; the silent one carries no subtitle.
     expect(cues.match(/-->/g)).toHaveLength(1)
+    // The bed that went into the file is named by id, so a later regeneration cannot
+    // be mistaken for what the master actually carries.
+    const score = await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'MUSIC', organizationId: seed.organizationId } })
+    expect(updated.scoreArtifactId).toBe(score.id)
   })
 
   it('leaves a dialogue-free episode silent', async () => {
@@ -419,6 +423,7 @@ describe('compose-episode', () => {
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video'])
     expect(updated.subtitleArtifactId).toBeNull()
+    expect(updated.scoreArtifactId).toBeNull()
   })
 
   it('lays a music bed under a silent picture', async () => {
@@ -431,10 +436,14 @@ describe('compose-episode', () => {
     })
     await composeEpisode(env.composePayload(composition.id, seed), env.deps())
 
-    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: (await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })).artifactId! } })
+    const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio'])
     // The looped bed has to cover the whole picture it sits under.
     expect(master.durationMs).toBeGreaterThanOrEqual(1900)
+    // A bed with no cues still gets named: the two track columns are independent.
+    expect(updated.subtitleArtifactId).toBeNull()
+    expect(updated.scoreArtifactId).toBe((await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'MUSIC', organizationId: seed.organizationId } })).id)
   })
 
   it('subtitles a line whose voice never landed', async () => {

@@ -296,6 +296,7 @@ model Composition {
   manifest String
   artifactId String?
   subtitleArtifactId String?
+  scoreArtifactId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 
