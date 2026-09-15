@@ -78,11 +78,15 @@ export function buildSubmitRequest(
   // object: the caller's voice selection is resolved to a DashScope voice name here.
   if (capability.modality === 'tts') {
     const voice = typeof request.parameters.voice === 'string' ? request.parameters.voice : DEFAULT_TTS_VOICE
+    // A spoken line is too short for the model to infer its language from — a name or
+    // a number reads either way — so the project's content language is passed through.
+    // Absent means Chinese, which is every task written before languages were chosen.
+    const languageType = request.input.contentLocale === 'en' ? 'English' : 'Chinese'
     return {
       url: `${base}${VLM_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { text: prompt, voice, language_type: 'Chinese' } },
+      body: { model: request.model, input: { text: prompt, voice, language_type: languageType } },
     }
   }
 

@@ -13,7 +13,9 @@ import {
   listCatalogs,
   MOCK_VLM_VERDICT,
   MOCK_SCRIPT_TEXT,
+  MOCK_SCRIPT_TEXT_EN,
   MOCK_STORYBOARD_JSON,
+  MOCK_STORYBOARD_JSON_EN,
   MockProviderAdapter,
   resetDashScopeSyncResults,
   resetMockTasks,
@@ -179,6 +181,34 @@ describe('mock adapter lifecycle', () => {
     }
     expect(new Set(parsed.assets.map(asset => asset.kind))).toEqual(new Set(['character', 'prop', 'scene']))
   })
+
+  // The offline chain has to run in English too, and the mock is what it runs on.
+  // Both fixtures are asserted against the same shape so a locale that quietly loses
+  // a shot or an asset kind is caught here rather than in a zero-asset episode.
+  it('answers an English request with the same episode in English', async () => {
+    const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
+    const script = capability({ provider: 'mock', model: 'mock-script', modality: 'text' })
+    const board = capability({ provider: 'mock', model: 'mock-storyboard', modality: 'text' })
+    const { taskId: scriptTaskId } = await adapter.submit(script, { model: 'mock-script', input: { contentLocale: 'en' }, parameters: {} })
+    const { taskId: boardTaskId } = await adapter.submit(board, { model: 'mock-storyboard', input: { contentLocale: 'en' }, parameters: {} })
+    await adapter.poll(script, scriptTaskId)
+    await adapter.poll(board, boardTaskId)
+
+    const scriptDone = await adapter.poll(script, scriptTaskId)
+    expect(scriptDone.text).toBe(MOCK_SCRIPT_TEXT_EN)
+    expect(scriptDone.text).not.toBe(MOCK_SCRIPT_TEXT)
+
+    const boardDone = await adapter.poll(board, boardTaskId)
+    expect(boardDone.text).toBe(MOCK_STORYBOARD_JSON_EN)
+    const parsed = JSON.parse(boardDone.text!) as {
+      shots: Array<{ title: string; dialogue: string; speaker: string | null; durationMs: number }>
+      assets: Array<{ kind: string; name: string; description: string }>
+    }
+    expect(parsed.shots.map(shot => shot.durationMs)).toEqual([5000, 4000, 5000])
+    expect(parsed.shots.at(-1)).toMatchObject({ dialogue: '', speaker: null })
+    expect(new Set(parsed.assets.map(asset => asset.kind))).toEqual(new Set(['character', 'prop', 'scene']))
+    expect(parsed.assets.every(asset => /^[A-Za-z]/.test(asset.name))).toBe(true)
+  })
 })
 
 describe('validateReferenceRequest', () => {
@@ -294,6 +324,20 @@ describe('dashscope request building', () => {
     expect(req.body).toEqual({
       model: 'qwen3-tts-flash',
       input: { text: '沈亦：照片背面有字……', voice: 'Cherry', language_type: 'Chinese' },
+    })
+  })
+
+  // The line a voice model reads can be a name or a number, which tells it nothing
+  // about language, so the project's content locale is what selects the reading.
+  it('asks for an English reading when the task carries an English content locale', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'tts', model: 'qwen3-tts-flash' }), {
+      model: 'qwen3-tts-flash',
+      input: { prompt: 'Shen Yi: There is writing on the back.', contentLocale: 'en' },
+      parameters: {},
+    })
+    expect(req.body).toEqual({
+      model: 'qwen3-tts-flash',
+      input: { text: 'Shen Yi: There is writing on the back.', voice: 'Cherry', language_type: 'English' },
     })
   })
 

@@ -1,4 +1,4 @@
-import type { Role, WorkflowStatus } from '@studio/domain'
+import type { ContentLocale, Role, WorkflowStatus } from '@studio/domain'
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4010'
 
@@ -151,6 +151,8 @@ export interface Project {
   organizationId: string
   name: string
   status: DbWorkflowStatus
+  /** Language the pipeline writes this project's content in; not the console locale. */
+  contentLocale: ContentLocale
   createdAt: string
   updatedAt: string
 }

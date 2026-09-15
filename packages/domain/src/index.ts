@@ -6,7 +6,23 @@ export function isWorkflowStatus(value: unknown): value is WorkflowStatus {
 }
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled'
 
-export type ModelModality = 'text' | 'image' | 't2v' | 'i2v' | 'r2v' | 'tts' | 'music' | 'vlm'
+export const modelModalities = ['text', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'vlm'] as const
+export type ModelModality = typeof modelModalities[number]
+
+export function isModelModality(value: unknown): value is ModelModality {
+  return (modelModalities as readonly string[]).includes(value as string)
+}
+
+/**
+ * Language of the *content* the pipeline writes — script, storyboard, prompts.
+ * Independent of the console's own UI locale.
+ */
+export const contentLocales = ['zh', 'en'] as const
+export type ContentLocale = typeof contentLocales[number]
+
+export function isContentLocale(value: unknown): value is ContentLocale {
+  return (contentLocales as readonly string[]).includes(value as string)
+}
 
 export const capabilitySlots = [
   'script_text',

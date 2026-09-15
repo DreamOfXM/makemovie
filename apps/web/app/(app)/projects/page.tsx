@@ -11,7 +11,7 @@ import {
   Trash2Icon,
   WorkflowIcon,
 } from 'lucide-react'
-import { canTransition, minRoleFor, workflowStatuses, type WorkflowStatus } from '@studio/domain'
+import { canTransition, contentLocales, minRoleFor, workflowStatuses, type ContentLocale, type WorkflowStatus } from '@studio/domain'
 import {
   isLiveStoryboard,
   storyboardsPath,
@@ -21,7 +21,7 @@ import {
   type Project,
   type Storyboard,
 } from '@/lib/api'
-import { useI18n } from '@/lib/i18n'
+import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { cn, formatDateTime, formatDuration, relativeTime } from '@/lib/utils'
@@ -299,7 +299,14 @@ export default function ProjectsPage() {
                 <FilmIcon className="text-muted-foreground size-4" />
                 {t('projects.episodes')}
               </CardTitle>
-              <CardDescription>{selectedProject ? selectedProject.name : t('projects.selectHint')}</CardDescription>
+              <CardDescription>
+                {selectedProject
+                  ? t('projects.summary', {
+                      name: selectedProject.name,
+                      contentLanguage: translateEnum(t, 'projects.contentLocale', selectedProject.contentLocale),
+                    })
+                  : t('projects.selectHint')}
+              </CardDescription>
               {selectedProject && (
                 <CardAction>
                   <GuardedButton action="episode:write" size="sm" variant="outline" onClick={() => setEpisodeDialogOpen(true)}>
@@ -593,17 +600,21 @@ interface ProjectDialogProps {
 }
 
 function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProps) {
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const { api } = useSession()
   const [name, setName] = useState('')
+  const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     if (!state) return
     setName(state.mode === 'rename' ? state.project.name : '')
+    // The console language is the only hint available for a brand-new project, and it
+    // is a hint the field below can overrule — never a decision made for the user.
+    setContentLocale(state.mode === 'rename' ? state.project.contentLocale : locale)
     setError('')
-  }, [state])
+  }, [state, locale])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -612,10 +623,10 @@ function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProps) {
     setError('')
     try {
       if (state.mode === 'create') {
-        const created = await api<Project>('/projects', { method: 'POST', body: JSON.stringify({ name }) })
+        const created = await api<Project>('/projects', { method: 'POST', body: JSON.stringify({ name, contentLocale }) })
         onDone('create', created.name)
       } else {
-        await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+        await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
         onDone('rename', name)
       }
     } catch (err) {
@@ -642,6 +653,20 @@ function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProps) {
               required
               autoFocus
             />
+          </Field>
+          <Field label={t('projects.contentLanguageLabel')} htmlFor="projectContentLocale" hint={t('projects.contentLanguageHint')}>
+            <Select value={contentLocale} onValueChange={value => setContentLocale(value as ContentLocale)}>
+              <SelectTrigger id="projectContentLocale">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {contentLocales.map(item => (
+                  <SelectItem key={item} value={item}>
+                    {translateEnum(t, 'projects.contentLocale', item)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>

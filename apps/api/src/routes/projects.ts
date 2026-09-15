@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify'
+import { contentLocales, isContentLocale } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -11,26 +12,46 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  app.post<{ Body: { name?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
+  app.post<{ Body: { name?: string; contentLocale?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
     const auth = request.auth!
     const name = request.body?.name?.trim()
     if (!name) return reply.code(400).send({ error: 'name is required' })
-    const project = await app.db.project.create({ data: { organizationId: auth.organizationId, name } })
-    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name } })
+    const contentLocale = request.body?.contentLocale
+    if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
+      return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
+    }
+    const project = await app.db.project.create({ data: { organizationId: auth.organizationId, name, contentLocale } })
+    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale } })
     return reply.code(201).send(project)
   })
 
-  app.patch<{ Params: { projectId: string }; Body: { name?: string } }>(
+  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string } }>(
     '/projects/:projectId',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'Project not found' })
-      const name = request.body?.name?.trim()
-      if (!name) return reply.code(400).send({ error: 'name is required' })
-      const updated = await app.db.project.update({ where: { id: project.id }, data: { name } })
-      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.update', entityType: 'Project', entityId: project.id, payload: { from: project.name, to: name } })
+      const { name, contentLocale } = request.body ?? {}
+      if (name === undefined && contentLocale === undefined) {
+        return reply.code(400).send({ error: 'name or contentLocale is required' })
+      }
+      if (name !== undefined && !name.trim()) return reply.code(400).send({ error: 'name is required' })
+      if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
+        return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
+      }
+      const updated = await app.db.project.update({
+        where: { id: project.id },
+        data: { ...(name === undefined ? {} : { name: name.trim() }), ...(contentLocale === undefined ? {} : { contentLocale }) },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'project.update',
+        entityType: 'Project',
+        entityId: project.id,
+        payload: { from: { name: project.name, contentLocale: project.contentLocale }, to: { name: updated.name, contentLocale: updated.contentLocale } },
+      })
       return updated
     },
   )

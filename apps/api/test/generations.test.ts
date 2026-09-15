@@ -1641,3 +1641,123 @@ describe('per-shot voice', () => {
     expect(task.storyboardId).toBeNull()
   })
 })
+
+// A project decides what language the models write. These walk an English episode
+// through the stages whose prompt is authored rather than derived from approved
+// content, so a locale that reaches the API but never the vendor request cannot
+// pass unnoticed.
+describe('project content language', () => {
+  async function newProject(name: string, contentLocale?: string): Promise<string> {
+    const res = await env.app.inject({
+      method: 'POST', url: '/projects', headers: authHeaders(ownerToken),
+      payload: { name, ...(contentLocale ? { contentLocale } : {}) },
+    })
+    expect(res.statusCode).toBe(201)
+    return res.json().id as string
+  }
+
+  async function newEpisode(name: string, contentLocale?: string): Promise<{ projectId: string; episodeId: string }> {
+    const projectId = await newProject(name, contentLocale)
+    const episode = await env.app.inject({
+      method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: `${name} EP1` },
+    })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  // Project scope, so these cannot disturb what the earlier tests resolve.
+  async function bindSlot(targetProjectId: string, slot: string, model: string, name: string): Promise<void> {
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    const capability = connection.capabilities.find(candidate => candidate.model === model)!
+    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+    expect(binding.statusCode).toBe(201)
+  }
+
+  async function trigger(targetEpisodeId: string, stage: string): Promise<BatchDto> {
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${targetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+    expect(res.statusCode).toBe(201)
+    return res.json().batch as BatchDto
+  }
+
+  async function requestInput(taskId: string): Promise<{ prompt: string; contentLocale?: string }> {
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: taskId } })
+    return (JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string; contentLocale?: string } }).input
+  }
+
+  it('defaults to Chinese, stores an explicit choice and rejects a language the pipeline cannot write', async () => {
+    const plainProjectId = await newProject('Locale Default Drama')
+    expect((await env.db.project.findUniqueOrThrow({ where: { id: plainProjectId } })).contentLocale).toBe('zh')
+    expect(await newProject('Locale English Drama', 'en')).toBeTruthy()
+
+    const unsupported = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Locale French Drama', contentLocale: 'fr' } })
+    expect(unsupported.statusCode).toBe(400)
+    expect(unsupported.json().error).toContain('contentLocale')
+
+    const renamed = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { name: 'Renamed In Place' } })
+    expect(renamed.statusCode).toBe(200)
+    expect(renamed.json()).toMatchObject({ name: 'Renamed In Place', contentLocale: 'zh' })
+
+    const languageOnly = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { contentLocale: 'en' } })
+    expect(languageOnly.statusCode).toBe(200)
+    expect(languageOnly.json()).toMatchObject({ name: 'Renamed In Place', contentLocale: 'en' })
+
+    const empty = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: {} })
+    expect(empty.statusCode).toBe(400)
+  })
+
+  it('prompts and voices an English project in English', async () => {
+    const { projectId, episodeId } = await newEpisode('English Episode Drama', 'en')
+    await bindSlot(projectId, 'storyboard_text', 'mock-storyboard', 'locale-storyboard')
+    await bindSlot(projectId, 'tts_voice', 'mock-tts', 'locale-tts')
+    await env.db.sourceDocumentVersion.create({
+      data: { episodeId, version: 1, content: 'Novel excerpt: a disappearance on a rainy night in Binjiang.', checksum: `locale-src-${episodeId}`, status: 'APPROVED' },
+    })
+
+    const scriptBatch = await trigger(episodeId, 'SCRIPT')
+    const script = await requestInput(scriptBatch.tasks[0].id)
+    expect(script.contentLocale).toBe('en')
+    // The Chinese template is still the base — the directive is appended to it, which
+    // is what keeps a Chinese project's bytes untouched.
+    expect(script.prompt).toContain('根据以下源文档')
+    expect(script.prompt).toContain('## Output language (highest priority)')
+
+    await env.db.scriptVersion.create({
+      data: { episodeId, version: 1, content: 'Shen Yi lifts a torn photograph out of a puddle.', checksum: `locale-script-${episodeId}`, status: 'APPROVED' },
+    })
+    const boardBatch = await trigger(episodeId, 'STORYBOARD')
+    const board = await requestInput(boardBatch.tasks[0].id)
+    expect(board.contentLocale).toBe('en')
+    // The keys and the kind vocabulary are what the worker parses; an English reply
+    // that translates either yields an episode with no shots, so both must be named.
+    for (const literal of ['"shots"', '"continuityOut"', 'character, prop, scene']) expect(board.prompt).toContain(literal)
+    expect(board.prompt).toContain('## Output language (highest priority)')
+
+    const shot = await env.app.inject({
+      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: {
+        number: 1, title: 'Half a Photograph', durationMs: 4000, description: 'a torn photograph in a gloved hand',
+        dialogue: 'There is writing on the back.', speaker: 'Shen Yi', sourceExcerpt: 'a photograph', continuityIn: '', continuityOut: '',
+      },
+    })
+    expect(shot.statusCode).toBe(201)
+    const audioBatch = await trigger(episodeId, 'AUDIO')
+    expect(await requestInput(audioBatch.tasks[0].id)).toEqual({ prompt: 'Shen Yi: There is writing on the back.', contentLocale: 'en' })
+  })
+
+  it('sends a Chinese project the prompt it has always sent, with no new field at all', async () => {
+    const { episodeId } = await newEpisode('Chinese Episode Drama')
+    await env.db.sourceDocumentVersion.create({
+      data: { episodeId, version: 1, content: '原著节选：雨夜的滨江老城区。', checksum: `zh-locale-src-${episodeId}`, status: 'APPROVED' },
+    })
+
+    const batch = await trigger(episodeId, 'SCRIPT')
+    // Not even a key: the request a Chinese project makes is the one this install has
+    // always sent, which is the whole point of appending rather than rewriting.
+    expect(await requestInput(batch.tasks[0].id)).toEqual({ prompt: '根据以下源文档，写出这一集的完整拍摄剧本：\n\n原著节选：雨夜的滨江老城区。' })
+  })
+})

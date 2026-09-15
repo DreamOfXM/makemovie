@@ -4,7 +4,7 @@ import { rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { MOCK_SCRIPT_TEXT, MOCK_STORYBOARD_JSON, MOCK_VLM_VERDICT } from '@studio/providers'
+import { MOCK_SCRIPT_TEXT, MOCK_SCRIPT_TEXT_EN, MOCK_STORYBOARD_JSON, MOCK_STORYBOARD_JSON_EN, MOCK_VLM_VERDICT } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
 import { composeEpisode } from '../src/compose.js'
 import { recordGeneratedContent } from '../src/content.js'
@@ -23,6 +23,7 @@ const MOCK_STORYBOARD = JSON.parse(MOCK_STORYBOARD_JSON) as {
   shots: Array<{ title: string; description: string }>
   assets: Array<{ kind: string; name: string; description: string }>
 }
+const MOCK_STORYBOARD_EN = JSON.parse(MOCK_STORYBOARD_JSON_EN) as typeof MOCK_STORYBOARD
 
 let env: WorkerTestEnv
 
@@ -563,6 +564,44 @@ describe('AI content generation', () => {
       MOCK_STORYBOARD.assets.map(asset => `${asset.kind}:${asset.name}`).sort(),
     )
     expect(assets.every(asset => asset.status === 'DRAFT' && asset.generationTaskId === task.id)).toBe(true)
+  })
+
+  // The English locale has to be proven through the worker rather than through the
+  // prompt alone: content.ts matches on English key names and drops an asset whose
+  // kind is not character/prop/scene in silence. A locale that leaked into the
+  // protocol instead of the content would produce zero shots, not a failure.
+  it('records an English script when the task carries an English content locale', async () => {
+    const seed = await env.seed({
+      model: 'mock-script',
+      modality: 'text',
+      stage: 'SCRIPT',
+      storyboards: 0,
+      requestSnapshot: JSON.stringify({ model: 'mock-script', input: { prompt: 'Write the episode script.', contentLocale: 'en' }, parameters: {} }),
+    })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const versions = await env.db.scriptVersion.findMany({ where: { episodeId: seed.episodeId } })
+    expect(versions).toHaveLength(1)
+    expect(versions[0]!.content).toBe(MOCK_SCRIPT_TEXT_EN)
+  })
+
+  it('parses an English shot list into the same episode shape as a Chinese one', async () => {
+    const seed = await env.seed({
+      model: 'mock-storyboard',
+      modality: 'text',
+      stage: 'STORYBOARD',
+      storyboards: 0,
+      requestSnapshot: JSON.stringify({ model: 'mock-storyboard', input: { prompt: 'Break the script into shots.', contentLocale: 'en' }, parameters: {} }),
+    })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId }, orderBy: { number: 'asc' } })
+    expect(boards.map(shot => shot.title)).toEqual(MOCK_STORYBOARD_EN.shots.map(shot => shot.title))
+    expect(boards.map(shot => shot.description)).toEqual(MOCK_STORYBOARD_EN.shots.map(shot => shot.description))
+
+    const assets = await env.db.asset.findMany({ where: { episodeId: seed.episodeId } })
+    expect(assets).toHaveLength(MOCK_STORYBOARD_EN.assets.length)
+    expect([...new Set(assets.map(asset => asset.kind))].sort()).toEqual(['character', 'prop', 'scene'])
   })
 
   it('fails the task when the storyboard output is not parseable', async () => {

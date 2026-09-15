@@ -1,7 +1,9 @@
 import type { PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
-import type { CapabilitySlot } from '@studio/domain'
+import type { CapabilitySlot, ContentLocale } from '@studio/domain'
+import { isContentLocale } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
+import { buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
 
 /**
  * Generation orchestration shared by the API (a human triggers a stage) and the
@@ -321,9 +323,16 @@ export async function triggerStage(
     // Superseded shots are history: generating media for them would pay for clips
     // belonging to a breakdown the episode no longer uses, and connecting them to
     // the batch would make the composition walk shots that were replaced.
-    include: { storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] }, assets: { orderBy: { id: 'asc' } } },
+    include: {
+      project: { select: { contentLocale: true } },
+      storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] },
+      assets: { orderBy: { id: 'asc' } },
+    },
   })
   if (!episode) return { ok: false, code: 404, error: 'Episode not found' }
+  // Read off the project rather than passed in, so a human triggering a stage and
+  // the worker advancing into it build the same prompt for the same episode.
+  const locale: ContentLocale = isContentLocale(episode.project.contentLocale) ? episode.project.contentLocale : 'zh'
 
   const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO'
   const perAsset = stage === 'ASSET'
@@ -347,31 +356,18 @@ export async function triggerStage(
   if (stage === 'SCRIPT') {
     const source = await db.sourceDocumentVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, orderBy: { version: 'desc' } })
     if (!source) return { ok: false, code: 409, error: 'generations:noApprovedSource' }
-    contentPrompt = `根据以下源文档，写出这一集的完整拍摄剧本：\n\n${source.content}`
+    contentPrompt = buildScriptPrompt(locale, source.content)
   }
   if (stage === 'STORYBOARD') {
     const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, orderBy: { version: 'desc' } })
     if (!script) return { ok: false, code: 409, error: 'generations:noApprovedScript' }
     scriptVersionId = script.id
-    contentPrompt = [
-      '把以下剧本拆分成连续的分镜镜头，并从中提取这一集要用到的角色、道具和场景。',
-      '只输出一个 JSON 对象，不要任何其它说明，结构如下：',
-      '{"shots":[{"title":"镜头标题","description":"画面与动作","dialogue":"该镜头台词原文（无台词留空字符串）","speaker":"该镜头说话人（无台词留空）","sourceExcerpt":"对应的剧本原文","durationMs":5000,"continuityIn":"承接上一镜","continuityOut":"留给下一镜"}],',
-      '"assets":[{"kind":"character","name":"唯一名称","description":"外形与气质，用于生成参考图"}]}',
-      'shots 按剧情先后排列，镜头编号由顺序决定，不要自己写；durationMs 是该镜头的毫秒时长。',
-      'dialogue 只放这一镜真正说出口的台词原文，动作和旁白不要塞进去；没有台词的镜头留空字符串。',
-      'assets 的 kind 只能是 character、prop、scene 三者之一，同一个人物或物件只写一次。',
-      '',
-      '剧本：',
-      script.content,
-    ].join('\n')
+    contentPrompt = buildStoryboardPrompt(locale, script.content)
   }
   if (stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO' || stage === 'MUSIC') {
     const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, select: { id: true, content: true } })
     if (!script) return { ok: false, code: 409, error: 'generations:noApprovedScript' }
-    if (stage === 'MUSIC') {
-      contentPrompt = `为这一集制作一段可循环的纯器乐背景音乐，贴合以下剧情的情绪与节奏：\n\n${script.content.slice(0, 4000)}`
-    }
+    if (stage === 'MUSIC') contentPrompt = buildMusicPrompt(locale, script.content)
   }
 
   const slot = stageSlots[stage]
@@ -384,19 +380,27 @@ export async function triggerStage(
   const voiced = stage === 'AUDIO' ? selected.filter(storyboard => storyboard.dialogue !== '') : selected
   if (stage === 'AUDIO' && voiced.length === 0) return { ok: false, code: 400, error: 'episode has no shots with dialogue to voice' }
 
+  // The media prompts are deliberately not translated per locale: an asset image, a
+  // shot frame and a clip are described by the storyboard text this stage consumes,
+  // so they are already in the project's language. Only the voice line needs a
+  // formatter, because a speaker marker is script convention rather than content.
   const targets: GenerationTarget[] = perAsset
     ? episode.assets.map(asset => ({ entityId: asset.id, prompt: `${asset.kind} ${asset.name}: ${asset.description}`, assetId: asset.id }))
     : perStoryboard
       ? voiced.map(storyboard => ({
           entityId: storyboard.id,
           prompt: stage === 'AUDIO'
-            ? storyboard.speaker ? `【${storyboard.speaker}】${storyboard.dialogue}` : storyboard.dialogue
+            ? voiceLine(locale, storyboard.speaker, storyboard.dialogue)
             : `${storyboard.title}: ${storyboard.description}`,
           storyboardId: storyboard.id,
         }))
       : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
   const dbStage = stageDbValues[stage]
+  // Carried only when it says something the provider would not otherwise know: a
+  // Chinese task's snapshot keeps the exact shape it had before content languages
+  // existed, so the default path is unchanged all the way to the vendor request.
+  const localeField = locale === 'zh' ? {} : { contentLocale: locale }
   // A regenerate re-runs a stage that already has a batch, so it needs keys that do
   // not collide with the prior run. The revision is appended as a fourth segment,
   // leaving the first three (episode, stage, entity) readable.
@@ -425,8 +429,11 @@ export async function triggerStage(
             idempotencyKey: idempotencyKeys[index],
             ...(target.storyboardId ? { storyboardId: target.storyboardId } : {}),
             // ProviderRequest payload; model and parameters belong to whichever
-            // candidate ends up running, so the worker fills them in.
-            requestSnapshot: JSON.stringify({ input: { prompt: target.prompt }, ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}) }),
+            // candidate ends up running, so the worker fills them in. The locale rides
+            // in `input` because every adapter picks its input keys explicitly, while
+            // `parameters` is forwarded to the vendor as-is — an unknown key there
+            // could be rejected by a request the Chinese project already pays for.
+            requestSnapshot: JSON.stringify({ input: { prompt: target.prompt, ...localeField }, ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}) }),
           })),
         },
       },

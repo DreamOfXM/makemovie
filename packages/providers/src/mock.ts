@@ -1,9 +1,10 @@
-import type { ModelCapability } from '@studio/domain'
+import { isContentLocale, type ContentLocale, type ModelCapability } from '@studio/domain'
 import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
 
 interface MockTask {
   capability: ModelCapability
   polls: number
+  contentLocale: ContentLocale
 }
 
 const tasks = new Map<string, MockTask>()
@@ -43,6 +44,36 @@ export const MOCK_STORYBOARD_JSON = JSON.stringify({
   ],
 })
 
+/**
+ * The same episode in English, shot for shot and asset for asset. The mock answers
+ * with the language the request asked for, otherwise an English project driving the
+ * offline chain would be quietly handed Chinese content and the two halves of the
+ * locale work would never be exercised together.
+ */
+export const MOCK_SCRIPT_TEXT_EN = `Episode 1 — The Visitor on a Rainy Night
+
+Scene 1: A street in the old town of Binjiang, night, rain
+Shen Yi walks up to the police tape under a black umbrella; the neon falls in broken shapes across the wet asphalt.
+Shen Yi: (quietly) This weather again.
+
+Scene 2: The scene
+Shen Yi crouches and lifts a yellowed photograph, torn in half and soaked, out of a puddle.
+Shen Yi: There's writing on the back...`
+
+export const MOCK_STORYBOARD_JSON_EN = JSON.stringify({
+  shots: [
+    { number: 1, title: 'Rain Night Scene', description: 'A street in the old town of Binjiang under a downpour, neon reflected in broken shapes on the wet asphalt. Shen Yi approaches the police tape under a black umbrella, expression grim.', dialogue: 'This weather again.', speaker: 'Shen Yi', sourceExcerpt: 'On a rainy night a baffling disappearance is reported in the old town of Binjiang.', durationMs: 5000, continuityIn: '', continuityOut: 'The camera drifts down toward the ground' },
+    { number: 2, title: 'Half a Photograph', description: 'Close up: gloved, Shen Yi lifts a yellowed black-and-white photograph, torn in half and soaked, out of a puddle; a line of writing is faintly visible on the back.', dialogue: "There's writing on the back...", speaker: 'Shen Yi', sourceExcerpt: 'Only a rain-soaked photograph, torn in half, was found on the ground.', durationMs: 4000, continuityIn: 'The camera drifts down toward the ground', continuityOut: 'Cut to the back of the photograph' },
+    { number: 3, title: 'Watching from the Dark', description: 'In the shadow across the street, the reporter Lin Wanqing photographs the scene with a camera, then turns and disappears into the rain.', dialogue: '', speaker: null, sourceExcerpt: 'Investigative reporter Lin Wanqing is chasing the same older case in secret.', durationMs: 5000, continuityIn: 'Cut to the back of the photograph', continuityOut: '' },
+  ],
+  assets: [
+    { kind: 'character', name: 'Shen Yi', description: 'A detective in his early thirties, close-cropped hair, dark trench coat, always carrying a black umbrella, with a calm and controlled gaze.' },
+    { kind: 'character', name: 'Lin Wanqing', description: 'An investigative reporter around twenty-five, shoulder-length dark hair wet from the rain, in a khaki windbreaker with a DSLR hanging on her chest.' },
+    { kind: 'prop', name: 'Half a Photograph', description: 'A yellowed black-and-white photograph torn in half on the right, corners curled, a line of faded fountain-pen writing on the back.' },
+    { kind: 'scene', name: 'Binjiang Old Town Street in the Rain', description: 'A narrow southern old-town street lined with ageing flats papered in small advertisements, neon signs mirrored in standing water under a hard downpour, yellow-and-black tape closing off the far end.' },
+  ],
+})
+
 export class MockProviderAdapter implements ProviderAdapter {
   provider = 'mock'
 
@@ -56,8 +87,8 @@ export class MockProviderAdapter implements ProviderAdapter {
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     if (this.options.apiKey === 'invalid') throw new Error('mock: invalid api key')
     const taskId = `mock-task-${++counter}`
-    tasks.set(taskId, { capability, polls: 0 })
-    void request
+    const requested = request.input.contentLocale
+    tasks.set(taskId, { capability, polls: 0, contentLocale: isContentLocale(requested) ? requested : 'zh' })
     return { taskId }
   }
 
@@ -67,8 +98,9 @@ export class MockProviderAdapter implements ProviderAdapter {
     task.polls += 1
     if (task.polls < 2) return { status: 'running' }
     if (capability.modality === 'vlm') return { status: 'completed', text: MOCK_VLM_VERDICT }
-    if (capability.model === 'mock-script') return { status: 'completed', text: MOCK_SCRIPT_TEXT }
-    if (capability.model === 'mock-storyboard') return { status: 'completed', text: MOCK_STORYBOARD_JSON }
+    const english = task.contentLocale === 'en'
+    if (capability.model === 'mock-script') return { status: 'completed', text: english ? MOCK_SCRIPT_TEXT_EN : MOCK_SCRIPT_TEXT }
+    if (capability.model === 'mock-storyboard') return { status: 'completed', text: english ? MOCK_STORYBOARD_JSON_EN : MOCK_STORYBOARD_JSON }
     return { status: 'completed', artifactUrl: `mock://artifacts/${taskId}/${capability.modality}` }
   }
 }
