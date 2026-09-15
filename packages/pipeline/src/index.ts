@@ -10,11 +10,11 @@ import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
  * behaves the same whether a person or the worker pushed it forward.
  */
 
-export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO'] as const
+export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
 export type GenerationStage = (typeof generationStages)[number]
 
 /** The stages the pipeline advances through on its own, in order. */
-export const PIPELINE_STAGES = ['SCRIPT', 'STORYBOARD', 'ASSET', 'IMAGE', 'VIDEO'] as const
+export const PIPELINE_STAGES = ['SCRIPT', 'STORYBOARD', 'ASSET', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
 export type PipelineStage = (typeof PIPELINE_STAGES)[number]
 
 const stageSlots: Record<GenerationStage, CapabilitySlot> = {
@@ -24,6 +24,7 @@ const stageSlots: Record<GenerationStage, CapabilitySlot> = {
   IMAGE: 'image_gen',
   VIDEO: 'video_t2v',
   AUDIO: 'tts_voice',
+  MUSIC: 'music_gen',
 }
 
 // Storyboard imagery is modelled as FIRST_FRAME in the schema; the pipeline API
@@ -35,6 +36,7 @@ export const stageDbValues: Record<GenerationStage, Stage> = {
   IMAGE: 'FIRST_FRAME',
   VIDEO: 'VIDEO',
   AUDIO: 'AUDIO',
+  MUSIC: 'MUSIC',
 }
 
 const apiStageByDbStage: Partial<Record<Stage, GenerationStage>> = { FIRST_FRAME: 'IMAGE' }
@@ -69,6 +71,8 @@ export interface LiveStoryboard {
   number: number
   title: string
   durationMs: number
+  /** Spoken lines; the empty string marks a silent shot. */
+  dialogue: string
 }
 
 /**
@@ -81,7 +85,7 @@ export interface LiveStoryboard {
 export async function liveStoryboards(db: PrismaClient, episodeId: string): Promise<LiveStoryboard[]> {
   return db.storyboard.findMany({
     where: { episodeId, supersededAt: null },
-    select: { id: true, revision: true, number: true, title: true, durationMs: true },
+    select: { id: true, revision: true, number: true, title: true, durationMs: true, dialogue: true },
     orderBy: [{ revision: 'asc' }, { number: 'asc' }],
   })
 }
@@ -103,6 +107,26 @@ export async function composedStoryboardIds(db: PrismaClient, episodeId: string)
       storyboardId: { not: null },
       batch: { episodeId },
       artifacts: { some: { stage: 'VIDEO' } },
+    },
+    select: { storyboardId: true },
+  })
+  return new Set(tasks.map(task => task.storyboardId!).filter(Boolean))
+}
+
+/**
+ * The shots whose own voice line has landed: a succeeded AUDIO task for that shot
+ * with an AUDIO artifact, the same per-task lineage rule as clips. Composition
+ * gates on this for shots that actually speak; a silent shot never waits for a
+ * voice track.
+ */
+export async function voicedStoryboardIds(db: PrismaClient, episodeId: string): Promise<Set<string>> {
+  const tasks = await db.generationTask.findMany({
+    where: {
+      status: 'SUCCEEDED',
+      stage: 'AUDIO',
+      storyboardId: { not: null },
+      batch: { episodeId },
+      artifacts: { some: { stage: 'AUDIO' } },
     },
     select: { storyboardId: true },
   })
@@ -135,6 +159,23 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
   if (storyboards.length === 0) return { ready: false, reason: 'composition:noStoryboards' }
   const composed = await composedStoryboardIds(db, episodeId)
   if (storyboards.some(storyboard => !composed.has(storyboard.id))) return { ready: false, reason: 'composition:missingVideo' }
+  // A shot with dialogue but no voice line would compose into a master where that
+  // line is silently missing; a silent shot never blocks. BGM is opportunistic —
+  // composition mixes it in when it landed and stays quiet when it did not.
+  // With no TTS bound at all nobody could ever produce the voice, so the gate is
+  // only raised when the episode's org/project can resolve candidates — otherwise
+  // a dialogue script would deadlock composition on installations that never
+  // signed up for audio.
+  const voiced = await voicedStoryboardIds(db, episodeId)
+  if (storyboards.some(storyboard => storyboard.dialogue !== '')) {
+    const episode = await db.episode.findUnique({ where: { id: episodeId }, select: { projectId: true, project: { select: { organizationId: true } } } })
+    const candidates = episode
+      ? await resolveSlotCandidates(db, episode.project.organizationId, episode.projectId, 'tts_voice')
+      : []
+    if (candidates.length > 0 && storyboards.some(storyboard => storyboard.dialogue !== '' && !voiced.has(storyboard.id))) {
+      return { ready: false, reason: 'composition:missingVoice' }
+    }
+  }
 
   const storyboardIds = storyboards.map(storyboard => storyboard.id)
   const latest = await db.composition.findFirst({ where: { episodeId }, orderBy: { id: 'desc' } })
@@ -208,12 +249,17 @@ async function audit(db: PrismaClient, entry: { organizationId: string; userId: 
  * downstream after a regenerate instead of stalling it on stages that "already
  * ran". A batch that targeted no shots at all has nothing to go stale on.
  */
-export async function nextRunnableStage(db: PrismaClient, episodeId: string): Promise<PipelineStage | null> {
-  const [approvedSource, approvedScript, assetCount, storyboardCount, batches, liveBatches] = await Promise.all([
+export async function nextRunnableStage(
+  db: PrismaClient,
+  episodeId: string,
+  options: { skip?: ReadonlySet<PipelineStage> } = {},
+): Promise<PipelineStage | null> {
+  const [approvedSource, approvedScript, assetCount, storyboardCount, dialogueCount, batches, liveBatches] = await Promise.all([
     db.sourceDocumentVersion.findFirst({ where: { episodeId, status: 'APPROVED' }, select: { id: true } }),
     db.scriptVersion.findFirst({ where: { episodeId, status: 'APPROVED' }, select: { id: true } }),
     db.asset.count({ where: { episodeId } }),
     db.storyboard.count({ where: { episodeId, supersededAt: null } }),
+    db.storyboard.count({ where: { episodeId, supersededAt: null, dialogue: { not: '' } } }),
     db.generationBatch.findMany({ where: { episodeId }, select: { stage: true, _count: { select: { storyboards: true } } } }),
     db.generationBatch.findMany({ where: { episodeId, storyboards: { some: { supersededAt: null } } }, select: { stage: true } }),
   ])
@@ -221,14 +267,19 @@ export async function nextRunnableStage(db: PrismaClient, episodeId: string): Pr
   const run = new Set<Stage>(batches.filter(batch => batch._count.storyboards === 0 || coveringLiveShots.has(batch.stage)).map(batch => batch.stage))
 
   for (const stage of PIPELINE_STAGES) {
+    if (options.skip?.has(stage)) continue
     if (run.has(stageDbValues[stage])) continue
     // An approved script is what SCRIPT exists to produce, so a human who derived or
     // wrote the script themselves has already produced it: planning the stage anyway
     // would buy a generation nobody asked for and leave a second draft behind.
+    // AUDIO only voices shots that speak, so a shotless or dialogue-free episode
+    // never owes it; MUSIC follows the visuals in chain order but needs no more
+    // than an approved script and a live breakdown.
     const ready =
       stage === 'SCRIPT' ? approvedSource !== null && approvedScript === null
       : stage === 'STORYBOARD' ? approvedScript !== null
       : stage === 'ASSET' ? assetCount > 0
+      : stage === 'AUDIO' ? approvedScript !== null && dialogueCount > 0
       : approvedScript !== null && storyboardCount > 0
     if (ready) return stage
   }
@@ -265,7 +316,7 @@ export async function triggerStage(
   })
   if (!episode) return { ok: false, code: 404, error: 'Episode not found' }
 
-  const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO'
+  const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO'
   const perAsset = stage === 'ASSET'
   const selected = perStoryboard
     ? options.storyboardIds
@@ -296,29 +347,45 @@ export async function triggerStage(
     contentPrompt = [
       '把以下剧本拆分成连续的分镜镜头，并从中提取这一集要用到的角色、道具和场景。',
       '只输出一个 JSON 对象，不要任何其它说明，结构如下：',
-      '{"shots":[{"title":"镜头标题","description":"画面与动作","sourceExcerpt":"对应的剧本原文","durationMs":5000,"continuityIn":"承接上一镜","continuityOut":"留给下一镜"}],',
+      '{"shots":[{"title":"镜头标题","description":"画面与动作","dialogue":"该镜头台词原文（无台词留空字符串）","speaker":"该镜头说话人（无台词留空）","sourceExcerpt":"对应的剧本原文","durationMs":5000,"continuityIn":"承接上一镜","continuityOut":"留给下一镜"}],',
       '"assets":[{"kind":"character","name":"唯一名称","description":"外形与气质，用于生成参考图"}]}',
       'shots 按剧情先后排列，镜头编号由顺序决定，不要自己写；durationMs 是该镜头的毫秒时长。',
+      'dialogue 只放这一镜真正说出口的台词原文，动作和旁白不要塞进去；没有台词的镜头留空字符串。',
       'assets 的 kind 只能是 character、prop、scene 三者之一，同一个人物或物件只写一次。',
       '',
       '剧本：',
       script.content,
     ].join('\n')
   }
-  if (stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO') {
-    const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, select: { id: true } })
+  if (stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO' || stage === 'MUSIC') {
+    const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, select: { id: true, content: true } })
     if (!script) return { ok: false, code: 409, error: 'generations:noApprovedScript' }
+    if (stage === 'MUSIC') {
+      contentPrompt = `为这一集制作一段可循环的纯器乐背景音乐，贴合以下剧情的情绪与节奏：\n\n${script.content.slice(0, 4000)}`
+    }
   }
-
-  const targets: GenerationTarget[] = perAsset
-    ? episode.assets.map(asset => ({ entityId: asset.id, prompt: `${asset.kind} ${asset.name}: ${asset.description}`, assetId: asset.id }))
-    : perStoryboard
-      ? selected.map(storyboard => ({ entityId: storyboard.id, prompt: `${storyboard.title}: ${storyboard.description}`, storyboardId: storyboard.id }))
-      : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
   const slot = stageSlots[stage]
   const candidates = await resolveSlotCandidates(db, organizationId, episode.projectId, slot)
   if (candidates.length === 0) return { ok: false, code: 409, error: `no verified candidates for slot ${slot}` }
+
+  // A voice task exists only to speak a line; voicing a silent shot would buy
+  // audio of nothing, and composition never waits for it. AUDIO still connects
+  // the shots it actually planned so a later dialogue edit re-opens the stage.
+  const voiced = stage === 'AUDIO' ? selected.filter(storyboard => storyboard.dialogue !== '') : selected
+  if (stage === 'AUDIO' && voiced.length === 0) return { ok: false, code: 400, error: 'episode has no shots with dialogue to voice' }
+
+  const targets: GenerationTarget[] = perAsset
+    ? episode.assets.map(asset => ({ entityId: asset.id, prompt: `${asset.kind} ${asset.name}: ${asset.description}`, assetId: asset.id }))
+    : perStoryboard
+      ? voiced.map(storyboard => ({
+          entityId: storyboard.id,
+          prompt: stage === 'AUDIO'
+            ? storyboard.speaker ? `【${storyboard.speaker}】${storyboard.dialogue}` : storyboard.dialogue
+            : `${storyboard.title}: ${storyboard.description}`,
+          storyboardId: storyboard.id,
+        }))
+      : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
   const dbStage = stageDbValues[stage]
   // A regenerate re-runs a stage that already has a batch, so it needs keys that do
@@ -339,7 +406,9 @@ export async function triggerStage(
         // Which shots the batch was planned against. `nextRunnableStage` reads this to
         // tell a stage that ran for the live shots from one that only covers superseded
         // ones; the clip of an individual shot comes from the task's own storyboardId.
-        storyboards: { connect: selected.map(storyboard => ({ id: storyboard.id })) },
+        // For AUDIO that set is exactly the shots with dialogue — a shot that gains
+        // its line later is not covered, which re-opens the stage on the next advance.
+        storyboards: { connect: voiced.map(storyboard => ({ id: storyboard.id })) },
         tasks: {
           create: targets.map((target, index) => ({
             organizationId,
@@ -388,19 +457,28 @@ export async function advancePipeline(
   options: { auto?: boolean } = {},
 ): Promise<AdvanceResult> {
   const action = options.auto ? 'pipeline.autoAdvance' : 'pipeline.advance'
-  const stage = await nextRunnableStage(store.db, episodeId)
-  if (stage) {
+  // A stage whose slot has no verified candidates cannot run here at all — the
+  // chain must walk past it, not stall on a capability the installation never
+  // bound. The skip set lives only inside this call: every advance re-derives it,
+  // so binding a TTS later resumes voicing with nothing to unstick.
+  const skip = new Set<PipelineStage>()
+  for (;;) {
+    const stage = await nextRunnableStage(store.db, episodeId, { skip })
+    if (!stage) break
     const result = await triggerStage(store, organizationId, userId, episodeId, stage)
-    if (!result.ok) return result
-    await audit(store.db, {
-      organizationId,
-      userId,
-      action,
-      entityType: 'episode',
-      entityId: episodeId,
-      payload: { stage, batchId: result.batchId },
-    })
-    return { ok: true, step: 'stage', stage, batchId: result.batchId, created: result.created }
+    if (result.ok) {
+      await audit(store.db, {
+        organizationId,
+        userId,
+        action,
+        entityType: 'episode',
+        entityId: episodeId,
+        payload: { stage, batchId: result.batchId },
+      })
+      return { ok: true, step: 'stage', stage, batchId: result.batchId, created: result.created }
+    }
+    if (!result.error.includes('no verified candidates')) return result
+    skip.add(stage)
   }
 
   const plan = await planComposition(store.db, episodeId)
