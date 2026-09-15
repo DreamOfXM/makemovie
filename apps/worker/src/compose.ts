@@ -25,7 +25,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
     }
 
     const output = path.join(workdir, 'composition.mp4')
-    const composed = await deps.composer.compose(clips, output)
+    const composed = await deps.composer.compose({ clips }, output)
     const objectKey = buildObjectKey({
       tenantId: payload.organizationId,
       projectId: composition.episode.projectId,

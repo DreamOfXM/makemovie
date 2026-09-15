@@ -234,12 +234,23 @@ export interface ComposeResult {
   durationMs: number
 }
 
-export interface Composer {
-  /** Concatenates clips in order into a single container file. */
-  compose(clips: string[], output: string): Promise<ComposeResult>
+export interface ComposeInput {
+  /** Final video clips, in shot order. */
+  clips: string[]
+  /** Spoken audio per clip, aligned by index; null or missing means the shot is silent. */
+  voices?: (string | null)[]
+  /** Music bed, looped under the voice at a fixed level and cut to the master. */
+  bgm?: string
+  /** SubRip file muxed as a soft subtitle track; burning in would re-encode the whole video. */
+  srt?: string
 }
 
-async function probeDurationMs(file: string): Promise<number> {
+export interface Composer {
+  /** Concatenates clips in order, mixing voice, music and subtitles in when they exist. */
+  compose(input: ComposeInput, output: string): Promise<ComposeResult>
+}
+
+export async function probeDuration(file: string): Promise<number> {
   try {
     const { stdout } = await run('ffprobe', [
       '-v', 'error',
@@ -253,20 +264,124 @@ async function probeDurationMs(file: string): Promise<number> {
   }
 }
 
+export interface SubtitleEntry {
+  text: string
+  fromMs: number
+  toMs: number
+}
+
+export function buildSrt(entries: SubtitleEntry[]): string {
+  return entries
+    .map((entry, index) => `${index + 1}\n${srtTimestamp(entry.fromMs)} --> ${srtTimestamp(entry.toMs)}\n${entry.text}\n`)
+    .join('\n')
+}
+
+function srtTimestamp(ms: number): string {
+  const clamped = Math.max(0, Math.floor(ms))
+  const pad = (value: number, width: number) => String(value).padStart(width, '0')
+  return `${pad(Math.floor(clamped / 3_600_000), 2)}:${pad(Math.floor(clamped / 60_000) % 60, 2)}:${pad(Math.floor(clamped / 1000) % 60, 2)},${pad(clamped % 1000, 3)}`
+}
+
+const AUDIO_SHAPE = 'aformat=sample_rates=44100:channel_layouts=stereo'
+const BGM_VOLUME = '0.25'
+
 export class FfmpegComposer implements Composer {
-  async compose(clips: string[], output: string): Promise<ComposeResult> {
+  async compose(input: ComposeInput, output: string): Promise<ComposeResult> {
+    const { clips, voices, bgm, srt } = input
     if (clips.length === 0) throw new Error('compose requires at least one clip')
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-compose-'))
-    const list = path.join(workdir, 'clips.txt')
     try {
-      const entries = clips.map(clip => `file '${clip.replaceAll("'", "'\\''")}'`).join('\n')
-      await writeFile(list, entries + '\n')
-      await run('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', output])
-      return { durationMs: await probeDurationMs(output) }
+      const master = path.join(workdir, 'master.mp4')
+      await copyConcat(clips, master, workdir)
+
+      const voice = voices?.some(Boolean) ? await buildVoiceTrack(voices, clips, workdir) : undefined
+      const audio = bgm ? await mixBgm(bgm, voice, master, workdir) : voice
+      if (!audio && !srt) {
+        await rm(output, { force: true })
+        await run('ffmpeg', ['-y', '-v', 'error', '-i', master, '-c', 'copy', output])
+        return { durationMs: await probeDuration(output) }
+      }
+
+      const args = ['-y', '-v', 'error', '-i', master]
+      if (audio) args.push('-i', audio)
+      if (srt) args.push('-i', srt)
+      args.push('-map', '0:v:0')
+      let next = 1
+      if (audio) args.push('-map', `${next++}:a:0`)
+      if (srt) args.push('-map', `${next}:s:0`)
+      args.push('-c:v', 'copy')
+      if (audio) args.push('-c:a', 'aac', '-b:a', '192k')
+      if (srt) args.push('-c:s', 'mov_text', '-metadata:s:s:0', 'language=zho')
+      if (audio) args.push('-shortest')
+      args.push(output)
+      await run('ffmpeg', args)
+      return { durationMs: await probeDuration(output) }
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }
   }
+}
+
+async function copyConcat(clips: string[], target: string, workdir: string): Promise<void> {
+  const list = path.join(workdir, 'clips.txt')
+  const entries = clips.map(clip => `file '${clip.replaceAll("'", "'\\''")}'`).join('\n')
+  await writeFile(list, entries + '\n')
+  await run('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', target])
+}
+
+/**
+ * One segment per clip, each exactly as long as that clip (probed, never the nominal
+ * duration), so the voice track stays in step with the picture even when a provider
+ * misses its target. A voice shorter than its shot is padded with silence; a longer
+ * one is cut at the shot boundary.
+ */
+async function buildVoiceTrack(voices: (string | null)[], clips: string[], workdir: string): Promise<string> {
+  const segments: string[] = []
+  for (const [index, clip] of clips.entries()) {
+    const seconds = Math.max(1, await probeDuration(clip)) / 1000
+    const segment = path.join(workdir, `voice-${index}.wav`)
+    const voice = voices[index]
+    if (voice) {
+      await run('ffmpeg', [
+        '-y', '-v', 'error', '-i', voice,
+        '-af', `${AUDIO_SHAPE},apad,atrim=0:${seconds.toFixed(3)}`,
+        '-c:a', 'pcm_s16le', segment,
+      ])
+    } else {
+      await run('ffmpeg', [
+        '-y', '-v', 'error',
+        '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+        '-t', seconds.toFixed(3),
+        '-c:a', 'pcm_s16le', segment,
+      ])
+    }
+    segments.push(segment)
+  }
+  const list = path.join(workdir, 'voice.txt')
+  await writeFile(list, segments.map(segment => `file '${segment.replaceAll("'", "'\\''")}'`).join('\n') + '\n')
+  const voice = path.join(workdir, 'voice.wav')
+  await run('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', voice])
+  return voice
+}
+
+async function mixBgm(bgm: string, voice: string | undefined, master: string, workdir: string): Promise<string> {
+  const mixed = path.join(workdir, 'mixed.wav')
+  if (!voice) {
+    const seconds = Math.max(1, await probeDuration(master)) / 1000
+    await run('ffmpeg', [
+      '-y', '-v', 'error', '-stream_loop', '-1', '-i', bgm,
+      '-af', `${AUDIO_SHAPE},volume=${BGM_VOLUME}`,
+      '-t', seconds.toFixed(3),
+      '-c:a', 'pcm_s16le', mixed,
+    ])
+    return mixed
+  }
+  await run('ffmpeg', [
+    '-y', '-v', 'error', '-stream_loop', '-1', '-i', bgm, '-i', voice,
+    '-filter_complex', `[0:a]${AUDIO_SHAPE},volume=${BGM_VOLUME}[bed];[1:a]${AUDIO_SHAPE}[speech];[speech][bed]amix=inputs=2:duration=first:normalize=0`,
+    '-vn', '-c:a', 'pcm_s16le', mixed,
+  ])
+  return mixed
 }
 
 /**
@@ -290,7 +405,7 @@ export function frameArgs(inputPath: string, outputPath: string, durationMs: num
 }
 
 export async function extractFrame(inputPath: string, outputPath: string, durationMs?: number): Promise<void> {
-  const known = durationMs ?? await probeDurationMs(inputPath)
+  const known = durationMs ?? await probeDuration(inputPath)
   await run('ffmpeg', frameArgs(inputPath, outputPath, known))
 }
 
