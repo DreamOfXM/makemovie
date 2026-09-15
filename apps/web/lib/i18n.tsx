@@ -21,6 +21,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'nav.audit': 'Audit log',
     'nav.group.production': 'Production',
     'nav.group.platform': 'Platform',
+    'nav.collapse': 'Collapse menu',
+    'nav.expand': 'Expand menu',
 
     'locale.label': 'Language',
     'locale.en': 'English',
@@ -583,6 +585,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'nav.audit': '审计日志',
     'nav.group.production': '生产',
     'nav.group.platform': '平台',
+    'nav.collapse': '收起菜单',
+    'nav.expand': '展开菜单',
 
     'locale.label': '语言',
     'locale.en': 'English',

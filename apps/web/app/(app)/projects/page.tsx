@@ -213,7 +213,7 @@ export default function ProjectsPage() {
 
       {projects.error && <ErrorState message={projects.error} onRetry={projects.reload} />}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,17rem)_minmax(0,1fr)]">
         <Card className="self-start">
           <CardHeader className="border-b [.border-b]:pb-4">
             <CardTitle>{t('projects.title')}</CardTitle>

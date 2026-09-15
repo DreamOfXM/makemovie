@@ -12,6 +12,8 @@ import {
   CpuIcon,
   LogOutIcon,
   MenuIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
   ScrollTextIcon,
   UsersIcon,
   XIcon,
@@ -31,8 +33,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Separator } from '@/components/ui/separator'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { LocaleSwitcher } from '@/components/locale-switcher'
 import { ThemeToggle } from '@/components/theme-toggle'
+
+/** Which way the rail sits is a per-device habit, not account data. */
+const NAV_COLLAPSED_KEY = 'studio.nav.collapsed'
 
 interface NavItem {
   href: string
@@ -161,42 +167,71 @@ function UserMenu() {
   )
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+interface SidebarContentProps {
+  collapsed?: boolean
+  onNavigate?: () => void
+  onToggleCollapsed?: () => void
+}
+
+function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: SidebarContentProps) {
   const { t } = useI18n()
   const { role, can: canPerform } = useSession()
   const pathname = usePathname()
 
   return (
-    <div className="flex h-full flex-col gap-6 p-4">
-      <Link href="/projects" onClick={onNavigate} className="flex items-center gap-3 px-2 py-1">
+    <div className={cn('flex h-full flex-col gap-6 p-4', collapsed && 'items-center gap-4 px-2')}>
+      <Link href="/projects" onClick={onNavigate} className={cn('flex items-center gap-3 py-1', collapsed && 'justify-center')}>
         <span className="from-primary to-primary/60 flex size-9 shrink-0 items-center justify-center rounded-lg bg-linear-to-br text-primary-foreground shadow-sm">
           <ClapperboardIcon className="size-5" />
         </span>
-        <span className="min-w-0">
-          <span className="block truncate text-sm font-semibold">{t('app.title')}</span>
-          <span className="text-muted-foreground block truncate text-xs">{t('app.tagline')}</span>
-        </span>
+        {!collapsed && (
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold">{t('app.title')}</span>
+            <span className="text-muted-foreground block truncate text-xs">{t('app.tagline')}</span>
+          </span>
+        )}
       </Link>
 
-      <nav className="flex-1 space-y-6">
+      {onToggleCollapsed && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className={cn('self-end', collapsed && 'self-center')}
+              aria-label={collapsed ? t('nav.expand') : t('nav.collapse')}
+              onClick={onToggleCollapsed}
+            >
+              {collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">{collapsed ? t('nav.expand') : t('nav.collapse')}</TooltipContent>
+        </Tooltip>
+      )}
+
+      <nav className={cn('flex-1 space-y-6', collapsed && 'space-y-4')}>
         {navGroups.map(group => {
           const items = group.items.filter(item => !item.action || canPerform(item.action))
           if (items.length === 0) return null
           return (
             <div key={group.labelKey} className="space-y-1">
-              <p className="text-muted-foreground px-3 pb-1 text-xs font-medium tracking-wide uppercase">
-                {t(group.labelKey)}
-              </p>
+              {!collapsed && (
+                <p className="text-muted-foreground px-3 pb-1 text-xs font-medium tracking-wide uppercase">
+                  {t(group.labelKey)}
+                </p>
+              )}
               {items.map(item => {
                 const active = pathname === item.href || pathname.startsWith(`${item.href}/`)
-                return (
+                const link = (
                   <Link
                     key={item.href}
                     href={item.href}
                     onClick={onNavigate}
                     aria-current={active ? 'page' : undefined}
+                    aria-label={collapsed ? t(item.labelKey) : undefined}
                     className={cn(
-                      'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                      'group flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
+                      collapsed ? 'justify-center px-2' : 'px-3',
                       active
                         ? 'bg-primary/10 text-primary'
                         : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
@@ -205,8 +240,16 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                     <span className={cn('[&_svg]:size-4.5', active ? 'text-primary' : 'text-muted-foreground')}>
                       {item.icon}
                     </span>
-                    {t(item.labelKey)}
+                    {!collapsed && t(item.labelKey)}
                   </Link>
+                )
+                // An icon with nothing to read is only navigable if it says what it is.
+                if (!collapsed) return link
+                return (
+                  <Tooltip key={item.href}>
+                    <TooltipTrigger asChild>{link}</TooltipTrigger>
+                    <TooltipContent side="right">{t(item.labelKey)}</TooltipContent>
+                  </Tooltip>
                 )
               })}
             </div>
@@ -214,13 +257,15 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         })}
       </nav>
 
-      <div className="space-y-2">
-        <Separator />
-        <div className="flex items-center justify-between gap-2 px-2 pt-1">
-          <span className="text-muted-foreground text-xs">{t('org.role')}</span>
-          <Badge variant="outline">{t(`role.${role ?? 'VIEWER'}`)}</Badge>
+      {!collapsed && (
+        <div className="space-y-2">
+          <Separator />
+          <div className="flex items-center justify-between gap-2 px-2 pt-1">
+            <span className="text-muted-foreground text-xs">{t('org.role')}</span>
+            <Badge variant="outline">{t(`role.${role ?? 'VIEWER'}`)}</Badge>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -228,14 +273,31 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 export function AppShell({ children }: { children: ReactNode }) {
   const { t } = useI18n()
   const [navOpen, setNavOpen] = useState(false)
+  const [navCollapsed, setNavCollapsed] = useState(false)
   const pathname = usePathname()
 
   useEffect(() => setNavOpen(false), [pathname])
+  // Reading the preference during render would ship server markup and hydrate a
+  // different client tree, so the rail expands a frame late instead of flickering.
+  useEffect(() => {
+    setNavCollapsed(window.localStorage.getItem(NAV_COLLAPSED_KEY) === '1')
+  }, [])
+
+  function toggleNavCollapsed() {
+    const next = !navCollapsed
+    setNavCollapsed(next)
+    window.localStorage.setItem(NAV_COLLAPSED_KEY, next ? '1' : '0')
+  }
 
   return (
     <div className="bg-background min-h-dvh">
-      <aside className="border-sidebar-border bg-sidebar fixed inset-y-0 left-0 z-40 hidden w-64 border-r lg:block">
-        <SidebarContent />
+      <aside
+        className={cn(
+          'border-sidebar-border bg-sidebar fixed inset-y-0 left-0 z-40 hidden border-r lg:block',
+          navCollapsed ? 'w-16' : 'w-64',
+        )}
+      >
+        <SidebarContent collapsed={navCollapsed} onToggleCollapsed={toggleNavCollapsed} />
       </aside>
 
       {navOpen && (
@@ -260,7 +322,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       )}
 
-      <div className="flex min-h-dvh flex-col lg:pl-64">
+      <div className={cn('flex min-h-dvh flex-col', navCollapsed ? 'lg:pl-16' : 'lg:pl-64')}>
         <header className="bg-background/80 sticky top-0 z-30 flex h-14 items-center gap-3 border-b px-4 backdrop-blur-md lg:px-6">
           <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setNavOpen(true)} aria-label={t('nav.projects')}>
             <MenuIcon />
