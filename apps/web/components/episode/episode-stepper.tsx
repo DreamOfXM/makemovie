@@ -12,21 +12,21 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { GuardedButton } from '@/components/permission'
 
-const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'generation', 'audio', 'composition', 'delivery'] as const
+const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'media', 'composition', 'delivery'] as const
 type StepKey = (typeof STEP_KEYS)[number]
 type StepStatus = 'done' | 'current' | 'todo'
 
 // Where each step's content lives on the page, so clicking a step scrolls to it.
-// Source and script share the sources panel; generation, audio and composition all
-// live in the one generations panel, which has a single anchor.
+// Source and script share the sources panel. Picture, video and voice are one media
+// step because the console shows them in one table — three steps that all jumped to the
+// same anchor were a click that did nothing.
 const STEP_ANCHOR: Record<StepKey, string> = {
   source: 'step-source',
   script: 'step-source',
   assets: 'step-assets',
   storyboards: 'step-storyboards',
-  generation: 'step-generation',
-  audio: 'step-generation',
-  composition: 'step-generation',
+  media: 'step-media',
+  composition: 'step-composition',
   delivery: 'step-delivery',
 }
 
@@ -107,12 +107,12 @@ export function useEpisodeProgress(episodeId: string | null, storyboardCount: nu
     script: data?.scriptApproved ?? false,
     assets: data?.assetApproved ?? false,
     storyboards: storyboardCount > 0,
-    generation: data?.hasGeneratedMedia ?? false,
-    // A shot list that has not been written yet owes no audio; a silent one only
-    // becomes handled once the score ran or a master exists, because a composed
-    // silent episode is the chain declining sound on purpose.
-    audio:
-      storyboardCount > 0 &&
+    // A shot is not finished until both its picture and its voice exist, so the two
+    // stages the media table shows are settled together. A shot list with no lines
+    // owes no voice and only becomes handled once the score ran or a master exists,
+    // because a composed silent episode is the chain declining sound on purpose.
+    media:
+      Boolean(data?.hasGeneratedMedia) &&
       (audio.speakingShots > 0
         ? audio.voicedShots >= audio.speakingShots
         : Boolean(data && (data.musicCompleted || data.compositionCompleted))),

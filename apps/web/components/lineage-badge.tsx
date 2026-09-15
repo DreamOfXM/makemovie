@@ -6,9 +6,9 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
-// The generation pipeline is where a task can actually be inspected, and every lineage
-// badge is rendered on the workspace page that carries that section.
-const GENERATIONS_ANCHOR = '#step-generation'
+// The media card is where a task can actually be inspected, and every lineage badge is
+// rendered on the workspace page that carries that section.
+const MEDIA_ANCHOR = '#step-media'
 
 interface LineageBadgeProps {
   /**
@@ -45,7 +45,7 @@ export function LineageBadge({ taskId, className }: LineageBadgeProps) {
     <Tooltip>
       <TooltipTrigger asChild>
         {taskId ? (
-          <a href={GENERATIONS_ANCHOR} className="inline-flex">
+          <a href={MEDIA_ANCHOR} className="inline-flex">
             {badge}
           </a>
         ) : (
