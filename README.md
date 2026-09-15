@@ -41,6 +41,7 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Acceptance-gated delivery: a versioned JSON manifest listing every shot's artifacts with checksums, beside the master and the quality counts
 - Artifact storage behind one interface with local-disk and S3-compatible backends
 - Traceability: every generated script, shot, asset and artifact records the task, prompt, provider, model and quality check that produced it
+- Media review organised the way the chain produces: picture, clip and voice listed per shot with per-shot regeneration, and score, subtitles and the master presented as episode-level tracks
 
 **Quality control**
 
@@ -51,7 +52,7 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 | Component | Purpose |
 | --- | --- |
-| `apps/web` | Next.js console: projects, episode workspace, generation panel, sources & scripts, assets, deliveries, model center, members |
+| `apps/web` | Next.js console: projects, episode workspace, media panel, sources & scripts, assets, deliveries, model center, members |
 | `apps/api` | Fastify API: auth, tenancy, catalog and bindings, generation triggers, versioning, deliveries, artifact streaming, audit |
 | `apps/worker` | BullMQ consumer: provider calls, quality gates, content write-back, composition |
 | `packages/domain` | State machines, RBAC matrix, capability slots and binding rules |
@@ -144,7 +145,7 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, state machine, orchestration, queue design, quality gates, storage, security
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow, testing, pull-request checklist
 - [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — the production methodology the pipeline encodes
 
