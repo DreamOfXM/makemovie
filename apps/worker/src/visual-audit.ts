@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PrismaClient } from '@studio/db'
 import { resolveSlotCandidates } from '@studio/db'
-import { extractFrame, extensionFor } from '@studio/media'
+import { extractFrame, extensionFor, toDataUrl } from '@studio/media'
 import { createAdapter, type PollResult, type ProviderRequest } from '@studio/providers'
 import { decryptSecret } from '@studio/security'
 import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
@@ -11,6 +11,12 @@ import { auditPlanFor, QC_THRESHOLD, type AuditPlan, type QcSubject, type QcVerd
 export interface AuditVerdict {
   score: number
   reasons: string[]
+}
+
+/** What the auditor is shown: the artifact itself, or one frame pulled out of it. */
+export interface AuditImage {
+  bytes: Uint8Array
+  mimeType: string
 }
 
 export interface ModelCheckerOptions {
@@ -54,7 +60,7 @@ export class ModelQualityChecker implements QualityChecker {
     const row = await this.db.modelCapability.findUnique({ where: { id: candidate.capabilityId } })
     if (!connection || !row) return unjudged(`visual_audit capability ${candidate.capabilityId} is gone`)
 
-    let image: { bytes: Uint8Array; mimeType: string }
+    let image: AuditImage
     try {
       image = plan === 'image'
         ? { bytes: subject.bytes, mimeType: subject.mimeType }
@@ -73,7 +79,7 @@ export class ModelQualityChecker implements QualityChecker {
       model: candidate.model,
       input: {
         prompt: buildAuditPrompt(subject, plan),
-        images: [`data:${image.mimeType};base64,${Buffer.from(image.bytes).toString('base64')}`],
+        images: auditImages(subject, image),
       },
       parameters: {},
     }
@@ -105,6 +111,19 @@ export class ModelQualityChecker implements QualityChecker {
   }
 }
 
+/**
+ * The artifact under audit is image 1 whether or not a reference follows it, because
+ * every sentence the prompt spends on "the image" means the thing being judged —
+ * swapping the order would have the model compare the reference against itself.
+ */
+export function auditImages(subject: QcSubject, image: AuditImage): string[] {
+  // Already a data URL, and already the bytes the video model saw: re-encoding here
+  // would let the auditor compare a frame nobody conditioned the shot on.
+  return subject.referenceDataUrl
+    ? [toDataUrl(image.bytes, image.mimeType), subject.referenceDataUrl]
+    : [toDataUrl(image.bytes, image.mimeType)]
+}
+
 export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'none'>): string {
   return [
     'You are auditing one artifact produced by an automated film & video production pipeline.',
@@ -116,6 +135,16 @@ export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'n
     '',
     'Judge only what is visible: does it depict the generation prompt, and is it free of obvious defects',
     '(blur, warped anatomy, garbled text, missing or duplicated subjects, compression artefacts)?',
+    // Nothing to have drifted from until a shot is actually generated from a frame, so
+    // an unconditioned audit gets this clause absent rather than weakened.
+    ...(subject.referenceDataUrl
+      ? [
+          'A second image is attached, and it comes after the one described above: the approved first frame this clip was generated from, the exact image the video model was conditioned on.',
+          'Judge the artifact against that reference as well. It must depict the same character, the same prop, the same scene subject: the same face, the same build, the same clothing and the same object, allowing only for the angle, framing and lighting the clip changes.',
+          'A plausible but different person, or an object quietly redesigned between the frame and the clip, is a defect worth flagging. Name it in reasons and score it below the threshold: a cut the audience reads as two different characters is not usable however clean the single frame looks.',
+          '',
+        ]
+      : []),
     'Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}',
     `A score of ${QC_THRESHOLD} or above means the artifact is usable.`,
   ].join('\n')
@@ -152,7 +181,7 @@ function jsonCandidates(text: string): string[] {
   return start !== -1 && end > start ? [trimmed, trimmed.slice(start, end + 1)] : [trimmed]
 }
 
-async function frameOf(subject: QcSubject): Promise<{ bytes: Uint8Array; mimeType: string }> {
+async function frameOf(subject: QcSubject): Promise<AuditImage> {
   // ffmpeg picks the demuxer from the extension, so the clip has to be written
   // back out under its real one rather than a generic temp name.
   const source = path.join(subject.workdir, `audit-source.${extensionFor(subject.mimeType)}`)
