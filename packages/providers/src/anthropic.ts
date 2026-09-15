@@ -1,6 +1,6 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { parseDataUrl, sanitizeError } from './types.js'
+import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { parseDataUrl, probeModel, sanitizeError } from './types.js'
 
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com'
 export const ANTHROPIC_VERSION = '2023-06-01'
@@ -88,6 +88,16 @@ export function maxTokensOf(parameters: Record<string, unknown>): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : ANTHROPIC_DEFAULT_MAX_TOKENS
 }
 
+/** One word in, one token out — the ceiling this endpoint demands makes the cheapest probe a normal call. */
+export function buildAnthropicModelProbeRequest(baseUrl: string, apiKey: string, capability: ModelCapability): ModelProbeRequest {
+  const { url, headers, body } = buildAnthropicMessagesRequest(baseUrl, apiKey, capability, {
+    model: capability.model,
+    input: { prompt: 'ping' },
+    parameters: { max_tokens: 1 },
+  })
+  return { url, headers, body }
+}
+
 /** The answer is a list of blocks and only some of them are prose. */
 export function extractAnthropicText(body: Record<string, unknown> | null): string {
   const content = Array.isArray(body?.content) ? body.content : []
@@ -131,6 +141,14 @@ export class AnthropicAdapter implements ProviderAdapter {
     } catch (error) {
       return { ok: false, status: 0, message: sanitizeError(error instanceof Error ? error.message : error) }
     }
+  }
+
+  async verifyModel(capability: ModelCapability): Promise<ProbeResult> {
+    return probeModel(
+      buildAnthropicModelProbeRequest(this.options.baseUrl, this.options.apiKey, capability),
+      capability.model,
+      body => Array.isArray(body.content),
+    )
   }
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {

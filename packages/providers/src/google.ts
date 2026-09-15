@@ -1,6 +1,6 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { parseDataUrl, sanitizeError } from './types.js'
+import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { parseDataUrl, probeModel, sanitizeError } from './types.js'
 
 export const GOOGLE_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com'
 
@@ -82,7 +82,18 @@ export function googleGenerationConfig(capability: ModelCapability, parameters: 
   if (capability.modality === 'image') generationConfig.responseModalities = ['TEXT', 'IMAGE']
   if (typeof parameters.aspectRatio === 'string') generationConfig.imageConfig = { aspectRatio: parameters.aspectRatio }
   if (typeof parameters.temperature === 'number' && Number.isFinite(parameters.temperature)) generationConfig.temperature = parameters.temperature
+  if (typeof parameters.maxOutputTokens === 'number' && Number.isFinite(parameters.maxOutputTokens)) generationConfig.maxOutputTokens = parameters.maxOutputTokens
   return { generationConfig }
+}
+
+/** One word in, one token out: a probe that could still write an essay is not a cheap check. */
+export function buildGoogleModelProbeRequest(baseUrl: string, apiKey: string, capability: ModelCapability): ModelProbeRequest {
+  const { url, headers, body } = buildGoogleGenerateRequest(baseUrl, apiKey, capability, {
+    model: capability.model,
+    input: { prompt: 'ping' },
+    parameters: { maxOutputTokens: 1 },
+  })
+  return { url, headers, body }
 }
 
 /** Veo takes the prompt inside an `instances` array and answers with an operation, not a clip. */
@@ -197,6 +208,14 @@ export class GoogleAdapter implements ProviderAdapter {
     } catch (error) {
       return { ok: false, status: 0, message: sanitizeError(error instanceof Error ? error.message : error) }
     }
+  }
+
+  async verifyModel(capability: ModelCapability): Promise<ProbeResult> {
+    return probeModel(
+      buildGoogleModelProbeRequest(this.options.baseUrl, this.options.apiKey, capability),
+      capability.model,
+      body => Array.isArray(body.candidates),
+    )
   }
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {

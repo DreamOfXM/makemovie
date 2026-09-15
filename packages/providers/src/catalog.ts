@@ -18,7 +18,8 @@ export interface CatalogModel {
 export interface ProviderCatalog {
   provider: string
   label: string
-  defaultBaseUrl: string
+  /** Absent for vendors whose host is whatever the operator runs, so the connection form must demand one. */
+  defaultBaseUrl?: string
   catalogVersion: string
   /** True for vendors that authenticate with an access key + secret key pair, so the connection form asks for both halves. */
   requiresAccessKey?: boolean
@@ -119,6 +120,19 @@ const anthropic: ProviderCatalog = {
   ],
 }
 
+/**
+ * Not a vendor but a protocol. These gateways (vLLM, LM Studio, OpenRouter, a company
+ * proxy) expose OpenAI's chat, image and speech shapes on a host only the operator
+ * knows, and the model names are theirs, so this catalog carries neither a default URL
+ * nor a single model — both are typed in on the connection.
+ */
+const openaiCompatible: ProviderCatalog = {
+  provider: 'openai_compatible',
+  label: 'OpenAI-compatible gateway',
+  catalogVersion: '2026-09',
+  models: [],
+}
+
 const mock: ProviderCatalog = {
   provider: 'mock',
   label: 'Mock Provider (development & CI)',
@@ -145,6 +159,7 @@ const registry = new Map<string, ProviderCatalog>([
   [openai.provider, openai],
   [google.provider, google],
   [anthropic.provider, anthropic],
+  [openaiCompatible.provider, openaiCompatible],
   [mock.provider, mock],
 ])
 

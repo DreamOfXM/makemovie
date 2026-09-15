@@ -1,6 +1,6 @@
 import type { ModelCapability } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { sanitizeError } from './types.js'
+import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { probeModel, sanitizeError } from './types.js'
 
 const TEXT_PATH = '/api/v1/services/aigc/text-generation/generation'
 const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
@@ -158,6 +158,29 @@ export function buildCredentialProbeRequest(baseUrl: string, apiKey: string): Da
   }
 }
 
+/**
+ * The same ping, addressed to the model being verified. Which endpoint it goes to
+ * follows the modality: a qwen-vl model is served by the multimodal path and not the
+ * text one, so probing every model through one URL would fail the vision rows for the
+ * wrong reason. The vision call carries no `parameters`, because that endpoint's
+ * accepted keys are not something to guess at for a check that is only about identity.
+ */
+export function buildModelProbeRequest(baseUrl: string, apiKey: string, capability: ModelCapability): ModelProbeRequest {
+  const base = baseUrl.replace(/\/+$/, '')
+  if (capability.modality === 'vlm') {
+    return {
+      url: `${base}${VLM_PATH}`,
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: { model: capability.model, input: { messages: [{ role: 'user', content: [{ text: 'ping' }] }] } },
+    }
+  }
+  return {
+    url: `${base}${TEXT_PATH}`,
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: { model: capability.model, input: { messages: [{ role: 'user', content: 'ping' }] }, parameters: { max_tokens: 1 } },
+  }
+}
+
 function extractArtifactUrl(output: Record<string, unknown>): string | undefined {
   if (typeof output.video_url === 'string') return output.video_url
   const results = output.results
@@ -262,6 +285,14 @@ export class DashScopeAdapter implements ProviderAdapter {
     } catch (error) {
       return { ok: false, status: 0, message: sanitizeError(error instanceof Error ? error.message : error) }
     }
+  }
+
+  async verifyModel(capability: ModelCapability): Promise<ProbeResult> {
+    return probeModel(
+      buildModelProbeRequest(this.options.baseUrl, this.options.apiKey, capability),
+      capability.model,
+      body => body.output !== undefined,
+    )
   }
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {

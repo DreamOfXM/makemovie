@@ -84,6 +84,19 @@ export class MockProviderAdapter implements ProviderAdapter {
     return { ok: true, status: 200, message: `mock probe ok for ${capability.model}` }
   }
 
+  /**
+   * The offline stand-in knows its own model names and no others. Agreeing to any
+   * name a caller invents would suppress exactly the mistake this check exists to
+   * catch, so an unknown model fails here just as it does on a live endpoint.
+   */
+  async verifyModel(capability: ModelCapability): Promise<ProbeResult> {
+    if (this.options.apiKey === 'invalid') return { ok: false, status: 401, message: 'mock: invalid api key' }
+    if (!capability.model.startsWith('mock-')) {
+      return { ok: false, status: 404, modelMissing: true, message: `model "${capability.model}" is not served by this endpoint: mock answers mock-* names only` }
+    }
+    return { ok: true, status: 200, message: `model "${capability.model}" answered` }
+  }
+
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     if (this.options.apiKey === 'invalid') throw new Error('mock: invalid api key')
     const taskId = `mock-task-${++counter}`

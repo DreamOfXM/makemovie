@@ -17,6 +17,7 @@ import {
   MOCK_STORYBOARD_JSON,
   MOCK_STORYBOARD_JSON_EN,
   MockProviderAdapter,
+  OpenAICompatibleAdapter,
   resetDashScopeSyncResults,
   resetMockTasks,
   sanitizeError,
@@ -38,14 +39,24 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 describe('catalog', () => {
   it('lists the domestic, overseas and mock catalogs', () => {
     const providers = listCatalogs().map(c => c.provider).sort()
-    expect(providers).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'seedance'])
+    expect(providers).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'openai_compatible', 'seedance'])
     expect(isKnownProvider('dashscope')).toBe(true)
     expect(isKnownProvider('seedance')).toBe(true)
     expect(isKnownProvider('kling')).toBe(true)
     expect(isKnownProvider('openai')).toBe(true)
     expect(isKnownProvider('google')).toBe(true)
     expect(isKnownProvider('anthropic')).toBe(true)
+    expect(isKnownProvider('openai_compatible')).toBe(true)
     expect(isKnownProvider('nope')).toBe(false)
+  })
+
+  // A gateway hands us its own model names on a host only the operator knows, so
+  // inventing either one here would be a guess dressed up as a recommendation.
+  it('leaves the openai-compatible catalog to the operator: no host, no models', () => {
+    const catalog = getCatalog('openai_compatible')
+    expect(catalog).toBeDefined()
+    expect(catalog!.models).toEqual([])
+    expect(catalog!.defaultBaseUrl).toBeUndefined()
   })
 
   // The overseas adapters ship without ever having met a real account, and that is the
@@ -117,6 +128,7 @@ describe('createAdapter', () => {
     expect(createAdapter('dashscope', { apiKey: 'k', baseUrl: 'https://dashscope.aliyuncs.com' }).provider).toBe('dashscope')
     expect(createAdapter('seedance', { apiKey: 'k', baseUrl: 'https://ark.cn-beijing.volces.com' })).toBeInstanceOf(SeedanceAdapter)
     expect(createAdapter('kling', { apiKey: 'secret', accessKey: 'public', baseUrl: 'https://api-beijing.klingai.com' })).toBeInstanceOf(KlingAdapter)
+    expect(createAdapter('openai_compatible', { apiKey: 'k', baseUrl: 'http://127.0.0.1:8000/v1' })).toBeInstanceOf(OpenAICompatibleAdapter)
     expect(() => createAdapter('unknown', { apiKey: 'k', baseUrl: '' })).toThrow(/unknown provider/)
   })
 })

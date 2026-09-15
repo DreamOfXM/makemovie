@@ -1,6 +1,6 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { sanitizeError } from './types.js'
+import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { probeModel, sanitizeError } from './types.js'
 
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com'
 
@@ -94,6 +94,16 @@ export function mergeOpenAIChatParameters(parameters: Record<string, unknown>): 
   if (typeof parameters.temperature === 'number' && Number.isFinite(parameters.temperature)) merged.temperature = parameters.temperature
   if (typeof parameters.max_completion_tokens === 'number' && Number.isFinite(parameters.max_completion_tokens)) merged.max_completion_tokens = parameters.max_completion_tokens
   return merged
+}
+
+/** One word in, one token out: the cheapest call that can still name a model. */
+export function buildOpenAIModelProbeRequest(baseUrl: string, apiKey: string, capability: ModelCapability): ModelProbeRequest {
+  const { url, headers, body } = buildOpenAIChatRequest(baseUrl, apiKey, capability, {
+    model: capability.model,
+    input: { prompt: 'ping' },
+    parameters: { max_completion_tokens: 1 },
+  })
+  return { url, headers, body }
 }
 
 export function buildOpenAIImageRequest(baseUrl: string, apiKey: string, request: ProviderRequest): OpenAIHttpRequest {
@@ -276,6 +286,14 @@ export class OpenAIAdapter implements ProviderAdapter {
     } catch (error) {
       return { ok: false, status: 0, message: sanitizeError(error instanceof Error ? error.message : error) }
     }
+  }
+
+  async verifyModel(capability: ModelCapability): Promise<ProbeResult> {
+    return probeModel(
+      buildOpenAIModelProbeRequest(this.options.baseUrl, this.options.apiKey, capability),
+      capability.model,
+      body => Array.isArray(body.choices) && body.choices.length > 0,
+    )
   }
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {

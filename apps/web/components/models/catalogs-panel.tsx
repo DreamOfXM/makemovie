@@ -46,7 +46,8 @@ export function CatalogsPanel({ catalogs }: { catalogs: AsyncState<Catalog[]> })
                       <Badge variant="outline">{catalog.provider}</Badge>
                     </CardTitle>
                     <CardDescription className="truncate font-mono text-xs">
-                      {catalog.defaultBaseUrl} · {t('models.catalogVersion')} {catalog.catalogVersion}
+                      {catalog.defaultBaseUrl ?? t('models.hostFromOperator')} · {t('models.catalogVersion')}{' '}
+                      {catalog.catalogVersion}
                     </CardDescription>
                   </div>
                 </div>

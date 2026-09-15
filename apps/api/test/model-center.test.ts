@@ -28,14 +28,19 @@ describe('provider catalogs', () => {
     const owner = await env.register('mc-catalog@example.com', 'Catalog Org')
     const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
-    const catalogs = res.json() as { provider: string; defaultBaseUrl: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
-    expect(catalogs.map(c => c.provider).sort()).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'seedance'])
+    const catalogs = res.json() as { provider: string; defaultBaseUrl?: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
+    expect(catalogs.map(c => c.provider).sort()).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'openai_compatible', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
     expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
     const seedance = catalogs.find(c => c.provider === 'seedance')!
     expect(seedance.defaultBaseUrl).toBe('https://ark.cn-beijing.volces.com')
     expect(catalogs.find(c => c.provider === 'kling')!.defaultBaseUrl).toBe('https://api-beijing.klingai.com')
     expect(catalogs.filter(c => c.requiresAccessKey).map(c => c.provider)).toEqual(['kling'])
+    // A gateway has no host and no model list we could name for the operator, so the
+    // form has to demand both instead of pre-filling a guess.
+    const gateway = catalogs.find(c => c.provider === 'openai_compatible')!
+    expect(gateway.defaultBaseUrl).toBeUndefined()
+    expect(gateway.models).toEqual([])
   })
 
   it('rejects anonymous access', async () => {
@@ -308,6 +313,217 @@ describe('entitlement probing', () => {
     expect(capabilities.every(c => c.probeStatus === 'failed' && c.entitlementVerifiedAt === null)).toBe(true)
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.lastError).toBeTruthy()
+  })
+})
+
+describe('models entered by hand', () => {
+  const addModel = (token: string, connectionId: string, payload: Record<string, unknown>) =>
+    env.app.inject({ method: 'POST', url: `/providers/connections/${connectionId}/models`, headers: authHeaders(token), payload })
+
+  it('refuses a gateway connection with no host to point at', async () => {
+    const owner = await env.register('mc-gateway@example.com', 'Gateway Org')
+    const res = await env.app.inject({
+      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'openai_compatible', name: 'vllm-local', apiKey: 'k' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toContain('baseUrl is required')
+
+    const filled = await env.app.inject({
+      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'openai_compatible', name: 'vllm-local', apiKey: 'k', baseUrl: 'http://127.0.0.1:8000/v1' },
+    })
+    // A gateway is a socket the worker will actually open, so the address guard that
+    // skips the mock provider applies here — a local vLLM needs the operator's opt-in.
+    expect(filled.statusCode).toBe(400)
+    expect(filled.json().error).toContain('STUDIO_ALLOW_PRIVATE_PROVIDER_URLS')
+
+    const permissive = await buildApp({ config: { ...env.config, allowPrivateProviderUrls: true }, db: env.db, logger: false })
+    await permissive.ready()
+    try {
+      const opened = await permissive.inject({
+        method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+        payload: { provider: 'openai_compatible', name: 'vllm-typed', apiKey: 'k', baseUrl: 'http://127.0.0.1:8000/v1' },
+      })
+      expect(opened.statusCode).toBe(201)
+      expect(opened.json().capabilities).toEqual([])
+      expect(opened.json().baseUrl).toBe('http://127.0.0.1:8000/v1')
+    } finally {
+      await permissive.close()
+    }
+  })
+
+  it('accepts a named model, refuses to repeat one, and rejects a modality we do not speak', async () => {
+    const owner = await env.register('mc-add@example.com', 'Add Model Org')
+    const connection = await createMockConnection(owner.token, 'add-main')
+    expect(connection.capabilities).toHaveLength(10)
+
+    const added = await addModel(owner.token, connection.id, { model: '  qwen2.5-72b-instruct  ', modality: 'text', displayName: 'Lab Qwen' })
+    expect(added.statusCode).toBe(201)
+    expect(added.json()).toMatchObject({ model: 'qwen2.5-72b-instruct', displayName: 'Lab Qwen', modality: 'text', acceptsFirstFrame: false, maxReferenceImages: 0, probeStatus: 'unverified' })
+
+    const listed = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const rows = listed.json() as Connection[]
+    expect(rows.find(c => c.id === connection.id)!.capabilities.map(c => c.model)).toContain('qwen2.5-72b-instruct')
+
+    const again = await addModel(owner.token, connection.id, { model: 'qwen2.5-72b-instruct', modality: 'text' })
+    expect(again.statusCode).toBe(409)
+    expect(again.json().error).toContain('already configured on this connection')
+
+    // Same name on another connection is a different model on a different host.
+    const other = await createMockConnection(owner.token, 'add-alt')
+    expect((await addModel(owner.token, other.id, { model: 'qwen2.5-72b-instruct', modality: 'text' })).statusCode).toBe(201)
+
+    expect((await addModel(owner.token, connection.id, { modality: 'text' })).statusCode).toBe(400)
+    const badModality = await addModel(owner.token, connection.id, { model: 'm', modality: 'video' })
+    expect(badModality.statusCode).toBe(400)
+    expect(badModality.json().error).toContain('r2v')
+    expect((await addModel(owner.token, connection.id, { model: 'x'.repeat(121), modality: 'text' })).statusCode).toBe(400)
+  })
+
+  it('refuses to store reference-input claims about a model that cannot take them', async () => {
+    const owner = await env.register('mc-flags@example.com', 'Flags Org')
+    const connection = await createMockConnection(owner.token, 'flags-main')
+
+    // Silently dropping the flag would leave a row that fails at generation time with
+    // a message about reference media, several steps away from where it was set.
+    const onText = await addModel(owner.token, connection.id, { model: 'claim-text', modality: 'text', acceptsFirstFrame: true })
+    expect(onText.statusCode).toBe(400)
+    expect(onText.json().error).toMatch(/not a "text" one/)
+    const tooMany = await addModel(owner.token, connection.id, { model: 'claim-i2v', modality: 'i2v', maxReferenceImages: 9 })
+    expect(tooMany.statusCode).toBe(400)
+    expect(tooMany.json().error).toMatch(/between 0 and 8/)
+
+    const honest = await addModel(owner.token, connection.id, { model: 'claim-r2v', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
+    expect(honest.statusCode).toBe(201)
+    expect(honest.json()).toMatchObject({ modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(11)
+  })
+
+  it('blocks deleting a row a slot still points at, then lets it go', async () => {
+    const owner = await env.register('mc-delmodel@example.com', 'Delete Model Org')
+    const connection = await createMockConnection(owner.token, 'delmodel-main')
+    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    const added = await addModel(owner.token, connection.id, { model: 'mock-disposable', modality: 'text' })
+    const capabilityId = added.json().id as string
+    await env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(owner.token) })
+
+    const bind = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
+    expect(bind.statusCode).toBe(201)
+
+    const blocked = await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.json().error).toMatch(/still bound to 1 slot/)
+
+    expect((await env.app.inject({ method: 'DELETE', url: `/bindings/${bind.json().id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+    expect((await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+    expect(await env.db.modelCapability.findUnique({ where: { id: capabilityId } })).toBeNull()
+    // Deleting a whole connection still has to reach the rows the catalog never offered.
+    expect((await env.app.inject({ method: 'DELETE', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+  })
+
+  it('keeps another organisation’s rows invisible to both write routes', async () => {
+    const a = await env.register('mc-model-tenant-a@example.com', 'Model Tenant A')
+    const b = await env.register('mc-model-tenant-b@example.com', 'Model Tenant B')
+    const connection = await createMockConnection(a.token, 'model-tenant-main')
+    const capabilityId = connection.capabilities.find(c => c.model === 'mock-text')!.id
+
+    expect((await addModel(b.token, connection.id, { model: 'mock-sneak', modality: 'text' })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(b.token) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(b.token) })).statusCode).toBe(404)
+    expect((await addModel(a.token, 'does-not-exist', { model: 'mock-x', modality: 'text' })).statusCode).toBe(404)
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(10)
+  })
+})
+
+describe('per-model verification', () => {
+  const probeModel = (token: string, capabilityId: string) =>
+    env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(token) })
+
+  it('verifies one model at a time and makes only that row bindable', async () => {
+    const owner = await env.register('mc-single@example.com', 'Single Probe Org')
+    const connection = await createMockConnection(owner.token, 'single-main')
+    const added = await env.app.inject({
+      method: 'POST', url: `/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
+      payload: { model: 'mock-entered', modality: 'text' },
+    })
+    const capabilityId = added.json().id as string
+
+    const unverified = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
+    expect(unverified.statusCode).toBe(422)
+    expect(unverified.json().error).toMatch(/no verified entitlement/)
+
+    const probed = await probeModel(owner.token, capabilityId)
+    expect(probed.statusCode).toBe(200)
+    expect(probed.json()).toMatchObject({ ok: true, model: 'mock-entered', modality: 'text' })
+
+    expect((await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })).statusCode).toBe(201)
+    // The connection-wide probe stamps every row at once; this one may not.
+    const rows = await env.db.modelCapability.findMany({ where: { connectionId: connection.id } })
+    expect(rows.find(r => r.id === capabilityId)!.entitlementVerifiedAt).toBeTruthy()
+    expect(rows.filter(r => r.id !== capabilityId).every(r => r.entitlementVerifiedAt === null)).toBe(true)
+  })
+
+  it('records a model the endpoint denies as failed and drops the belief in it', async () => {
+    const owner = await env.register('mc-deny@example.com', 'Deny Org')
+    const connection = await createMockConnection(owner.token, 'deny-main')
+    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    const added = await env.app.inject({
+      method: 'POST', url: `/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
+      payload: { model: 'typo-model-name', modality: 'text' },
+    })
+    const capabilityId = added.json().id as string
+    await env.db.modelCapability.update({ where: { id: capabilityId }, data: { entitlementVerifiedAt: new Date() } })
+
+    const probed = await probeModel(owner.token, capabilityId)
+    expect(probed.statusCode).toBe(200)
+    expect(probed.json()).toMatchObject({ ok: false, status: 404, modelMissing: true })
+    expect(probed.json().message).toMatch(/is not served by this endpoint/)
+
+    const row = await env.db.modelCapability.findUniqueOrThrow({ where: { id: capabilityId } })
+    expect(row.probeStatus).toBe('failed')
+    expect(row.entitlementVerifiedAt).toBeNull()
+    // Evidence about one name, not about the line: the catalog rows keep their stamp.
+    const kept = await env.db.modelCapability.findFirstOrThrow({ where: { connectionId: connection.id, model: 'mock-text' } })
+    expect(kept.entitlementVerifiedAt).toBeTruthy()
+    const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
+    expect(stored.lastError).toContain('typo-model-name')
+  })
+
+  it('refuses to spend money or invent a green light for a model it cannot ask about', async () => {
+    const owner = await env.register('mc-refuse@example.com', 'Refuse Org')
+    const connection = await createMockConnection(owner.token, 'refuse-main')
+    const video = connection.capabilities.find(c => c.model === 'mock-t2v')!
+
+    const spendable = await probeModel(owner.token, video.id)
+    expect(spendable.statusCode).toBe(400)
+    expect(spendable.json().error).toMatch(/cannot be probed without spending on it/)
+    const untouched = await env.db.modelCapability.findUniqueOrThrow({ where: { id: video.id } })
+    expect(untouched.probeStatus).toBe('unverified')
+    expect(untouched.lastProbedAt).toBeNull()
+
+    // A seedance connection can carry a hand-entered text row, and that vendor has no
+    // request that names a model without generating from it.
+    const seedance = await env.app.inject({
+      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'seedance', name: 'refuse-ark', apiKey: 'test-ark-key' },
+    })
+    const entered = await env.app.inject({
+      method: 'POST', url: `/providers/connections/${seedance.json().id}/models`, headers: authHeaders(owner.token),
+      payload: { model: 'ark-text-pro', modality: 'text' },
+    })
+    expect(entered.statusCode).toBe(201)
+    const noAsk = await probeModel(owner.token, entered.json().id as string)
+    expect(noAsk.statusCode).toBe(400)
+    expect(noAsk.json().error).toMatch(/names a single model without generating from it/)
+  })
+
+  it('will not verify a model on a connection the operator turned off', async () => {
+    const owner = await env.register('mc-off@example.com', 'Off Org')
+    const connection = await createMockConnection(owner.token, 'off-main')
+    const capabilityId = connection.capabilities.find(c => c.model === 'mock-text')!.id
+    await env.app.inject({ method: 'PATCH', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
+    expect((await probeModel(owner.token, capabilityId)).statusCode).toBe(409)
   })
 })
 

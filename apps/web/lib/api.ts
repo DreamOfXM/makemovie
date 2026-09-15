@@ -56,7 +56,8 @@ export interface CatalogModel {
 export interface Catalog {
   provider: string
   label: string
-  defaultBaseUrl: string
+  /** Absent for providers that are a protocol rather than a vendor: the host is the operator's to type. */
+  defaultBaseUrl?: string
   catalogVersion: string
   requiresAccessKey?: boolean
   models: CatalogModel[]
@@ -96,6 +97,8 @@ export interface ProbeResult {
   ok: boolean
   status: number
   message?: string
+  /** The endpoint answered and denied serving this model — evidence about the row, unlike a timeout. */
+  modelMissing?: boolean
 }
 
 export interface ProbeResponse {

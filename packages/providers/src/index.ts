@@ -7,6 +7,7 @@ export * from './kling.js'
 export * from './openai.js'
 export * from './google.js'
 export * from './anthropic.js'
+export * from './openai-compatible.js'
 
 import type { ProviderAdapter } from './types.js'
 import type { AdapterOptions } from './types.js'
@@ -17,6 +18,7 @@ import { KlingAdapter } from './kling.js'
 import { OpenAIAdapter } from './openai.js'
 import { GoogleAdapter } from './google.js'
 import { AnthropicAdapter } from './anthropic.js'
+import { OpenAICompatibleAdapter } from './openai-compatible.js'
 import { getCatalog } from './catalog.js'
 
 export function createAdapter(provider: string, options: AdapterOptions): ProviderAdapter {
@@ -27,6 +29,7 @@ export function createAdapter(provider: string, options: AdapterOptions): Provid
   if (provider === 'openai') return new OpenAIAdapter(options)
   if (provider === 'google') return new GoogleAdapter(options)
   if (provider === 'anthropic') return new AnthropicAdapter(options)
+  if (provider === 'openai_compatible') return new OpenAICompatibleAdapter(options)
   throw new Error(`unknown provider "${provider}"`)
 }
 

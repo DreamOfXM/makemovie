@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
+import { modelModalities } from '@studio/domain'
 import {
   CircleAlertIcon,
   KeyRoundIcon,
@@ -10,9 +11,10 @@ import {
   PlugIcon,
   PlusIcon,
   RadioTowerIcon,
+  ShieldCheckIcon,
   Trash2Icon,
 } from 'lucide-react'
-import type { Capability, Catalog, Connection, ProbeResponse } from '@/lib/api'
+import type { Capability, Catalog, Connection, ProbeResponse, ProbeResult } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import type { AsyncState } from '@/lib/use-async'
@@ -52,6 +54,10 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 
 type DialogState = { mode: 'create' } | { mode: 'edit'; connection: Connection } | null
+/** One confirm dialog serves both deletes; a model row is removed from a line, a line takes its models with it. */
+type DeleteTarget = { connection: Connection; capability: null } | { connection: Connection; capability: Capability }
+/** Only the chat family can be asked about one model without paying for an answer. */
+const PROBEABLE_MODALITIES = new Set(['text', 'vlm'])
 
 interface ConnectionsPanelProps {
   connections: AsyncState<Connection[]>
@@ -62,8 +68,10 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
   const { t } = useI18n()
   const { api } = useSession()
   const [dialog, setDialog] = useState<DialogState>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Connection | null>(null)
+  const [modelDialog, setModelDialog] = useState<Connection | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [probingId, setProbingId] = useState<string | null>(null)
+  const [verifyingId, setVerifyingId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
 
   async function probe(connection: Connection) {
@@ -82,6 +90,20 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
     }
   }
 
+  async function verifyModel(capability: Capability) {
+    setVerifyingId(capability.id)
+    try {
+      const result = await api<ProbeResult>(`/providers/capabilities/${capability.id}/probe`, { method: 'POST' })
+      if (result.ok) toast.success(t('models.modelVerified', { model: capability.model }))
+      else toast.error(result.message ?? t('models.modelNotVerified', { model: capability.model }))
+      connections.reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setVerifyingId(null)
+    }
+  }
+
   async function toggleEnabled(connection: Connection, enabled: boolean) {
     try {
       await api(`/providers/connections/${connection.id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
@@ -91,11 +113,16 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
     }
   }
 
-  async function removeConnection(connection: Connection) {
+  async function removeTarget(target: DeleteTarget) {
     setDeleting(true)
     try {
-      await api(`/providers/connections/${connection.id}`, { method: 'DELETE' })
-      toast.success(t('models.deleted', { name: connection.name }))
+      if (target.capability) {
+        await api(`/providers/capabilities/${target.capability.id}`, { method: 'DELETE' })
+        toast.success(t('models.modelDeleted', { model: target.capability.model }))
+      } else {
+        await api(`/providers/connections/${target.connection.id}`, { method: 'DELETE' })
+        toast.success(t('models.deleted', { name: target.connection.name }))
+      }
       setDeleteTarget(null)
       connections.reload()
     } catch (error) {
@@ -133,10 +160,14 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
               key={connection.id}
               connection={connection}
               probing={probingId === connection.id}
+              verifyingId={verifyingId}
               onProbe={() => probe(connection)}
+              onVerify={capability => void verifyModel(capability)}
+              onAddModel={() => setModelDialog(connection)}
+              onDeleteCapability={capability => setDeleteTarget({ connection, capability })}
               onToggle={enabled => toggleEnabled(connection, enabled)}
               onEdit={() => setDialog({ mode: 'edit', connection })}
-              onDelete={() => setDeleteTarget(connection)}
+              onDelete={() => setDeleteTarget({ connection, capability: null })}
             />
           ))}
         </div>
@@ -154,13 +185,31 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
         }}
       />
 
+      <AddModelDialog
+        key={modelDialog?.id ?? 'no-model'}
+        connection={modelDialog}
+        onOpenChange={open => !open && setModelDialog(null)}
+        onAdded={name => {
+          setModelDialog(null)
+          toast.success(t('models.modelAdded', { model: name }))
+          connections.reload()
+        }}
+      />
+
       <AlertDialog open={deleteTarget !== null} onOpenChange={open => !deleting && !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('models.deleteTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {deleteTarget?.capability ? t('models.deleteModelTitle') : t('models.deleteTitle')}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {deleteTarget &&
-                t('models.deleteBody', { name: deleteTarget.name, count: deleteTarget.capabilities.length })}
+              {deleteTarget?.capability
+                ? t('models.deleteModelBody', { model: deleteTarget.capability.model })
+                : deleteTarget &&
+                  t('models.deleteBody', {
+                    name: deleteTarget.connection.name,
+                    count: deleteTarget.connection.capabilities.length,
+                  })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -170,7 +219,7 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
               disabled={deleting}
               onClick={event => {
                 event.preventDefault()
-                if (deleteTarget) void removeConnection(deleteTarget)
+                if (deleteTarget) void removeTarget(deleteTarget)
               }}
             >
               {deleting ? t('common.loading') : t('common.delete')}
@@ -185,13 +234,28 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
 interface ConnectionCardProps {
   connection: Connection
   probing: boolean
+  verifyingId: string | null
   onProbe(): void
+  onVerify(capability: Capability): void
+  onAddModel(): void
+  onDeleteCapability(capability: Capability): void
   onToggle(enabled: boolean): void
   onEdit(): void
   onDelete(): void
 }
 
-function ConnectionCard({ connection, probing, onProbe, onToggle, onEdit, onDelete }: ConnectionCardProps) {
+function ConnectionCard({
+  connection,
+  probing,
+  verifyingId,
+  onProbe,
+  onVerify,
+  onAddModel,
+  onDeleteCapability,
+  onToggle,
+  onEdit,
+  onDelete,
+}: ConnectionCardProps) {
   const { t, locale } = useI18n()
   const { can, denyReason } = usePermission()
   const manage = can('providers:manage')
@@ -306,10 +370,16 @@ function ConnectionCard({ connection, probing, onProbe, onToggle, onEdit, onDele
       <div className="border-t">
         <div className="flex items-center justify-between gap-3 px-6 py-3">
           <p className="text-sm font-medium">{t('models.capabilities')}</p>
-          <Badge variant="muted">{t('models.capabilityCount', { count: connection.capabilities.length })}</Badge>
+          <div className="flex items-center gap-3">
+            <Badge variant="muted">{t('models.capabilityCount', { count: connection.capabilities.length })}</Badge>
+            <GuardedButton action="providers:manage" variant="ghost" size="sm" onClick={onAddModel}>
+              <PlusIcon />
+              {t('models.addModel')}
+            </GuardedButton>
+          </div>
         </div>
         {connection.capabilities.length === 0 ? (
-          <p className="text-muted-foreground px-6 pb-6 text-sm">{t('models.noCapabilities')}</p>
+          <p className="text-muted-foreground px-6 pb-6 text-sm">{t('models.emptyConnection')}</p>
         ) : (
           <Table>
             <TableHeader>
@@ -320,11 +390,19 @@ function ConnectionCard({ connection, probing, onProbe, onToggle, onEdit, onDele
                 <TableHead>{t('models.probe')}</TableHead>
                 <TableHead>{t('models.entitlement')}</TableHead>
                 <TableHead>{t('common.details')}</TableHead>
+                <TableHead className="w-20 text-right">{t('common.actions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {connection.capabilities.map(capability => (
-                <CapabilityRow key={capability.id} capability={capability} locale={locale} />
+                <CapabilityRow
+                  key={capability.id}
+                  capability={capability}
+                  locale={locale}
+                  verifying={verifyingId === capability.id}
+                  onVerify={() => onVerify(capability)}
+                  onDelete={() => onDeleteCapability(capability)}
+                />
               ))}
             </TableBody>
           </Table>
@@ -334,7 +412,15 @@ function ConnectionCard({ connection, probing, onProbe, onToggle, onEdit, onDele
   )
 }
 
-function CapabilityRow({ capability, locale }: { capability: Capability; locale: string }) {
+interface CapabilityRowProps {
+  capability: Capability
+  locale: string
+  verifying: boolean
+  onVerify(): void
+  onDelete(): void
+}
+
+function CapabilityRow({ capability, locale, verifying, onVerify, onDelete }: CapabilityRowProps) {
   const { t } = useI18n()
   return (
     <TableRow>
@@ -362,7 +448,10 @@ function CapabilityRow({ capability, locale }: { capability: Capability; locale:
         </div>
       </TableCell>
       <TableCell>
-        <ProbeBadge status={capability.probeStatus} label={translateEnum(t, 'probe', capability.probeStatus)} />
+        <div className="flex items-center gap-1.5">
+          <ProbeBadge status={capability.probeStatus} label={translateEnum(t, 'probe', capability.probeStatus)} />
+          <VerifyButton capability={capability} verifying={verifying} onVerify={onVerify} />
+        </div>
       </TableCell>
       <TableCell className="text-muted-foreground whitespace-nowrap">
         {capability.entitlementVerifiedAt
@@ -371,14 +460,67 @@ function CapabilityRow({ capability, locale }: { capability: Capability; locale:
       </TableCell>
       <TableCell>
         {capability.probeMessage ? (
-          <span className="text-muted-foreground block max-w-[20rem] truncate text-xs" title={capability.probeMessage}>
+          <span
+            className="text-muted-foreground block max-w-[14rem] truncate text-xs"
+            title={capability.probeMessage}
+          >
             {capability.probeMessage}
           </span>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
       </TableCell>
+      <TableCell className="text-right">
+        <GuardedButton
+          action="providers:manage"
+          variant="ghost"
+          size="icon-sm"
+          className="text-destructive hover:text-destructive"
+          aria-label={t('models.deleteModel')}
+          onClick={onDelete}
+        >
+          <Trash2Icon />
+        </GuardedButton>
+      </TableCell>
     </TableRow>
+  )
+}
+
+/**
+ * Asking a chat model one question is free enough to do on a click. An image, video or
+ * audio endpoint has no such request, so those rows stay grey with the reason on them —
+ * they are proven by the first real generation, and a check mark we did not earn is
+ * worse than no check mark.
+ */
+function VerifyButton({ capability, verifying, onVerify }: { capability: Capability; verifying: boolean; onVerify(): void }) {
+  const { t } = useI18n()
+  const label = t('models.verifyModel')
+  if (!PROBEABLE_MODALITIES.has(capability.modality)) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex" tabIndex={0}>
+            <Button type="button" variant="ghost" size="icon-sm" aria-label={label} disabled>
+              <ShieldCheckIcon />
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{t('models.probeModelCosts')}</TooltipContent>
+      </Tooltip>
+    )
+  }
+  return (
+    <GuardedButton
+      action="providers:manage"
+      variant="ghost"
+      size="icon-sm"
+      aria-label={label}
+      title={label}
+      disabled={verifying}
+      onClick={onVerify}
+    >
+      {verifying ? <LoaderCircleIcon className="animate-spin" /> : <ShieldCheckIcon />}
+    </GuardedButton>
   )
 }
 
@@ -420,7 +562,10 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
         if (accessKey) body.accessKey = accessKey
         if (baseUrl.trim()) body.baseUrl = baseUrl.trim()
         const created = await api<Connection>('/providers/connections', { method: 'POST', body: JSON.stringify(body) })
-        toast.success(t('models.created', { name: created.name, count: created.capabilities.length }))
+        // A gateway ships no model list, so an empty connection is the honest start —
+        // and the cue for the next click, not a finished setup.
+        if (created.capabilities.length === 0) toast.success(t('models.createdEmpty', { name: created.name }))
+        else toast.success(t('models.created', { name: created.name, count: created.capabilities.length }))
       }
       onDone()
     } catch (err) {
@@ -510,13 +655,18 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
           <Field
             label={t('models.baseUrl')}
             htmlFor="connectionBaseUrl"
-            hint={catalog ? `${t('models.catalogBaseUrl')}: ${catalog.defaultBaseUrl}` : t('models.baseUrlHint')}
+            required={!catalog?.defaultBaseUrl}
+            hint={
+              catalog?.defaultBaseUrl
+                ? `${t('models.catalogBaseUrl')}: ${catalog.defaultBaseUrl}`
+                : t('models.baseUrlOwnHost')
+            }
           >
             <Input
               id="connectionBaseUrl"
               value={baseUrl}
               onChange={event => setBaseUrl(event.target.value)}
-              placeholder={catalog?.defaultBaseUrl}
+              placeholder={catalog?.defaultBaseUrl ?? 'https://gateway.internal/v1'}
             />
           </Field>
 
@@ -531,8 +681,153 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !name.trim() || (!editing && (!apiKey || (requiresAccessKey && !accessKey)))}>
+            <Button
+              type="submit"
+              disabled={
+                busy ||
+                !name.trim() ||
+                (!editing && (!apiKey || (requiresAccessKey && !accessKey) || (!catalog?.defaultBaseUrl && !baseUrl.trim())))
+              }
+            >
               {busy ? t('common.saving') : editing ? t('common.save') : t('common.create')}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+interface AddModelDialogProps {
+  connection: Connection | null
+  onOpenChange(open: boolean): void
+  onAdded(model: string): void
+}
+
+/**
+ * Names a model our catalog cannot: a gateway's own checkpoint, a fine-tune, a newer
+ * release on the same connection. The row is born unverified — this dialog claims that a
+ * model exists here, only a probe can show that it answers.
+ */
+function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogProps) {
+  const { t } = useI18n()
+  const { api } = useSession()
+  const [model, setModel] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [modality, setModality] = useState<string>('text')
+  const [acceptsFirstFrame, setAcceptsFirstFrame] = useState(false)
+  const [acceptsReferenceImages, setAcceptsReferenceImages] = useState(false)
+  const [maxReferenceImages, setMaxReferenceImages] = useState('1')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const videoInput = modality === 'i2v' || modality === 'r2v'
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!connection) return
+    setBusy(true)
+    setError('')
+    try {
+      const created = await api<Capability>(`/providers/connections/${connection.id}/models`, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: model.trim(),
+          displayName: displayName.trim() || undefined,
+          modality,
+          ...(videoInput ? { acceptsFirstFrame, acceptsReferenceImages, maxReferenceImages: Number(maxReferenceImages) } : {}),
+        }),
+      })
+      onAdded(created.model)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('error.generic'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={connection !== null} onOpenChange={open => !busy && onOpenChange(open)}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t('models.addModelTitle')}</DialogTitle>
+          <DialogDescription>{t('models.addModelHint')}</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4">
+          <Field label={t('models.modelName')} htmlFor="modelName" required error={error}>
+            <Input
+              id="modelName"
+              value={model}
+              onChange={event => setModel(event.target.value)}
+              placeholder={t('models.modelNamePlaceholder')}
+              required
+              autoFocus
+            />
+          </Field>
+
+          <Field label={t('models.modelDisplayName')} htmlFor="modelDisplayName" hint={t('models.modelDisplayNameHint')}>
+            <Input
+              id="modelDisplayName"
+              value={displayName}
+              onChange={event => setDisplayName(event.target.value)}
+              placeholder={t('models.modelDisplayNamePlaceholder')}
+            />
+          </Field>
+
+          <Field label={t('common.modality')} htmlFor="modelModality" required>
+            <Select value={modality} onValueChange={setModality}>
+              <SelectTrigger id="modelModality" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {modelModalities.map(item => (
+                  <SelectItem key={item} value={item}>
+                    {translateEnum(t, 'modality', item)}
+                    <span className="text-muted-foreground ml-2 font-mono text-xs">{item}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+
+          {videoInput && (
+            <div className="space-y-3 rounded-lg border p-3">
+              {modality === 'i2v' && (
+                <label className="flex items-center justify-between gap-3 text-sm">
+                  <span>{t('models.firstFrame')}</span>
+                  <Switch checked={acceptsFirstFrame} onCheckedChange={setAcceptsFirstFrame} />
+                </label>
+              )}
+              {modality === 'r2v' && (
+                <>
+                  <label className="flex items-center justify-between gap-3 text-sm">
+                    <span>{t('models.referenceImages')}</span>
+                    <Switch checked={acceptsReferenceImages} onCheckedChange={setAcceptsReferenceImages} />
+                  </label>
+                  {acceptsReferenceImages && (
+                    <Field label={t('models.maxRefs')} htmlFor="modelMaxRefs">
+                      <Input
+                        id="modelMaxRefs"
+                        type="number"
+                        min={1}
+                        max={8}
+                        value={maxReferenceImages}
+                        onChange={event => setMaxReferenceImages(event.target.value)}
+                        className="w-24"
+                      />
+                    </Field>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+              {t('common.cancel')}
+            </Button>
+            <Button type="submit" disabled={busy || !model.trim()}>
+              {busy ? t('common.saving') : t('common.add')}
             </Button>
           </DialogFooter>
         </form>
