@@ -34,6 +34,8 @@ enum Stage {
   FIRST_FRAME
   VIDEO
   AUDIO
+  MUSIC
+  SUBTITLE
   COMPOSITION
   DELIVERY
 }
@@ -178,6 +180,8 @@ model Storyboard {
   title String
   durationMs Int
   description String
+  dialogue String @default("")
+  speaker String?
   sourceExcerpt String
   continuityIn String
   continuityOut String
