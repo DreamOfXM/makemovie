@@ -50,9 +50,11 @@ function toneFor(status: string): string {
 
 interface SourcesPanelProps {
   episodeId: string | null
+  /** Approval is what releases the rest of the chain, so the page re-reads the panels it advanced. */
+  onScriptApproved?: () => void
 }
 
-export function SourcesPanel({ episodeId }: SourcesPanelProps) {
+export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
 
@@ -157,6 +159,7 @@ export function SourcesPanel({ episodeId }: SourcesPanelProps) {
           : t('sources.scriptApproved', { version: version.version, count: result.storyboardsUpdated }),
       )
       reloadAll()
+      onScriptApproved?.()
     } catch (error) {
       toast.error(friendlyError(error, t('sources.alreadyApproved'), 'sources:alreadyApproved'))
       reloadAll()

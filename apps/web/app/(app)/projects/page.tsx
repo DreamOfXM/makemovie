@@ -402,7 +402,7 @@ export default function ProjectsPage() {
               </div>
               <div className="min-w-0 space-y-6">
                 <div id="step-source" className="scroll-mt-4">
-                  <SourcesPanel episodeId={selectedEpisode.id} />
+                  <SourcesPanel episodeId={selectedEpisode.id} onScriptApproved={refreshAfterAdvance} />
                 </div>
                 <div id="step-assets" className="scroll-mt-4">
                   <AssetsPanel episodeId={selectedEpisode.id} />
