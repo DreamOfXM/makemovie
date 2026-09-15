@@ -47,6 +47,8 @@ function t2vRequest(input: Record<string, unknown> = { prompt: '雨夜，镜头�
   return { model: 'kling-v2-5-turbo', input, parameters: {} }
 }
 
+const firstFrame = (url: string) => [{ type: 'first_frame' as const, url }]
+
 describe('kling jwt', () => {
   it('signs an HS256 token that matches a reference implementation', () => {
     expect(buildKlingJwt('test-ak', 'test-sk', ISSUED_AT_MS)).toBe(REFERENCE_TOKEN)
@@ -101,10 +103,13 @@ describe('kling submit body', () => {
     })
   })
 
-  it('passes a public first-frame url through untouched and maps media[1] to image_tail', () => {
+  it('maps a named first and tail frame onto their own slots', () => {
     const body = buildKlingSubmitBody(i2v, {
       model: 'kling-v2-5-turbo',
-      input: { prompt: 'she turns around', media: ['https://cdn/first.png', 'https://cdn/tail.png'] },
+      input: {
+        prompt: 'she turns around',
+        media: [{ type: 'first_frame', url: 'https://cdn/first.png' }, { type: 'last_frame', url: 'https://cdn/tail.png' }],
+      },
       parameters: {},
     })
     expect(body.image).toBe('https://cdn/first.png')
@@ -114,21 +119,48 @@ describe('kling submit body', () => {
   it('strips the data-url prefix and keeps bare base64', () => {
     const body = buildKlingSubmitBody(i2v, {
       model: 'kling-v2-5-turbo',
-      input: { prompt: 'she turns around', media: ['data:image/png;base64,iVBORw0KGgo=', 'data:image/jpeg;base64,/9j/4AAQ'] },
+      input: {
+        prompt: 'she turns around',
+        media: [{ type: 'first_frame', url: 'data:image/png;base64,iVBORw0KGgo=' }, { type: 'last_frame', url: 'data:image/jpeg;base64,/9j/4AAQ' }],
+      },
       parameters: {},
     })
     expect(body.image).toBe('iVBORw0KGgo=')
     expect(body.image_tail).toBe('/9j/4AAQ')
   })
 
-  it('falls back to firstFrameUrl and sends no tail when only one frame exists', () => {
-    const body = buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', firstFrameUrl: 'https://cdn/a.png' }, parameters: {} })
+  it('sends no tail when only a first frame exists', () => {
+    const body = buildKlingSubmitBody(i2v, {
+      model: 'kling-v2-5-turbo',
+      input: { prompt: 'x', media: [{ type: 'first_frame', url: 'https://cdn/a.png' }] },
+      parameters: {},
+    })
     expect(body).toMatchObject({ image: 'https://cdn/a.png' })
     expect(body.image_tail).toBeUndefined()
   })
 
+  // Position in an array is not a contract: a tail frame that arrives on its own has no
+  // slot, and guessing that the caller meant it as the opening frame would condition the
+  // shot on the wrong image entirely.
   it('refuses an i2v call with no first frame', () => {
-    expect(() => buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x' }, parameters: {} })).toThrow(/requires a first frame/)
+    expect(() => buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x' }, parameters: {} })).toThrow(/requires a first_frame reference/)
+    expect(() => buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: [{ type: 'last_frame', url: 'u' }] }, parameters: {} }))
+      .toThrow(/requires a first_frame reference/)
+    expect(() => buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', firstFrameUrl: 'https://cdn/a.png' }, parameters: {} }))
+      .toThrow(/requires a first_frame reference/)
+  })
+
+  it('refuses a reference type kling has no slot for', () => {
+    expect(() => buildKlingSubmitBody(i2v, {
+      model: 'kling-v2-5-turbo',
+      input: { prompt: 'x', media: [{ type: 'first_frame', url: 'a' }, { type: 'driving_audio', url: 'b' }] },
+      parameters: {},
+    })).toThrow(/slots for a first and a tail frame only/)
+  })
+
+  it('refuses a frame on a text-to-video model instead of dropping it', () => {
+    expect(() => buildKlingSubmitBody(t2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/a.png') }, parameters: {} }))
+      .toThrow(/cannot receive reference media/)
   })
 
   it('refuses modalities with no kling endpoint', async () => {
@@ -146,7 +178,7 @@ describe('kling requests', () => {
     expect(submit.method).toBe('POST')
     expect(submit.headers.Authorization).toBe('Bearer tok')
     expect(submit.headers['Content-Type']).toBe('application/json')
-    expect(buildKlingSubmitRequest(BASE, 'Bearer tok', i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: ['https://cdn/a.png'] }, parameters: {} }).url).toBe(`${BASE}/v1/videos/image2video`)
+    expect(buildKlingSubmitRequest(BASE, 'Bearer tok', i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/a.png') }, parameters: {} }).url).toBe(`${BASE}/v1/videos/image2video`)
   })
 
   it('polls the task under the endpoint the modality was submitted to', () => {
@@ -227,10 +259,10 @@ describe('kling adapter submit and poll', () => {
 
   it('accepts a submission whose code is 0 and returns its task id', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0, message: 'SUCCEED', request_id: 'r-1', data: { task_id: 'task-77' } }) })
-    const submitted = await adapter().submit(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: ['https://cdn/a.png'] }, parameters: {} })
+    const submitted = await adapter().submit(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/a.png') }, parameters: {} })
     expect(submitted).toEqual({ taskId: 'task-77' })
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/v1/videos/image2video`)
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: ['https://cdn/a.png'] }, parameters: {} }))
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/a.png') }, parameters: {} }))
   })
 
   it('throws the provider error when the api rejects the request', async () => {
@@ -279,7 +311,7 @@ describe('kling adapter submit and poll', () => {
 
   it('never puts the secret key on the wire', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0, data: { task_id: 'task-1' } }) })
-    await adapter().submit(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: ['data:image/png;base64,iVBOR'] }, parameters: {} })
+    await adapter().submit(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('data:image/png;base64,iVBOR') }, parameters: {} })
     const sent = JSON.stringify(fetchMock.mock.calls[0])
     expect(sent).not.toContain('test-sk')
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toMatch(/^Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\./)

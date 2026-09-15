@@ -1,6 +1,6 @@
 import type { ModelCapability } from '@studio/domain'
 import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { probeModel, sanitizeError } from './types.js'
+import { probeModel, readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
 const TEXT_PATH = '/api/v1/services/aigc/text-generation/generation'
 const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
@@ -102,22 +102,44 @@ export function buildSubmitRequest(
   }
 
   if (capability.modality === 't2v') {
+    validateReferenceRequest(capability, request.input)
     return {
       url: `${base}${VIDEO_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { prompt }, parameters: request.parameters },
+      body: { model: request.model, input: { prompt }, parameters: videoParameters(request.parameters) },
     }
   }
 
-  if (capability.modality === 'i2v') {
-    const imgUrl = typeof request.input.firstFrameUrl === 'string' ? request.input.firstFrameUrl : undefined
-    if (!imgUrl) throw new Error('dashscope i2v requires input.firstFrameUrl')
+  if (capability.modality === 'i2v' || capability.modality === 'r2v') {
+    validateReferenceRequest(capability, request.input)
+    const media = readMediaReferences(request.input.media)
+
+    // Wan 2.7 speaks the media array natively. The 2.1–2.6 generation behind it has one
+    // slot for one frame, so the reference list has to collapse — and collapsing it
+    // silently would drop a conditioning input the caller paid for, hence the throw.
+    if (usesMediaVideoApi(capability.model)) {
+      if (media.length > 2) throw new Error(`model "${capability.model}" takes at most two media items, ${media.length} were sent`)
+      return {
+        url: `${base}${VIDEO_PATH}`,
+        method: 'POST',
+        headers,
+        body: { model: request.model, input: { prompt, media }, parameters: videoParameters(request.parameters) },
+      }
+    }
+    if (capability.modality === 'r2v') {
+      throw new Error(`model "${capability.model}" has no reference-to-video endpoint: only the wan2.7 generation takes a media array`)
+    }
+    const firstFrame = media.find(reference => reference.type === 'first_frame')
+    if (!firstFrame) throw new Error(`dashscope i2v needs a first_frame reference, model "${capability.model}"`)
+    if (media.length > 1) {
+      throw new Error(`model "${capability.model}" has room for one frame, ${media.length} references were sent`)
+    }
     return {
       url: `${base}${VIDEO_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { prompt, img_url: imgUrl }, parameters: request.parameters },
+      body: { model: request.model, input: { prompt, img_url: firstFrame.url }, parameters: videoParameters(request.parameters) },
     }
   }
 
@@ -197,6 +219,25 @@ function extractArtifactUrl(output: Record<string, unknown>): string | undefined
 /** Qwen-Image models generate synchronously on the multimodal endpoint, unlike the async wanx task models. */
 export function isQwenImage(model: string): boolean {
   return model.startsWith('qwen-image')
+}
+
+/**
+ * Which dialect a wan video model speaks. Both generations post to the same path, so
+ * only the name says whether the frame goes in `input.img_url` or in `input.media` —
+ * and sending the wrong one is a vendor-side 400 on a request already billed.
+ */
+export function usesMediaVideoApi(model: string): boolean {
+  return model.startsWith('wan2.7')
+}
+
+/**
+ * A delivered master must not carry a vendor watermark, and it must not be the answer to
+ * a prompt nobody wrote: `prompt_extend` lets the service rewrite the request, which would
+ * turn the stored `requestSnapshot` into a description of something that was never sent and
+ * leave a re-run unable to reproduce the clip. Both are defaults a caller can still undo.
+ */
+function videoParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  return { watermark: false, prompt_extend: false, ...parameters }
 }
 
 /** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image. */

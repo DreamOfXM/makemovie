@@ -58,12 +58,78 @@ export interface AdapterOptions {
   baseUrl: string
 }
 
+/**
+ * The reference material a video model can be conditioned on. The vocabulary is
+ * Wan 2.7's because it is the widest one any vendor we support accepts; every other
+ * vendor reduces from it, so a caller never has to know which dialect it will hit.
+ */
+export const mediaReferenceTypes = ['first_frame', 'last_frame', 'driving_audio', 'first_clip', 'reference_image'] as const
+export type MediaReferenceType = typeof mediaReferenceTypes[number]
+
+export interface MediaReference {
+  type: MediaReferenceType
+  /** A public URL or a `data:` URL — both vendors that take either accept both. */
+  url: string
+}
+
+export function isMediaReferenceType(value: unknown): value is MediaReferenceType {
+  return typeof value === 'string' && (mediaReferenceTypes as readonly string[]).includes(value)
+}
+
+/**
+ * Reads `input.media` into typed references, or throws saying why it is not media.
+ *
+ * The array arrives untyped because a request is rebuilt from a stored JSON snapshot
+ * before every call. Deciding its shape once here is what keeps four adapters from each
+ * inventing a slightly more permissive reader that then sends a malformed vendor body.
+ */
+export function readMediaReferences(value: unknown): MediaReference[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error('input.media must be an array of {type, url} references')
+  return value.map(item => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('each input.media entry must be a {type, url} object')
+    }
+    const { type, url } = item as { type?: unknown; url?: unknown }
+    if (!isMediaReferenceType(type)) {
+      throw new Error(`input.media has unsupported reference type "${String(type)}" (expected one of: ${mediaReferenceTypes.join(', ')})`)
+    }
+    if (typeof url !== 'string' || url.length === 0) {
+      throw new Error(`input.media reference "${type}" has no url`)
+    }
+    return { type, url }
+  })
+}
+
+/**
+ * Guards the contract between the pipeline and the vendor bill.
+ *
+ * Sending references to a text-to-video model is not merely wrong — several vendors
+ * answer 200 and ignore them, so the shot costs full price and comes back with no
+ * conditioning at all, which reads as "the model cannot keep a character consistent".
+ */
 export function validateReferenceRequest(capability: ModelCapability, input: Record<string, unknown>): void {
-  const media = Array.isArray(input.media) ? input.media : []
-  const hasReference = media.length > 0
-  if (capability.modality === 't2v' && hasReference) throw new Error('T2V cannot receive reference media')
-  if ((capability.modality === 'i2v' || capability.modality === 'r2v') && !hasReference) throw new Error('Reference video models require reference media')
-  if (media.length > capability.maxReferenceImages) throw new Error('Reference media exceeds model capability')
+  const media = readMediaReferences(input.media)
+  if (capability.modality === 't2v' && media.length > 0) {
+    throw new Error(`t2v model "${capability.model}" cannot receive reference media`)
+  }
+  if (capability.modality === 'i2v' && !media.some(reference => reference.type === 'first_frame')) {
+    throw new Error(`i2v model "${capability.model}" requires a first_frame reference`)
+  }
+  if (capability.modality === 'r2v' && !media.some(reference => reference.type === 'reference_image')) {
+    throw new Error(`r2v model "${capability.model}" requires at least one reference_image reference`)
+  }
+  // maxReferenceImages counts reference images, not frames: it is the ceiling that goes
+  // with acceptsReferenceImages, and every single-frame model in the catalog leaves it at
+  // 0 — comparing frames to it would reject the conditioning input this milestone exists
+  // to send.
+  const referenceImages = media.filter(reference => reference.type === 'reference_image')
+  if (referenceImages.length > 0 && !capability.acceptsReferenceImages) {
+    throw new Error(`model "${capability.model}" is not declared as accepting reference images`)
+  }
+  if (referenceImages.length > capability.maxReferenceImages) {
+    throw new Error(`reference image count ${referenceImages.length} exceeds model "${capability.model}" capability of ${capability.maxReferenceImages}`)
+  }
 }
 
 export function sanitizeError(body: unknown): string {

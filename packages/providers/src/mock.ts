@@ -1,10 +1,12 @@
 import { isContentLocale, type ContentLocale, type ModelCapability } from '@studio/domain'
-import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import type { AdapterOptions, MediaReferenceType, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { readMediaReferences, validateReferenceRequest } from './types.js'
 
 interface MockTask {
   capability: ModelCapability
   polls: number
   contentLocale: ContentLocale
+  referenceTypes: MediaReferenceType[]
 }
 
 const tasks = new Map<string, MockTask>()
@@ -99,9 +101,15 @@ export class MockProviderAdapter implements ProviderAdapter {
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     if (this.options.apiKey === 'invalid') throw new Error('mock: invalid api key')
+    validateReferenceRequest(capability, request.input)
     const taskId = `mock-task-${++counter}`
     const requested = request.input.contentLocale
-    tasks.set(taskId, { capability, polls: 0, contentLocale: isContentLocale(requested) ? requested : 'zh' })
+    tasks.set(taskId, {
+      capability,
+      polls: 0,
+      contentLocale: isContentLocale(requested) ? requested : 'zh',
+      referenceTypes: readMediaReferences(request.input.media).map(reference => reference.type),
+    })
     return { taskId }
   }
 
@@ -114,7 +122,11 @@ export class MockProviderAdapter implements ProviderAdapter {
     const english = task.contentLocale === 'en'
     if (capability.model === 'mock-script') return { status: 'completed', text: english ? MOCK_SCRIPT_TEXT_EN : MOCK_SCRIPT_TEXT }
     if (capability.model === 'mock-storyboard') return { status: 'completed', text: english ? MOCK_STORYBOARD_JSON_EN : MOCK_STORYBOARD_JSON }
-    return { status: 'completed', artifactUrl: `mock://artifacts/${taskId}/${capability.modality}` }
+    // The worker persists the poll result on both the artifact and the task, so what the
+    // mock "saw" is auditable after the fact — the only way an offline run can tell a
+    // conditioned shot from an unconditioned one.
+    const refs = task.referenceTypes.length > 0 ? `?refs=${task.referenceTypes.join(',')}` : ''
+    return { status: 'completed', artifactUrl: `mock://artifacts/${taskId}/${capability.modality}${refs}` }
   }
 }
 

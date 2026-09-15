@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto'
 import type { ModelCapability, ModelModality } from '@studio/domain'
 import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { sanitizeError } from './types.js'
+import { readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
 export const KLING_DEFAULT_BASE_URL = 'https://api-beijing.klingai.com'
 
@@ -186,6 +186,7 @@ export function klingResourcePath(modality: ModelModality): string {
 export function buildKlingSubmitBody(capability: ModelCapability, request: ProviderRequest): KlingSubmitBody {
   const resource = klingResource(capability.modality)
   const { input, parameters } = request
+  validateReferenceRequest(capability, input)
   const body: KlingSubmitBody = {
     model_name: request.model,
     prompt: readString(input, 'prompt') ?? '',
@@ -203,13 +204,14 @@ export function buildKlingSubmitBody(capability: ModelCapability, request: Provi
   if (callbackUrl !== undefined) body.callback_url = callbackUrl
 
   if (resource === I2V_RESOURCE) {
-    const media = Array.isArray(input.media)
-      ? input.media.filter((item): item is string => typeof item === 'string' && item.length > 0)
-      : []
-    const firstFrame = media[0] ?? readString(input, 'firstFrameUrl')
-    if (!firstFrame) throw new Error('kling i2v requires a first frame (input.media[0] or input.firstFrameUrl)')
-    body.image = toKlingImage(firstFrame)
-    if (media[1] !== undefined) body.image_tail = toKlingImage(media[1])
+    const media = readMediaReferences(input.media)
+    const stray = media.find(reference => reference.type !== 'first_frame' && reference.type !== 'last_frame')
+    if (stray) throw new Error(`kling i2v cannot take reference type "${stray.type}" — it has slots for a first and a tail frame only`)
+    const firstFrame = media.find(reference => reference.type === 'first_frame')
+    if (!firstFrame) throw new Error('kling i2v requires a first_frame reference; a tail frame without it has nowhere to go')
+    body.image = toKlingImage(firstFrame.url)
+    const tailFrame = media.find(reference => reference.type === 'last_frame')
+    if (tailFrame !== undefined) body.image_tail = toKlingImage(tailFrame.url)
   }
 
   return body

@@ -149,11 +149,30 @@ describe('mock adapter lifecycle', () => {
   it('submit then poll: running first, completed second', async () => {
     const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
     const cap = capability({ provider: 'mock', model: 'mock-i2v', modality: 'i2v', acceptsFirstFrame: true })
-    const { taskId } = await adapter.submit(cap, { model: 'mock-i2v', input: {}, parameters: {} })
+    const { taskId } = await adapter.submit(cap, {
+      model: 'mock-i2v',
+      input: { media: [{ type: 'first_frame', url: 'data:image/jpeg;base64,/9j/4AAQ' }] },
+      parameters: {},
+    })
     expect((await adapter.poll(cap, taskId)).status).toBe('running')
     const done = await adapter.poll(cap, taskId)
     expect(done.status).toBe('completed')
-    expect(done.artifactUrl).toBe(`mock://artifacts/${taskId}/i2v`)
+    expect(done.artifactUrl).toBe(`mock://artifacts/${taskId}/i2v?refs=first_frame`)
+  })
+
+  // The offline chain is where "did the frame actually reach the model?" gets answered, so
+  // the mock has to be as strict about a reference request as the vendor is — and has to
+  // say nothing at all in the URL when nothing was sent.
+  it('refuses a reference request it cannot honour, and echoes nothing for a plain shot', async () => {
+    const adapter = new MockProviderAdapter({ apiKey: 'key', baseUrl: 'mock://local' })
+    const i2v = capability({ provider: 'mock', model: 'mock-i2v', modality: 'i2v', acceptsFirstFrame: true })
+    await expect(adapter.submit(i2v, { model: 'mock-i2v', input: {}, parameters: {} })).rejects.toThrow(/requires a first_frame reference/)
+
+    const t2v = capability({ provider: 'mock', model: 'mock-t2v', modality: 't2v' })
+    await expect(adapter.submit(t2v, { model: 'mock-t2v', input: { media: [{ type: 'first_frame', url: 'u' }] }, parameters: {} })).rejects.toThrow(/cannot receive reference media/)
+    const { taskId } = await adapter.submit(t2v, { model: 'mock-t2v', input: { prompt: 'p' }, parameters: {} })
+    await adapter.poll(t2v, taskId)
+    expect((await adapter.poll(t2v, taskId)).artifactUrl).toBe(`mock://artifacts/${taskId}/t2v`)
   })
 
   it('answers a vlm poll with a verdict instead of an artifact', async () => {
@@ -242,18 +261,36 @@ describe('mock adapter lifecycle', () => {
 
 describe('validateReferenceRequest', () => {
   it('rejects reference media on t2v', () => {
-    expect(() => validateReferenceRequest(capability({ modality: 't2v' }), { media: ['a.png'] })).toThrow(/T2V cannot receive reference media/)
+    expect(() => validateReferenceRequest(capability({ modality: 't2v' }), { media: [{ type: 'first_frame', url: 'https://cdn/f.png' }] }))
+      .toThrow(/cannot receive reference media/)
   })
 
-  it('requires reference media on i2v and r2v', () => {
-    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), {})).toThrow(/require reference media/)
-    expect(() => validateReferenceRequest(capability({ modality: 'r2v' }), { media: [] })).toThrow(/require reference media/)
+  it('requires a first frame on i2v and a reference image on r2v', () => {
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), {})).toThrow(/requires a first_frame reference/)
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), { media: [{ type: 'last_frame', url: 'u' }] })).toThrow(/requires a first_frame reference/)
+    expect(() => validateReferenceRequest(capability({ modality: 'r2v' }), { media: [] })).toThrow(/requires at least one reference_image/)
   })
 
-  it('rejects media beyond maxReferenceImages', () => {
-    const cap = capability({ modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 2 })
-    expect(() => validateReferenceRequest(cap, { media: ['a', 'b', 'c'] })).toThrow(/exceeds model capability/)
-    expect(() => validateReferenceRequest(cap, { media: ['a', 'b'] })).not.toThrow()
+  // A reference list survives as JSON in a task snapshot, so the shape a caller rebuilds
+  // it into is checked here rather than trusted.
+  it('refuses a media entry that is not a {type, url} object', () => {
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), { media: ['https://cdn/f.png'] })).toThrow(/\{type, url\}/)
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), { media: [{ type: 'thumbnail', url: 'u' }] })).toThrow(/unsupported reference type/)
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v' }), { media: [{ type: 'first_frame' }] })).toThrow(/has no url/)
+  })
+
+  // Frames fill a video model's image slots; maxReferenceImages is the ceiling that goes
+  // with acceptsReferenceImages, and single-frame models in the catalog leave it at 0.
+  it('counts reference images, not frames, against maxReferenceImages', () => {
+    const frameOnly = capability({ modality: 'i2v', acceptsFirstFrame: true })
+    expect(() => validateReferenceRequest(frameOnly, { media: [{ type: 'first_frame', url: 'u' }] })).not.toThrow()
+
+    const r2v = capability({ modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 2 })
+    expect(() => validateReferenceRequest(r2v, { media: [{ type: 'reference_image', url: 'a' }, { type: 'reference_image', url: 'b' }, { type: 'reference_image', url: 'c' }] }))
+      .toThrow(/exceeds model "test-model" capability of 2/)
+    expect(() => validateReferenceRequest(r2v, { media: [{ type: 'reference_image', url: 'a' }, { type: 'reference_image', url: 'b' }] })).not.toThrow()
+    expect(() => validateReferenceRequest(capability({ modality: 'i2v', acceptsFirstFrame: true }), { media: [{ type: 'first_frame', url: 'u' }, { type: 'reference_image', url: 'u' }] }))
+      .toThrow(/not declared as accepting reference images/)
   })
 })
 
@@ -329,17 +366,74 @@ describe('dashscope request building', () => {
     expect(body.input.messages).toEqual([{ role: 'user', content: [{ text: 'a red apple' }] }])
   })
 
-  it('builds an i2v request with img_url and rejects missing first frame', () => {
+  it('reduces a first_frame reference to img_url and refuses anything it would have to drop', () => {
     const cap = capability({ modality: 'i2v', model: 'wanx2.1-i2v-turbo', acceptsFirstFrame: true })
     const req = buildSubmitRequest(base, 'sk-test', cap, {
       model: 'wanx2.1-i2v-turbo',
-      input: { prompt: 'camera pans left', firstFrameUrl: 'https://cdn/first.png' },
+      input: { prompt: 'camera pans left', media: [{ type: 'first_frame', url: 'https://cdn/first.png' }] },
       parameters: {},
     })
     expect(req.url).toBe(`${base}/api/v1/services/aigc/video-generation/video-synthesis`)
     expect(req.body).toMatchObject({ input: { img_url: 'https://cdn/first.png' } })
+
+    // A frame the storage has no public address for still has to condition the shot.
+    const inline = buildSubmitRequest(base, 'sk-test', cap, {
+      model: 'wanx2.1-i2v-turbo',
+      input: { prompt: 'p', media: [{ type: 'first_frame', url: 'data:image/jpeg;base64,/9j/4AAQ' }] },
+      parameters: {},
+    })
+    expect(inline.body).toMatchObject({ input: { img_url: 'data:image/jpeg;base64,/9j/4AAQ' } })
+
     expect(() => buildSubmitRequest(base, 'sk-test', cap, { model: 'wanx2.1-i2v-turbo', input: { prompt: 'x' }, parameters: {} }))
-      .toThrow(/firstFrameUrl/)
+      .toThrow(/requires a first_frame reference/)
+    expect(() => buildSubmitRequest(base, 'sk-test', cap, {
+      model: 'wanx2.1-i2v-turbo',
+      input: { prompt: 'x', media: [{ type: 'first_frame', url: 'a' }, { type: 'last_frame', url: 'b' }] },
+      parameters: {},
+    })).toThrow(/room for one frame/)
+  })
+
+  // prompt_extend is the one parameter that must never be left to the vendor's default:
+  // if the endpoint rewrites the prompt, the snapshot we stored for this task is not the
+  // prompt that produced the video, and every later "why does this shot look like that"
+  // answer built from it is wrong.
+  it('pins watermark and prompt_extend off on every video request', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.2-t2v-plus' }), {
+      model: 'wan2.2-t2v-plus',
+      input: { prompt: 'a rainy street' },
+      parameters: { resolution: '1080P' },
+    })
+    expect(req.body).toMatchObject({ parameters: { watermark: false, prompt_extend: false, resolution: '1080P' } })
+
+    const overridden = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.2-t2v-plus' }), {
+      model: 'wan2.2-t2v-plus',
+      input: { prompt: 'a rainy street' },
+      parameters: { watermark: true },
+    })
+    expect(overridden.body).toMatchObject({ parameters: { watermark: true, prompt_extend: false } })
+  })
+
+  // The newest Wan generation takes the media array as it stands, so the neutral contract
+  // reaches the vendor untouched.
+  it('passes the media array through untouched on the wan2.7 dialect', () => {
+    const cap = capability({ modality: 'i2v', model: 'wan2.7-i2v', acceptsFirstFrame: true })
+    const media = [{ type: 'first_frame', url: 'data:image/png;base64,aaa' }, { type: 'last_frame', url: 'https://cdn/tail.png' }]
+    const req = buildSubmitRequest(base, 'sk-test', cap, { model: 'wan2.7-i2v', input: { prompt: 'a to b', media }, parameters: {} })
+    expect(req.body).toMatchObject({ input: { media } })
+    expect((req.body as { input: Record<string, unknown> }).input.img_url).toBeUndefined()
+
+    const referenced = buildSubmitRequest(base, 'sk-test', capability({ modality: 'r2v', model: 'wan2.7-r2v', acceptsReferenceImages: true, maxReferenceImages: 5 }), {
+      model: 'wan2.7-r2v',
+      input: { prompt: '图1 walks in', media: [{ type: 'reference_image', url: 'data:image/jpeg;base64,/9j/4AAQ' }] },
+      parameters: {},
+    })
+    expect(referenced.body).toMatchObject({ input: { media: [{ type: 'reference_image', url: 'data:image/jpeg;base64,/9j/4AAQ' }] } })
+
+    expect(() => buildSubmitRequest(base, 'sk-test', capability({ modality: 'r2v', model: 'wanx2.1-i2v-plus', acceptsReferenceImages: true, maxReferenceImages: 5 }), {
+      model: 'wanx2.1-i2v-plus',
+      input: { prompt: 'x', media: [{ type: 'reference_image', url: 'u' }] },
+      parameters: {},
+    })).toThrow(/has no reference-to-video endpoint/)
   })
 
   it('builds a synchronous tts request on the multimodal endpoint', () => {
@@ -388,11 +482,6 @@ describe('dashscope request building', () => {
     expect(req.url).toBe(`${base}/api/v1/services/audio/music/generation`)
     expect(req.headers['X-DashScope-Async']).toBe('enable')
     expect(req.body).toMatchObject({ model: 'fun-music-v1', input: { prompt: 'a tense noir chase' } })
-  })
-
-  it('rejects modalities without a public dashscope endpoint', () => {
-    expect(() => buildSubmitRequest(base, 'k', capability({ modality: 'r2v' }), { model: 'm', input: {}, parameters: {} }))
-      .toThrow(/does not support modality/)
   })
 
   it('builds a poll request against the task endpoint', () => {
