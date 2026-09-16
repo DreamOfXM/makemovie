@@ -31,7 +31,7 @@ describe('provider catalogs', () => {
     const catalogs = res.json() as { provider: string; defaultBaseUrl?: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
     expect(catalogs.map(c => c.provider).sort()).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'openai_compatible', 'seedance'])
     const dashscope = catalogs.find(c => c.provider === 'dashscope')!
-    expect(dashscope.models.some(m => m.model === 'qwen-max')).toBe(true)
+    expect(dashscope.models.some(m => m.model === 'qwen3.8-max')).toBe(true)
     const seedance = catalogs.find(c => c.provider === 'seedance')!
     expect(seedance.defaultBaseUrl).toBe('https://ark.cn-beijing.volces.com')
     expect(catalogs.find(c => c.provider === 'kling')!.defaultBaseUrl).toBe('https://api-beijing.klingai.com')
@@ -81,13 +81,14 @@ describe('provider connections', () => {
     // chooses text-to-video or image-to-video by whether the content array carries an
     // image. Seeding survives only because a capability is keyed by model and modality.
     expect(connection.capabilities.map(c => `${c.model}:${c.modality}`).sort()).toEqual([
-      'doubao-seedance-1-0-lite-i2v-250428:i2v',
       'doubao-seedance-1-0-pro-250528:i2v',
       'doubao-seedance-1-0-pro-250528:t2v',
-      'doubao-seedance-1-5-pro-251215:i2v',
-      'doubao-seedance-1-5-pro-251215:t2v',
       'doubao-seedance-2-0-260128:i2v',
       'doubao-seedance-2-0-260128:t2v',
+      'doubao-seedance-2-0-fast-260128:i2v',
+      'doubao-seedance-2-0-fast-260128:t2v',
+      'doubao-seedance-2-5-260628:i2v',
+      'doubao-seedance-2-5-260628:t2v',
     ])
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
@@ -106,10 +107,9 @@ describe('provider connections', () => {
     const connection = res.json() as Connection
     expect(connection.baseUrl).toBe('https://api-beijing.klingai.com')
     // One model_name answers both /v1/videos/text2video and /v1/videos/image2video, so
-    // each generation legitimately gets two capability rows.
+    // a generation legitimately gets two capability rows — and the catalog now carries
+    // one generation, because advertising a retired model_name buys a guaranteed failure.
     expect(connection.capabilities.map(c => `${c.model}:${c.modality}`).sort()).toEqual([
-      'kling-v1-6:i2v',
-      'kling-v1-6:t2v',
       'kling-v2-5-turbo:i2v',
       'kling-v2-5-turbo:t2v',
     ])
@@ -405,19 +405,19 @@ describe('models entered by hand', () => {
     // `model_name`, and Ark picks the Seedance dialect by whether the content array
     // carries an image. Keying a capability by model alone made the second half of
     // either vendor impossible to register, so the key is (connection, model, modality).
-    const textToVideo = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 't2v' })
+    const textToVideo = await addModel(owner.token, connection.id, { model: 'kling-v2-5-turbo', modality: 't2v' })
     expect(textToVideo.statusCode).toBe(201)
-    const imageToVideo = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 'i2v', acceptsFirstFrame: true })
+    const imageToVideo = await addModel(owner.token, connection.id, { model: 'kling-v2-5-turbo', modality: 'i2v', acceptsFirstFrame: true })
     expect(imageToVideo.statusCode).toBe(201)
     expect(imageToVideo.json().id).not.toBe(textToVideo.json().id)
 
-    const repeat = await addModel(owner.token, connection.id, { model: 'kling-v1-6', modality: 'i2v' })
+    const repeat = await addModel(owner.token, connection.id, { model: 'kling-v2-5-turbo', modality: 'i2v' })
     expect(repeat.statusCode).toBe(409)
     expect(repeat.json().error).toContain('for the "i2v" modality')
 
     const listed = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
     const rows = listed.json() as Connection[]
-    const both = rows.find(c => c.id === connection.id)!.capabilities.filter(c => c.model === 'kling-v1-6')
+    const both = rows.find(c => c.id === connection.id)!.capabilities.filter(c => c.model === 'kling-v2-5-turbo')
     expect(both.map(c => c.modality).sort()).toEqual(['i2v', 't2v'])
   })
 

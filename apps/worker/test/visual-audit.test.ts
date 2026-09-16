@@ -64,7 +64,7 @@ const fetchMock = vi.fn()
 function boundAuditorDb(): PrismaClient {
   const capability = {
     id: 'cap-vlm',
-    model: 'qwen-vl-max',
+    model: 'qwen3-vl-plus',
     modality: 'vlm',
     displayName: null,
     acceptsFirstFrame: false,
@@ -337,21 +337,21 @@ describe('ModelQualityChecker against a bound auditor', () => {
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen-vl-max call failed: socket hang up'],
+      reasons: ['dashscope/qwen3-vl-plus call failed: socket hang up'],
     })
 
     fetchMock.mockResolvedValue(refusedWith(400, 'InvalidParameter', 'upstream said no'))
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen-vl-max call failed: InvalidParameter | upstream said no'],
+      reasons: ['dashscope/qwen3-vl-plus call failed: InvalidParameter | upstream said no'],
     })
 
     fetchMock.mockResolvedValue(answeredWith('the two images clearly show the same person'))
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen-vl-max returned no parseable verdict'],
+      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict'],
     })
 
     // An unusable score is still not a pass, however confident the prose around it reads.
@@ -359,7 +359,7 @@ describe('ModelQualityChecker against a bound auditor', () => {
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen-vl-max returned no parseable verdict'],
+      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict'],
     })
   })
 
