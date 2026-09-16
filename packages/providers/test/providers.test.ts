@@ -308,20 +308,20 @@ describe('dashscope request building', () => {
   const base = 'https://dashscope.aliyuncs.com'
 
   it('builds a synchronous text request', () => {
-    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'text', model: 'qwen-max' }), {
-      model: 'qwen-max',
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'text', model: 'qwen3.8-max' }), {
+      model: 'qwen3.8-max',
       input: { messages: [{ role: 'user', content: 'hello' }] },
       parameters: { result_format: 'message' },
     })
     expect(req.url).toBe(`${base}/api/v1/services/aigc/text-generation/generation`)
     expect(req.headers.Authorization).toBe('Bearer sk-test')
     expect(req.headers['X-DashScope-Async']).toBeUndefined()
-    expect(req.body).toMatchObject({ model: 'qwen-max', input: { messages: [{ role: 'user', content: 'hello' }] } })
+    expect(req.body).toMatchObject({ model: 'qwen3.8-max', input: { messages: [{ role: 'user', content: 'hello' }] } })
   })
 
   it('falls back to prompt-as-user-message for text', () => {
     const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'text' }), {
-      model: 'qwen-plus',
+      model: 'qwen3.7-plus',
       input: { prompt: 'write episode 1' },
       parameters: {},
     })
@@ -330,8 +330,8 @@ describe('dashscope request building', () => {
   })
 
   it('builds a synchronous multimodal request for vlm', () => {
-    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'vlm', model: 'qwen-vl-max' }), {
-      model: 'qwen-vl-max',
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'vlm', model: 'qwen3-vl-plus' }), {
+      model: 'qwen3-vl-plus',
       input: { prompt: 'score this frame', images: ['data:image/jpeg;base64,/9j/4AAQ'] },
       parameters: {},
     })
@@ -346,7 +346,7 @@ describe('dashscope request building', () => {
   it('passes caller-built vlm messages through untouched', () => {
     const messages = [{ role: 'user', content: [{ text: 'custom audit prompt' }] }]
     const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'vlm' }), {
-      model: 'qwen-vl-max',
+      model: 'qwen3-vl-plus',
       input: { prompt: 'ignored', messages },
       parameters: {},
     })
@@ -354,8 +354,8 @@ describe('dashscope request building', () => {
   })
 
   it('builds an async image request', () => {
-    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'wanx2.1-t2i-turbo' }), {
-      model: 'wanx2.1-t2i-turbo',
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'wan2.2-t2i-flash' }), {
+      model: 'wan2.2-t2i-flash',
       input: { prompt: 'a rainy street' },
       parameters: { size: '1024*1024', n: 1 },
     })
@@ -408,15 +408,15 @@ describe('dashscope request building', () => {
   // prompt that produced the video, and every later "why does this shot look like that"
   // answer built from it is wrong.
   it('pins watermark and prompt_extend off on every video request', () => {
-    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.2-t2v-plus' }), {
-      model: 'wan2.2-t2v-plus',
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
+      model: 'wan2.7-t2v',
       input: { prompt: 'a rainy street' },
       parameters: { resolution: '1080P' },
     })
     expect(req.body).toMatchObject({ parameters: { watermark: false, prompt_extend: false, resolution: '1080P' } })
 
-    const overridden = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.2-t2v-plus' }), {
-      model: 'wan2.2-t2v-plus',
+    const overridden = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
+      model: 'wan2.7-t2v',
       input: { prompt: 'a rainy street' },
       parameters: { watermark: true },
     })
@@ -426,9 +426,9 @@ describe('dashscope request building', () => {
   // The newest Wan generation takes the media array as it stands, so the neutral contract
   // reaches the vendor untouched.
   it('passes the media array through untouched on the wan2.7 dialect', () => {
-    const cap = capability({ modality: 'i2v', model: 'wan2.7-i2v', acceptsFirstFrame: true })
+    const cap = capability({ modality: 'i2v', model: 'wan2.7-i2v-2026-04-25', acceptsFirstFrame: true })
     const media = [{ type: 'first_frame', url: 'data:image/png;base64,aaa' }, { type: 'last_frame', url: 'https://cdn/tail.png' }]
-    const req = buildSubmitRequest(base, 'sk-test', cap, { model: 'wan2.7-i2v', input: { prompt: 'a to b', media }, parameters: {} })
+    const req = buildSubmitRequest(base, 'sk-test', cap, { model: 'wan2.7-i2v-2026-04-25', input: { prompt: 'a to b', media }, parameters: {} })
     expect(req.body).toMatchObject({ input: { media } })
     expect((req.body as { input: Record<string, unknown> }).input.img_url).toBeUndefined()
 
@@ -597,9 +597,9 @@ describe('dashscope adapter submit and poll', () => {
       }),
     })
     const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
-    const cap = capability({ modality: 'vlm', model: 'qwen-vl-max' })
+    const cap = capability({ modality: 'vlm', model: 'qwen3-vl-plus' })
     const { taskId } = await adapter.submit(cap, {
-      model: 'qwen-vl-max',
+      model: 'qwen3-vl-plus',
       input: { prompt: 'score this frame', images: ['data:image/jpeg;base64,/9j/4AAQ'] },
       parameters: {},
     })

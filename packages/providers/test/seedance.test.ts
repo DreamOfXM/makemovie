@@ -269,7 +269,7 @@ describe('seedance adapter probe', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('accepts a 2xx model list and names the probed model', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, { data: [{ id: 'doubao-seedance-1-0-pro-250528' }, { id: 'doubao-seedance-1-5-pro-251215' }] }))
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: [{ id: 'doubao-seedance-1-0-pro-250528' }, { id: 'doubao-seedance-2-5-260628' }] }))
     const result = await adapter().probe(t2v())
     expect(result).toEqual({ ok: true, status: 200, message: 'probe ok for doubao-seedance-1-0-pro-250528' })
     expect(fetchMock.mock.calls[0][0]).toBe(`${base}/api/v3/models`)
@@ -280,11 +280,11 @@ describe('seedance adapter probe', () => {
     const prober = adapter()
     const results = await Promise.all([
       prober.probe(t2v()),
-      prober.probe(capability({ modality: 't2v', model: 'doubao-seedance-1-5-pro-251215' })),
+      prober.probe(capability({ modality: 't2v', model: 'doubao-seedance-2-5-260628' })),
     ])
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(results.map(result => result.ok)).toEqual([true, true])
-    expect(results[1].message).toContain('doubao-seedance-1-5-pro-251215')
+    expect(results[1].message).toContain('doubao-seedance-2-5-260628')
   })
 
   it('denies without fetch for a modality with no seedance endpoint', async () => {

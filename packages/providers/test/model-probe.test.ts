@@ -43,14 +43,14 @@ describe('model-level verification', () => {
 
   it('addresses a vision model through the multimodal endpoint, not the text one', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { output: {} }))
-    await new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' }).verifyModel(capability('qwen-vl-max', 'vlm', 'dashscope'))
+    await new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' }).verifyModel(capability('qwen3-vl-plus', 'vlm', 'dashscope'))
     expect(fetchMock.mock.calls[0][0]).toBe('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation')
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model: 'qwen-vl-max' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model: 'qwen3-vl-plus' })
   })
 
   it('caps a probe that could otherwise write an essay', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { candidates: [] }))
-    await new GoogleAdapter({ apiKey: 'key', baseUrl: 'https://generativelanguage.googleapis.com' }).verifyModel(capability('gemini-2.5-pro', 'text', 'google'))
+    await new GoogleAdapter({ apiKey: 'key', baseUrl: 'https://generativelanguage.googleapis.com' }).verifyModel(capability('gemini-3.8-flash', 'text', 'google'))
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ generationConfig: { maxOutputTokens: 1 } })
 
     fetchMock.mockResolvedValue(jsonResponse(200, { content: [] }))

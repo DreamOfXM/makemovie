@@ -115,11 +115,13 @@ export function buildSubmitRequest(
     validateReferenceRequest(capability, request.input)
     const media = readMediaReferences(request.input.media)
 
-    // Wan 2.7 speaks the media array natively. The 2.1–2.6 generation behind it has one
-    // slot for one frame, so the reference list has to collapse — and collapsing it
+    // Wan 2.7 and 3.0 speak the media array natively. The 2.1–2.6 generation behind them
+    // has one slot for one frame, so the reference list has to collapse — and collapsing it
     // silently would drop a conditioning input the caller paid for, hence the throw.
     if (usesMediaVideoApi(capability.model)) {
-      if (media.length > 2) throw new Error(`model "${capability.model}" takes at most two media items, ${media.length} were sent`)
+      // Two is what the 2.7 page states for this dialect. The 3.0 page documents more
+      // media types without a count verified here, so the vendor arbitrates those.
+      if (capability.model.startsWith('wan2.7') && media.length > 2) throw new Error(`model "${capability.model}" takes at most two media items, ${media.length} were sent`)
       return {
         url: `${base}${VIDEO_PATH}`,
         method: 'POST',
@@ -128,7 +130,7 @@ export function buildSubmitRequest(
       }
     }
     if (capability.modality === 'r2v') {
-      throw new Error(`model "${capability.model}" has no reference-to-video endpoint: only the wan2.7 generation takes a media array`)
+      throw new Error(`model "${capability.model}" has no reference-to-video endpoint: only the wan2.7 and wan3.0 generations take a media array`)
     }
     const firstFrame = media.find(reference => reference.type === 'first_frame')
     if (!firstFrame) throw new Error(`dashscope i2v needs a first_frame reference, model "${capability.model}"`)
@@ -227,7 +229,7 @@ export function isQwenImage(model: string): boolean {
  * and sending the wrong one is a vendor-side 400 on a request already billed.
  */
 export function usesMediaVideoApi(model: string): boolean {
-  return model.startsWith('wan2.7')
+  return model.startsWith('wan2.7') || model.startsWith('wan3.0')
 }
 
 /**

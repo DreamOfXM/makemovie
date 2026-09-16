@@ -115,7 +115,8 @@ export function buildOpenAIImageRequest(baseUrl: string, apiKey: string, request
     body: {
       model: request.model,
       prompt: promptOf(request),
-      // gpt-image-1 answers with base64 only, which is why the artifact is carried as bytes.
+      // The images endpoint answers with b64_json and no URL, so the bytes have to travel
+      // with the result instead of being fetched by the worker later.
       ...(size ? { size } : {}),
       ...openAIImageFormat(request.parameters),
     },

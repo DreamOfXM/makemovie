@@ -23,7 +23,7 @@ const API_KEY = 'goog-test-key'
 function capability(partial: Partial<ModelCapability> & { modality: ModelCapability['modality'] }): ModelCapability {
   return {
     provider: 'google',
-    model: 'gemini-2.5-pro',
+    model: 'gemini-3.8-flash',
     acceptsFirstFrame: false,
     acceptsReferenceImages: false,
     maxReferenceImages: 0,
@@ -33,7 +33,7 @@ function capability(partial: Partial<ModelCapability> & { modality: ModelCapabil
 
 function request(overrides: Partial<{ model: string; input: Record<string, unknown>; parameters: Record<string, unknown> }> = {}) {
   return {
-    model: overrides.model ?? 'gemini-2.5-pro',
+    model: overrides.model ?? 'gemini-3.8-flash',
     input: overrides.input ?? { prompt: 'rain-soaked street at night, neon reflections' },
     parameters: overrides.parameters ?? {},
   }
@@ -87,7 +87,7 @@ afterEach(() => {
 describe('google request building', () => {
   it('builds a generateContent call whose prompt is the only text part', () => {
     const req = buildGoogleGenerateRequest(base, API_KEY, capability({ modality: 'text' }), request())
-    expect(req.url).toBe(`${base}/v1beta/models/gemini-2.5-pro:generateContent`)
+    expect(req.url).toBe(`${base}/v1beta/models/gemini-3.8-flash:generateContent`)
     expect(req.method).toBe('POST')
     expect(req.body).toEqual({
       contents: [{ role: 'user', parts: [{ text: 'rain-soaked street at night, neon reflections' }] }],
@@ -104,13 +104,12 @@ describe('google request building', () => {
 
   it('splits the audit data urls into typed inline parts ahead of the question', () => {
     const req = buildGoogleGenerateRequest(base, API_KEY, capability({ modality: 'vlm' }), request({
-      model: 'gemini-3.5-flash',
       input: { prompt: 'is this frame usable?', images: ['data:image/jpeg;base64,' + Buffer.from('frame').toString('base64')] },
     }))
     const contents = (req.body as { contents: Array<{ parts: Array<Record<string, unknown>> }> }).contents
     expect(contents[0].parts[0]).toEqual({ inlineData: { mimeType: 'image/jpeg', data: Buffer.from('frame').toString('base64') } })
     expect(contents[0].parts[1]).toEqual({ text: 'is this frame usable?' })
-    expect(req.url).toBe(`${base}/v1beta/models/gemini-3.5-flash:generateContent`)
+    expect(req.url).toBe(`${base}/v1beta/models/gemini-3.8-flash:generateContent`)
   })
 
   it('drops an image it cannot describe rather than sending a broken part', () => {
@@ -139,9 +138,51 @@ describe('google request building', () => {
 
   it('routes video to the long-running predict endpoint', () => {
     expect(() => buildGoogleGenerateRequest(base, API_KEY, capability({ modality: 't2v' }), request())).toThrow(/long-running predict endpoint/)
+    expect(() => buildGoogleGenerateRequest(base, API_KEY, capability({ modality: 'i2v' }), request())).toThrow(/long-running predict endpoint/)
     const req = buildGoogleVideoSubmitRequest(base, API_KEY, request({ model: 'veo-3.1-generate-preview' }))
     expect(req.url).toBe(`${base}/v1beta/models/veo-3.1-generate-preview:predictLongRunning`)
     expect(req.body).toEqual({ instances: [{ prompt: 'rain-soaked street at night, neon reflections' }], parameters: {} })
+  })
+
+  describe('veo reference media', () => {
+    const frame = (payload: string, mime = 'image/jpeg') => `data:${mime};base64,${Buffer.from(payload).toString('base64')}`
+
+    function instanceOf(req: { body?: unknown }): Record<string, unknown> {
+      return (req.body as { instances: Record<string, unknown>[] }).instances[0]!
+    }
+
+    it('animates the first frame from inside the instance', () => {
+      const req = buildGoogleVideoSubmitRequest(base, API_KEY, request({
+        model: 'veo-3.1-generate-preview',
+        input: { prompt: 'the kitten stirs', media: [{ type: 'first_frame', url: frame('first') }] },
+      }))
+      expect(instanceOf(req)).toEqual({
+        prompt: 'the kitten stirs',
+        image: { inlineData: { mimeType: 'image/jpeg', data: Buffer.from('first').toString('base64') } },
+      })
+    })
+
+    it('carries a last frame only beside the frame it transitions from', () => {
+      const req = buildGoogleVideoSubmitRequest(base, API_KEY, request({
+        model: 'veo-3.1-generate-preview',
+        input: { prompt: 'p', media: [{ type: 'first_frame', url: frame('first') }, { type: 'last_frame', url: frame('last', 'image/png') }] },
+      }))
+      expect(instanceOf(req).lastFrame).toEqual({ inlineData: { mimeType: 'image/png', data: Buffer.from('last').toString('base64') } })
+      expect(() => buildGoogleVideoSubmitRequest(base, API_KEY, request({ input: { prompt: 'p', media: [{ type: 'last_frame', url: frame('last') }] } })))
+        .toThrow(/last frame only alongside a first frame/)
+    })
+
+    it('refuses a frame it would otherwise overwrite, and one it has no field for', () => {
+      const two = request({ input: { prompt: 'p', media: [{ type: 'first_frame', url: frame('a') }, { type: 'first_frame', url: frame('b') }] } })
+      expect(() => buildGoogleVideoSubmitRequest(base, API_KEY, two)).toThrow(/one first frame, two were sent/)
+      const audio = request({ input: { prompt: 'p', media: [{ type: 'first_frame', url: frame('a') }, { type: 'driving_audio', url: frame('a', 'audio/wav') }] } })
+      expect(() => buildGoogleVideoSubmitRequest(base, API_KEY, audio)).toThrow(/no field for a "driving_audio" reference/)
+    })
+
+    it('refuses a public url, because veo takes the frame inline', () => {
+      const req = request({ input: { prompt: 'p', media: [{ type: 'first_frame', url: 'https://cdn.example.com/f.jpg' }] } })
+      expect(() => buildGoogleVideoSubmitRequest(base, API_KEY, req)).toThrow(/inline as a base64 data URL/)
+    })
   })
 
   it('keeps only the video parameters it knows', () => {
@@ -150,7 +191,7 @@ describe('google request building', () => {
   })
 
   it('trims a trailing slash off the base url', () => {
-    expect(buildGoogleGenerateRequest(`${base}/`, API_KEY, capability({ modality: 'text' }), request()).url).toBe(`${base}/v1beta/models/gemini-2.5-pro:generateContent`)
+    expect(buildGoogleGenerateRequest(`${base}/`, API_KEY, capability({ modality: 'text' }), request()).url).toBe(`${base}/v1beta/models/gemini-3.8-flash:generateContent`)
     expect(buildGoogleOperationRequest(`${base}/`, API_KEY, 'models/v/operations/o').url).toBe(`${base}/v1beta/models/v/operations/o`)
     expect(buildGoogleProbeRequest(`${base}/`, API_KEY).url).toBe(`${base}/v1beta/models`)
   })
@@ -282,7 +323,7 @@ describe('google adapter submit and poll', () => {
   })
 
   it('rejects the modalities google has no endpoint for before spending a call', async () => {
-    for (const modality of ['i2v', 'r2v', 'tts', 'music'] as const) {
+    for (const modality of ['r2v', 'tts', 'music'] as const) {
       const cap = capability({ modality })
       await expect(adapter().submit(cap, request())).rejects.toThrow(/does not support modality/)
       await expect(adapter().poll(cap, 'go-sync-1')).rejects.toThrow(/does not support modality/)
@@ -299,9 +340,9 @@ describe('google adapter submit and poll', () => {
 
 describe('google adapter probe', () => {
   it('probes the model list once and reuses the verdict', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, { models: [{ name: 'models/gemini-2.5-pro' }] }))
+    fetchMock.mockResolvedValue(jsonResponse(200, { models: [{ name: 'models/gemini-3.8-flash' }] }))
     const a = adapter()
-    expect(await a.probe(capability({ modality: 'text' }))).toEqual({ ok: true, status: 200, message: 'probe ok for gemini-2.5-pro' })
+    expect(await a.probe(capability({ modality: 'text' }))).toEqual({ ok: true, status: 200, message: 'probe ok for gemini-3.8-flash' })
     await a.probe(capability({ modality: 'image' }))
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(callUrl(0)).toBe(`${base}/v1beta/models`)

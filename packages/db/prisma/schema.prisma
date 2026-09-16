@@ -347,7 +347,7 @@ model ModelCapability {
   connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   bindings CapabilityBinding[]
   // One vendor model_name answers both video dialects: Kling serves text2video and
-  // image2video for `kling-v1-6`, and Seedance's pro models take a text-only or an
+  // image2video for `kling-v2-5-turbo`, and Seedance's pro models take a text-only or an
   // image-bearing content array under one id.
   @@unique([connectionId, model, modality])
 }

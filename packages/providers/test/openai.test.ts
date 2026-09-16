@@ -114,9 +114,9 @@ describe('openai request building', () => {
   })
 
   it('asks the image endpoint for base64 and carries an explicit format', () => {
-    const req = buildOpenAIImageRequest(base, API_KEY, request({ model: 'gpt-image-1', parameters: { size: '1536x1024', output_format: 'webp' } }))
+    const req = buildOpenAIImageRequest(base, API_KEY, request({ model: 'gpt-image-2.5-flare', parameters: { size: '1536x1024', output_format: 'webp' } }))
     expect(req.url).toBe(`${base}/v1/images/generations`)
-    expect(req.body).toEqual({ model: 'gpt-image-1', prompt: 'a rainy night market, neon reflections', size: '1536x1024', output_format: 'webp' })
+    expect(req.body).toEqual({ model: 'gpt-image-2.5-flare', prompt: 'a rainy night market, neon reflections', size: '1536x1024', output_format: 'webp' })
     expect(mimeTypeForOpenAIImage({ output_format: 'webp' })).toBe('image/webp')
     expect(mimeTypeForOpenAIImage({ output_format: 'not-a-format' })).toBe('image/png')
     expect(mimeTypeForOpenAIImage({})).toBe('image/png')
@@ -201,7 +201,7 @@ describe('openai adapter submit and poll', () => {
 
   it('lands an image as inline bytes with the type it asked for', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { data: [{ b64_json: Buffer.from('png-bytes').toString('base64') }] }))
-    const submitted = await adapter().submit(capability({ modality: 'image', model: 'gpt-image-1' }), request({ parameters: { output_format: 'jpeg' } }))
+    const submitted = await adapter().submit(capability({ modality: 'image', model: 'gpt-image-2.5-flare' }), request({ parameters: { output_format: 'jpeg' } }))
     const result = await adapter().poll(capability({ modality: 'image' }), submitted.taskId)
     expect(result.status).toBe('completed')
     expect(result.inlineArtifact?.mimeType).toBe('image/jpeg')

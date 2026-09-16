@@ -1,12 +1,17 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
-import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { parseDataUrl, probeModel, sanitizeError } from './types.js'
+import type { AdapterOptions, MediaReference, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { parseDataUrl, probeModel, readMediaReferences, sanitizeError } from './types.js'
 
 export const GOOGLE_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com'
 
 const API_VERSION = 'v1beta'
 
-const SUPPORTED_MODALITIES = new Set<ModelModality>(['text', 'vlm', 'image', 't2v'])
+const SUPPORTED_MODALITIES = new Set<ModelModality>(['text', 'vlm', 'image', 't2v', 'i2v'])
+
+/** Veo answers on a long-running endpoint and takes its frames in an `instances` array, so every other modality shares one synchronous path. */
+function isVideoModality(modality: ModelModality): boolean {
+  return modality === 't2v' || modality === 'i2v'
+}
 
 export interface GoogleHttpRequest {
   url: string
@@ -42,7 +47,7 @@ export function buildGoogleGenerateRequest(
   capability: ModelCapability,
   request: ProviderRequest,
 ): GoogleHttpRequest {
-  if (capability.modality === 't2v') throw new Error('google video models use the long-running predict endpoint')
+  if (isVideoModality(capability.modality)) throw new Error('google video models use the long-running predict endpoint')
   const prompt = promptOf(request)
   const supplied = Array.isArray(request.input.messages) && request.input.messages.length > 0 ? request.input.messages : undefined
   const parts: unknown[] = []
@@ -96,16 +101,50 @@ export function buildGoogleModelProbeRequest(baseUrl: string, apiKey: string, ca
   return { url, headers, body }
 }
 
+/** Veo wants the type and the payload in two fields; the worker hands over one data URL. */
+function toVeoInline(url: string, type: string): { inlineData: { mimeType: string; data: string } } {
+  const parsed = parseDataUrl(url)
+  if (!parsed) throw new Error(`veo takes the "${type}" frame inline as a base64 data URL, got a value that is not one`)
+  return { inlineData: { mimeType: parsed.mimeType, data: parsed.base64 } }
+}
+
+/**
+ * Where each neutral reference type lands in a Veo instance.
+ *
+ * `reference_image` is absent on purpose: the vendor caps those at three and names them a
+ * Veo 3.1 feature, but no stage of this pipeline decides which character a shot belongs to,
+ * so a row that accepted them would be a promise nothing upstream can keep.
+ */
+function applyVeoReferences(instance: Record<string, unknown>, media: MediaReference[]): void {
+  for (const reference of media) {
+    if (reference.type === 'first_frame') {
+      if (instance.image) throw new Error('veo takes one first frame, two were sent')
+      instance.image = toVeoInline(reference.url, reference.type)
+      continue
+    }
+    if (reference.type === 'last_frame') {
+      // The vendor documents it as a transition target for the same clip, not as a second
+      // starting frame, so a last frame with nothing to start from is a malformed request.
+      if (!instance.image) throw new Error('veo takes a last frame only alongside a first frame')
+      instance.lastFrame = toVeoInline(reference.url, reference.type)
+      continue
+    }
+    throw new Error(`veo has no field for a "${reference.type}" reference`)
+  }
+}
+
 /** Veo takes the prompt inside an `instances` array and answers with an operation, not a clip. */
 export function buildGoogleVideoSubmitRequest(baseUrl: string, apiKey: string, request: ProviderRequest): GoogleHttpRequest {
   const parameters: Record<string, unknown> = {}
   if (typeof request.parameters.aspectRatio === 'string') parameters.aspectRatio = request.parameters.aspectRatio
   if (typeof request.parameters.durationSeconds === 'number' && Number.isFinite(request.parameters.durationSeconds)) parameters.durationSeconds = request.parameters.durationSeconds
+  const instance: Record<string, unknown> = { prompt: promptOf(request) }
+  applyVeoReferences(instance, readMediaReferences(request.input.media))
   return {
     url: `${baseUrlOf(baseUrl)}/${API_VERSION}/models/${request.model}:predictLongRunning`,
     method: 'POST',
     headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
-    body: { instances: [{ prompt: promptOf(request) }], parameters },
+    body: { instances: [instance], parameters },
   }
 }
 
@@ -220,7 +259,7 @@ export class GoogleAdapter implements ProviderAdapter {
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     assertSupported(capability)
-    if (capability.modality === 't2v') {
+    if (isVideoModality(capability.modality)) {
       const httpRequest = buildGoogleVideoSubmitRequest(this.options.baseUrl, this.options.apiKey, request)
       const body = await this.json(httpRequest)
       const name = body?.name
