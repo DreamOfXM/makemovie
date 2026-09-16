@@ -49,7 +49,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'role.EDITOR': 'Editor',
     'role.REVIEWER': 'Reviewer',
     'role.VIEWER': 'Viewer',
-    'role.OWNER.hint': 'Full control, including billing-grade settings and member removal.',
+    'role.OWNER.hint': 'Full control, including organization settings and member removal.',
     'role.ADMIN.hint': 'Manages providers, bindings, members, and reads the audit log.',
     'role.EDITOR.hint': 'Creates projects, episodes, storyboards, and triggers generation.',
     'role.REVIEWER.hint': 'Approves or blocks work that needs review.',
