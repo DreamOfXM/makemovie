@@ -2,7 +2,10 @@ import type { ModelCapability } from '@studio/domain'
 import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
 import { probeModel, readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
-const TEXT_PATH = '/api/v1/services/aigc/text-generation/generation'
+// Chat lives on the OpenAI-compatible endpoint: the new generation of qwen models
+// (qwen3.x-max and friends) is only served there, and the legacy native path answers
+// them with a misleading `InvalidParameter | url error`. Verified live 2026-09-22.
+const TEXT_PATH = '/compatible-mode/v1/chat/completions'
 const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
 const IMAGE_PATH = '/api/v1/services/aigc/text2image/image-synthesis'
 const VIDEO_PATH = '/api/v1/services/aigc/video-generation/video-synthesis'
@@ -39,7 +42,9 @@ export function buildSubmitRequest(
       url: `${base}${TEXT_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { messages }, parameters: request.parameters },
+      // Compatible-mode takes OpenAI's flat body: messages and sampling knobs at
+      // the top level, not nested under input/parameters.
+      body: { model: request.model, messages, ...(request.parameters ?? {}) },
     }
   }
 
@@ -188,7 +193,7 @@ export function buildCredentialProbeRequest(baseUrl: string, apiKey: string): Da
     url: `${base}${TEXT_PATH}`,
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: { model: 'qwen-turbo', input: { messages: [{ role: 'user', content: 'ping' }] }, parameters: { max_tokens: 1 } },
+    body: { model: 'qwen-turbo', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 },
   }
 }
 
@@ -211,7 +216,7 @@ export function buildModelProbeRequest(baseUrl: string, apiKey: string, capabili
   return {
     url: `${base}${TEXT_PATH}`,
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: { model: capability.model, input: { messages: [{ role: 'user', content: 'ping' }] }, parameters: { max_tokens: 1 } },
+    body: { model: capability.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 },
   }
 }
 
@@ -359,7 +364,9 @@ export class DashScopeAdapter implements ProviderAdapter {
     return probeModel(
       buildModelProbeRequest(this.options.baseUrl, this.options.apiKey, capability),
       capability.model,
-      body => body.output !== undefined,
+      // Native endpoints wrap everything in `output`; compatible-mode answers
+      // carry top-level `choices`. Both mean "the model answered".
+      body => body.output !== undefined || Array.isArray(body.choices),
     )
   }
 
@@ -374,7 +381,10 @@ export class DashScopeAdapter implements ProviderAdapter {
     if (!response.ok) throw new Error(sanitizeError(body ?? `HTTP ${response.status}`))
 
     if (capability.modality === 'text' || capability.modality === 'vlm') {
-      const output = (body?.output ?? {}) as Record<string, unknown>
+      // Compatible-mode text responses are flat (choices at the top level); the
+      // native multimodal one still nests under output. extractDashScopeText
+      // reads both shapes, so hand it whichever wrapper exists.
+      const output = (body?.output ?? body ?? {}) as Record<string, unknown>
       const text = extractDashScopeText(output)
       const taskId = `ds-sync-${++syncCounter}`
       syncResults.set(taskId, { text })

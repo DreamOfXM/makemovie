@@ -307,16 +307,18 @@ describe('validateReferenceRequest', () => {
 describe('dashscope request building', () => {
   const base = 'https://dashscope.aliyuncs.com'
 
-  it('builds a synchronous text request', () => {
+  it('builds a synchronous text request on the compatible-mode endpoint', () => {
     const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'text', model: 'qwen3.8-max' }), {
       model: 'qwen3.8-max',
       input: { messages: [{ role: 'user', content: 'hello' }] },
       parameters: { result_format: 'message' },
     })
-    expect(req.url).toBe(`${base}/api/v1/services/aigc/text-generation/generation`)
+    // New-generation qwen models are only served on compatible-mode; the legacy
+    // native path answers them with `InvalidParameter | url error` (live-verified).
+    expect(req.url).toBe(`${base}/compatible-mode/v1/chat/completions`)
     expect(req.headers.Authorization).toBe('Bearer sk-test')
     expect(req.headers['X-DashScope-Async']).toBeUndefined()
-    expect(req.body).toMatchObject({ model: 'qwen3.8-max', input: { messages: [{ role: 'user', content: 'hello' }] } })
+    expect(req.body).toMatchObject({ model: 'qwen3.8-max', messages: [{ role: 'user', content: 'hello' }], result_format: 'message' })
   })
 
   it('falls back to prompt-as-user-message for text', () => {
@@ -325,8 +327,8 @@ describe('dashscope request building', () => {
       input: { prompt: 'write episode 1' },
       parameters: {},
     })
-    const body = req.body as { input: { messages: Array<{ role: string; content: string }> } }
-    expect(body.input.messages).toEqual([{ role: 'user', content: 'write episode 1' }])
+    const body = req.body as { messages: Array<{ role: string; content: string }> }
+    expect(body.messages).toEqual([{ role: 'user', content: 'write episode 1' }])
   })
 
   it('builds a synchronous multimodal request for vlm', () => {
@@ -504,10 +506,10 @@ describe('dashscope request building', () => {
     expect(req.headers.Authorization).toBe('Bearer sk-test')
   })
 
-  it('builds a credential probe against the text endpoint for any capability', () => {
+  it('builds a credential probe against the compatible-mode chat endpoint for any capability', () => {
     const req = buildCredentialProbeRequest(`${base}/`, 'sk-test')
-    expect(req.url).toBe(`${base}/api/v1/services/aigc/text-generation/generation`)
-    expect(req.body).toMatchObject({ model: 'qwen-turbo', parameters: { max_tokens: 1 } })
+    expect(req.url).toBe(`${base}/compatible-mode/v1/chat/completions`)
+    expect(req.body).toMatchObject({ model: 'qwen-turbo', max_tokens: 1 })
     expect(req.headers['X-DashScope-Async']).toBeUndefined()
   })
 })
@@ -554,7 +556,7 @@ describe('dashscope adapter probe', () => {
     const prober = adapter()
     await Promise.all(catalogCapabilities().map(item => prober.probe(item)))
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock.mock.calls[0][0]).toContain('/text-generation/generation')
+    expect(fetchMock.mock.calls[0][0]).toContain('/compatible-mode/v1/chat/completions')
   })
 
   it('reports the provider error for every capability when the key is rejected', async () => {
