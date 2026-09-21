@@ -356,9 +356,10 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
                 placeholder={t('sources.uploadPlaceholder')}
                 aria-invalid={uploadError !== null}
               />
-              {/* The 200k ceiling exists only server-side; a live counter keeps it
+              {/* The ceiling exists only server-side; a live counter keeps it
                   from being discovered by hitting the rejection. */}
               <p className="text-muted-foreground text-xs">{t('sources.charCount', { count: content.length, limit: 200_000 })}</p>
+              <p className="text-muted-foreground text-xs">{t('sources.uploadDisabledHint')}</p>
             </Field>
             <div className="flex justify-end">
               <GuardedButton

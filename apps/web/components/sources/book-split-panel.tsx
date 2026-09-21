@@ -307,10 +307,16 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
             }
           />
           {!pasteOpen && (
-            <div className="mt-2 flex justify-center">
+            <div className="mt-2 flex flex-col items-center gap-1">
               <Button size="sm" variant="outline" disabled={uploading} onClick={() => { setPasteOpen(true); setUploadError(null) }}>
                 {t('bookSplit.pasteOpen')}
               </Button>
+              {/* Embedded webviews cannot open a native file picker at all — the
+                  button above "does nothing" there. Naming that on screen saves
+                  the user from thinking the product is broken. */}
+              <p className="text-muted-foreground max-w-md text-center text-xs">
+                {t('bookSplit.pickerHint')}
+              </p>
             </div>
           )}
           {pasteOpen && (
