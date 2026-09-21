@@ -357,6 +357,11 @@ export function uploadProjectSource(api: ApiClient, projectId: string, file: Fil
   return api<UploadProjectSourceResult>(`/projects/${projectId}/source/upload`, { method: 'POST', body })
 }
 
+/** The paste door to the same intake — for webviews without a file picker, or text already on the clipboard. */
+export function pasteProjectSource(api: ApiClient, projectId: string, content: string): Promise<UploadProjectSourceResult> {
+  return api<UploadProjectSourceResult>(`/projects/${projectId}/source`, { method: 'POST', body: JSON.stringify({ content }) })
+}
+
 export function getProjectSource(api: ApiClient, projectId: string): Promise<ProjectSourceResponse> {
   return api<ProjectSourceResponse>(`/projects/${projectId}/source`)
 }

@@ -117,6 +117,28 @@ describe('whole-book upload', () => {
     expect(payload.segments.every(s => s.episodeId === null)).toBe(true)
   })
 
+  it('accepts a pasted book through the JSON door and rejects a duplicate of it', async () => {
+    const projectId = await createProject('series')
+    const paste = await env.app.inject({
+      method: 'POST',
+      url: `/projects/${projectId}/source`,
+      headers: authHeaders(),
+      payload: { content: BOOK },
+    })
+    expect(paste.statusCode).toBe(201)
+    const created = paste.json() as { version: { filename: string; version: number }; segments: number }
+    expect(created.version.version).toBe(1)
+    expect(created.version.filename).toBe('粘贴的整本.txt')
+    expect(created.segments).toBe(3)
+
+    const dup = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: BOOK } })
+    expect(dup.statusCode).toBe(409)
+    expect(dup.json()).toMatchObject({ error: 'projectSources:duplicate' })
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    expect(((matrix.json() as { segments: unknown[] }).segments)).toHaveLength(3)
+  })
+
   it('decodes a GBK-encoded book without mojibake', async () => {
     const projectId = await createProject('series')
     // 纸巷 in GBK: invalid as UTF-8, decodable as GB18030.

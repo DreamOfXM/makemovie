@@ -16,6 +16,7 @@ import {
   applyProjectSource,
   createEpisode,
   getProjectSource,
+  pasteProjectSource,
   toProjectFormat,
   updateSourceAllocations,
   uploadProjectSource,
@@ -36,6 +37,7 @@ import { HelpHint } from '@/components/ui/help-hint'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { TableSkeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 
@@ -69,6 +71,11 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
 
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  // Paste door: file pickers do not exist in every embedding (webviews), and
+  // text already on the clipboard should not require a round-trip through a file.
+  const [pasteOpen, setPasteOpen] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const [pasting, setPasting] = useState(false)
   // Identifies the mutation in flight: 'apply', 'new-episode', `alloc-<segmentId>`.
   const [busy, setBusy] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<ApplyProjectSourceResultItem[] | null>(null)
@@ -146,6 +153,25 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
       setUploadError(friendlyError(error))
     } finally {
       setUploading(false)
+    }
+  }
+
+  async function uploadPasted() {
+    if (!pasteText.trim()) return
+    setPasting(true)
+    setUploadError(null)
+    setActionError(null)
+    try {
+      const result = await pasteProjectSource(api, projectId, pasteText)
+      toast.success(t('bookSplit.uploadedToast', { version: result.version.version, segments: result.segments }))
+      setPasteOpen(false)
+      setPasteText('')
+      setApplyResult(null)
+      matrix.reload()
+    } catch (error) {
+      setUploadError(friendlyError(error))
+    } finally {
+      setPasting(false)
     }
   }
 
@@ -252,7 +278,11 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
               </span>
             }
             action={
-              uploading ? (
+              pasteOpen ? (
+                <Button size="sm" variant="outline" disabled={pasting} onClick={() => { setPasteOpen(false); setUploadError(null) }}>
+                  {t('bookSplit.pasteCancel')}
+                </Button>
+              ) : uploading ? (
                 <Button size="sm" disabled>
                   <LoaderCircleIcon className="animate-spin" />
                   {t('bookSplit.uploading')}
@@ -265,12 +295,47 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
               )
             }
           />
+          {!pasteOpen && (
+            <div className="mt-2 flex justify-center">
+              <Button size="sm" variant="outline" disabled={uploading} onClick={() => { setPasteOpen(true); setUploadError(null) }}>
+                {t('bookSplit.pasteOpen')}
+              </Button>
+            </div>
+          )}
+          {pasteOpen && (
+            <div className="mt-3 space-y-2">
+              <Textarea
+                aria-label={t('bookSplit.pasteLabel')}
+                placeholder={t('bookSplit.pastePlaceholder')}
+                value={pasteText}
+                onChange={event => setPasteText(event.target.value)}
+                disabled={pasting}
+                rows={8}
+                className="font-mono text-xs"
+              />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-muted-foreground text-xs">
+                  {t('bookSplit.pasteCount', { count: pasteText.length, limit: 1_000_000 })}
+                </span>
+                {pasting ? (
+                  <Button size="sm" disabled>
+                    <LoaderCircleIcon className="animate-spin" />
+                    {t('bookSplit.uploading')}
+                  </Button>
+                ) : (
+                  <Button size="sm" disabled={!pasteText.trim()} onClick={() => void uploadPasted()}>
+                    {t('bookSplit.pasteSubmit')}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
           {uploadError && (
             <Alert variant="destructive" className="mt-3">
               <CircleAlertIcon />
               <AlertDescription className="justify-items-start">
                 <p>{uploadError}</p>
-                <Button size="sm" variant="outline" disabled={uploading} onClick={pickFile}>
+                <Button size="sm" variant="outline" disabled={uploading || pasting} onClick={() => (pasteOpen ? setPasteOpen(true) : pickFile())}>
                   {t('common.retry')}
                 </Button>
               </AlertDescription>

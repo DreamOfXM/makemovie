@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { type PrismaClient } from '@studio/db'
 import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT } from '@studio/domain'
 import { splitChapters } from '@studio/pipeline'
@@ -52,6 +52,72 @@ function decodeBook(buffer: Buffer): string {
 }
 
 export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
+  // Shared intake for both doors — the multipart file and the pasted text: validate
+  // the ceiling, refuse a byte-identical re-intake, split mechanically, and version.
+  async function ingestBook(request: FastifyRequest, project: { id: string; organizationId: string }, content: string, filename: string, reply: FastifyReply) {
+    const auth = request.auth!
+    if (!content.trim()) return reply.code(400).send({ error: 'the book is empty' })
+    if (content.length > PROJECT_SOURCE_CHAR_LIMIT) {
+      return reply.code(400).send({ error: `book must not exceed ${PROJECT_SOURCE_CHAR_LIMIT} characters` })
+    }
+
+    const checksum = checksumOf(content)
+    const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
+    if (latest?.checksum === checksum) return reply.code(409).send({ error: 'projectSources:duplicate' })
+
+    const segments = splitChapters(content)
+    const created = await app.db.$transaction(async tx => {
+      const version = await tx.projectSourceVersion.create({
+        data: {
+          projectId: project.id,
+          version: (latest?.version ?? 0) + 1,
+          filename,
+          content,
+          checksum,
+          charCount: content.length,
+          status: 'DRAFT',
+        },
+      })
+      await tx.sourceSegment.createMany({
+        data: segments.map((segment, index) => ({
+          projectSourceVersionId: version.id,
+          index,
+          title: segment.title,
+          marked: segment.marked,
+          content: segment.content,
+          charCount: segment.content.length,
+        })),
+      })
+      return version
+    })
+    await recordAudit(app.db, {
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: 'projectSource.upload',
+      entityType: 'ProjectSourceVersion',
+      entityId: created.id,
+      payload: {
+        projectId: project.id,
+        version: created.version,
+        filename: created.filename,
+        charCount: created.charCount,
+        segments: segments.length,
+        markedSegments: segments.filter(segment => segment.marked).length,
+      },
+    })
+    return reply.code(201).send({
+      version: {
+        id: created.id,
+        version: created.version,
+        filename: created.filename,
+        charCount: created.charCount,
+        checksum: created.checksum,
+        status: created.status,
+      },
+      segments: segments.length,
+    })
+  }
+
   // Whole-book upload: multipart file in, versioned source plus mechanical
   // chapter segmentation out. The paste box (episode-level, 200k) stays where it
   // is; this is the project-level intake with its own 1M ceiling.
@@ -59,8 +125,7 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
     '/projects/:projectId/source/upload',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
-      const auth = request.auth!
-      const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
+      const project = await findProjectInOrg(app.db, request.params.projectId, request.auth!.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
 
       const file = await request.file()
@@ -69,68 +134,22 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       if (ext !== '.txt' && ext !== '.md') {
         return reply.code(400).send({ error: 'only .txt and .md files are supported (.docx is planned)' })
       }
-      const buffer = await file.toBuffer()
-      const content = decodeBook(buffer)
-      if (!content.trim()) return reply.code(400).send({ error: 'file is empty' })
-      if (content.length > PROJECT_SOURCE_CHAR_LIMIT) {
-        return reply.code(400).send({ error: `book must not exceed ${PROJECT_SOURCE_CHAR_LIMIT} characters` })
-      }
+      return ingestBook(request, project, decodeBook(await file.toBuffer()), file.filename, reply)
+    },
+  )
 
-      const checksum = checksumOf(content)
-      const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
-      if (latest?.checksum === checksum) return reply.code(409).send({ error: 'projectSources:duplicate' })
-
-      const segments = splitChapters(content)
-      const created = await app.db.$transaction(async tx => {
-        const version = await tx.projectSourceVersion.create({
-          data: {
-            projectId: project.id,
-            version: (latest?.version ?? 0) + 1,
-            filename: file.filename,
-            content,
-            checksum,
-            charCount: content.length,
-            status: 'DRAFT',
-          },
-        })
-        await tx.sourceSegment.createMany({
-          data: segments.map((segment, index) => ({
-            projectSourceVersionId: version.id,
-            index,
-            title: segment.title,
-            marked: segment.marked,
-            content: segment.content,
-            charCount: segment.content.length,
-          })),
-        })
-        return version
-      })
-      await recordAudit(app.db, {
-        organizationId: auth.organizationId,
-        userId: auth.userId,
-        action: 'projectSource.upload',
-        entityType: 'ProjectSourceVersion',
-        entityId: created.id,
-        payload: {
-          projectId: project.id,
-          version: created.version,
-          filename: created.filename,
-          charCount: created.charCount,
-          segments: segments.length,
-          markedSegments: segments.filter(segment => segment.marked).length,
-        },
-      })
-      return reply.code(201).send({
-        version: {
-          id: created.id,
-          version: created.version,
-          filename: created.filename,
-          charCount: created.charCount,
-          checksum: created.checksum,
-          status: created.status,
-        },
-        segments: segments.length,
-      })
+  // The paste door: same intake for browsers and environments where a file picker
+  // is unavailable (embedded webviews), or simply for text already on the clipboard.
+  app.post<{ Params: { projectId: string }; Body: { content?: string; filename?: string } }>(
+    '/projects/:projectId/source',
+    { preHandler: requirePermission('project:update') },
+    async (request, reply) => {
+      const project = await findProjectInOrg(app.db, request.params.projectId, request.auth!.organizationId)
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const content = request.body?.content
+      if (typeof content !== 'string') return reply.code(400).send({ error: 'content is required' })
+      const filename = request.body?.filename?.trim() || '粘贴的整本.txt'
+      return ingestBook(request, project, content, filename, reply)
     },
   )
 
