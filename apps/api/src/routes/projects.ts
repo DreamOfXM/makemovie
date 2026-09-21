@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { ProjectFormat } from '@studio/db'
-import { contentLocales, formatDefaults, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
+import { contentLocales, durationOutOfRange, formatDefaults, formatDurationRange, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -22,7 +22,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  app.post<{ Body: { name?: string; contentLocale?: string; format?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
+  app.post<{ Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
     const auth = request.auth!
     const name = request.body?.name?.trim()
     if (!name) return reply.code(400).send({ error: 'name is required' })
@@ -34,19 +34,33 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (!isProjectFormat(format)) {
       return reply.code(400).send({ error: `format must be one of ${projectFormats.join(', ')}` })
     }
+    // A custom default is the whole point of the format ranges: dramas running
+    // 90-second episodes or a 95-minute film set it here once, per-episode.
+    const range = formatDurationRange[format]
+    if (request.body?.targetDurationMs !== undefined && durationOutOfRange(format, request.body.targetDurationMs)) {
+      return reply.code(400).send({ error: `targetDurationMs must be between ${range.minMs} and ${range.maxMs} for format ${format}` })
+    }
     const prismaFormat = ProjectFormat[format.toUpperCase() as keyof typeof ProjectFormat]
     const project = await app.db.$transaction(async tx => {
-      const created = await tx.project.create({ data: { organizationId: auth.organizationId, name, contentLocale, format: prismaFormat } })
+      const created = await tx.project.create({
+        data: {
+          organizationId: auth.organizationId,
+          name,
+          contentLocale,
+          format: prismaFormat,
+          ...(request.body?.targetDurationMs === undefined ? {} : { targetDurationMs: request.body?.targetDurationMs }),
+        },
+      })
       // A film is a one-episode project, so its single episode exists from the
-      // start, seeded with the format's target duration.
+      // start, seeded with the effective target duration.
       if (prismaFormat === 'FILM') {
         await tx.episode.create({
-          data: { projectId: created.id, number: 1, title: '正片', targetDurationMs: formatDefaults.film.targetDurationMs },
+          data: { projectId: created.id, number: 1, title: '正片', targetDurationMs: created.targetDurationMs ?? formatDefaults.film.targetDurationMs },
         })
       }
       return created
     })
-    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale, format: project.format } })
+    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale, format: project.format, targetDurationMs: project.targetDurationMs } })
     return reply.code(201).send(project)
   })
 

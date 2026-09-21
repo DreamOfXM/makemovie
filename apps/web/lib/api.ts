@@ -174,6 +174,8 @@ export interface Project {
   status: DbWorkflowStatus
   /** The project's shape (short drama / series / film); fixed at creation. */
   format: DbProjectFormat
+  /** The project's own default for its episodes' length; null = the format constant. */
+  targetDurationMs: number | null
   /** Language the pipeline writes this project's content in; not the console locale. */
   contentLocale: ContentLocale
   createdAt: string
@@ -269,6 +271,8 @@ export interface CreateProjectInput {
   contentLocale: ContentLocale
   /** Absent keeps the old behaviour: the server defaults to short_drama. */
   format?: ProjectFormat
+  /** Custom per-episode default inside the format's range; absent = the format constant. */
+  targetDurationMs?: number
 }
 
 export function createProject(api: ApiClient, input: CreateProjectInput): Promise<Project> {

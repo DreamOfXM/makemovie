@@ -6,6 +6,7 @@ import {
   canTransition,
   contentLocales,
   formatDefaults,
+  formatDurationRange,
   minRoleFor,
   projectFormats,
   workflowStatuses,
@@ -49,8 +50,14 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const [name, setName] = useState('')
   const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [format, setFormat] = useState<ProjectFormat>('short_drama')
+  // Minutes in the box, ms on the wire. Switching formats re-seeds the box with
+  // that format's default; typing over it is the fine-tune the ranges exist for.
+  const [durationMin, setDurationMin] = useState(formatDefaults.short_drama.targetDurationMs / 60_000)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const durationRange = formatDurationRange[format]
+  const durationValid =
+    Number.isFinite(durationMin) && durationMin >= durationRange.minMs / 60_000 && durationMin <= durationRange.maxMs / 60_000
 
   useEffect(() => {
     if (!state) return
@@ -59,6 +66,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     // is a hint the field below can overrule — never a decision made for the user.
     setContentLocale(state.mode === 'rename' ? state.project.contentLocale : locale)
     setFormat('short_drama')
+    setDurationMin(formatDefaults.short_drama.targetDurationMs / 60_000)
     setError('')
   }, [state, locale])
 
@@ -69,7 +77,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     setError('')
     try {
       if (state.mode === 'create') {
-        const created = await createProject(api, { name, contentLocale, format })
+        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMin * 60_000) })
         onDone('create', created.name)
       } else {
         await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
@@ -139,7 +147,10 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
                           name="projectFormat"
                           className="accent-primary size-4"
                           checked={selected}
-                          onChange={() => setFormat(item)}
+                          onChange={() => {
+                            setFormat(item)
+                            setDurationMin(formatDefaults[item].targetDurationMs / 60_000)
+                          }}
                           disabled={busy}
                         />
                         <span className="text-sm font-medium">{t(`projects.format.${item}`)}</span>
@@ -155,13 +166,39 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
                 })}
               </div>
               <p className="text-muted-foreground text-xs">{t(`projects.format.desc.${format}`)}</p>
+              <div className="space-y-1.5">
+                <label htmlFor="projectDuration" className="flex items-center gap-1.5 text-sm font-medium">
+                  {t('projects.durationLabel')}
+                  <HelpHint text={t('projects.durationHint')} />
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="projectDuration"
+                    type="number"
+                    inputMode="decimal"
+                    step="0.5"
+                    min={durationRange.minMs / 60_000}
+                    max={durationRange.maxMs / 60_000}
+                    value={durationMin}
+                    onChange={e => setDurationMin(Number(e.target.value))}
+                    disabled={busy}
+                    className={cn(
+                      'border-input bg-background w-28 rounded-md border px-2.5 py-1.5 text-sm',
+                      !durationValid && 'border-destructive focus-visible:ring-destructive',
+                    )}
+                  />
+                  <span className="text-muted-foreground text-xs">
+                    {t('projects.durationRange', { min: durationRange.minMs / 60_000, max: durationRange.maxMs / 60_000 })}
+                  </span>
+                </div>
+              </div>
             </div>
           )}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !name.trim()}>
+            <Button type="submit" disabled={busy || !name.trim() || (state?.mode === 'create' && !durationValid)}>
               {busy ? t('common.saving') : state?.mode === 'rename' ? t('common.save') : t('common.create')}
             </Button>
           </DialogFooter>

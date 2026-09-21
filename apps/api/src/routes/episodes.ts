@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
-import { can, canTransition, formatDefaults, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
+import { can, canTransition, durationOutOfRange, formatDefaults, formatDurationRange, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { authenticate, requirePermission } from '../plugins/auth.js'
 import type { AuthContext } from '../types.js'
@@ -200,21 +200,26 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       if (targetDurationMs !== undefined && (!Number.isInteger(targetDurationMs) || targetDurationMs <= 0)) {
         return reply.code(400).send({ error: 'targetDurationMs must be a positive integer' })
       }
+      const fmt = project.format.toLowerCase() as 'short_drama' | 'series' | 'film'
+      if (targetDurationMs !== undefined && durationOutOfRange(fmt, targetDurationMs)) {
+        const range = formatDurationRange[fmt]
+        return reply.code(400).send({ error: `targetDurationMs must be between ${range.minMs} and ${range.maxMs} for format ${project.format}` })
+      }
       // A film locked to its single episode at project creation: nothing to add.
       if (project.format === 'FILM') {
         const existing = await app.db.episode.findFirst({ where: { projectId: project.id } })
         if (existing) return reply.code(409).send({ error: 'episodes:filmLockedToOne' })
       }
-      // Duration defaults come from the format unless the caller overrides; the
-      // pipeline reads this value, never the format itself.
-      const defaults = formatDefaults[project.format.toLowerCase() as 'short_drama' | 'series' | 'film']
+      // Duration defaults cascade: the project's own default wins over the format
+      // constant; the pipeline reads the episode value, never the format itself.
+      const defaults = formatDefaults[fmt]
       try {
         const episode = await app.db.episode.create({
           data: {
             projectId: project.id,
             number: number as number,
             title: title.trim(),
-            targetDurationMs: targetDurationMs ?? defaults.targetDurationMs,
+            targetDurationMs: targetDurationMs ?? project.targetDurationMs ?? defaults.targetDurationMs,
           },
         })
         await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'episode.create', entityType: 'Episode', entityId: episode.id, payload: { number: episode.number, title: episode.title, targetDurationMs: episode.targetDurationMs } })

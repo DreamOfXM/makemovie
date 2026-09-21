@@ -68,6 +68,30 @@ describe('project format', () => {
     expect(override.statusCode).toBe(201)
     expect((override.json() as { targetDurationMs: number }).targetDurationMs).toBe(90 * 60_000)
   })
+
+  it('accepts a project-level custom duration inside the format range and rejects outside it', async () => {
+    // 90-second episodes: today's short-drama shape, not the 8-minute constant.
+    const custom = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '九十秒短剧', format: 'short_drama', targetDurationMs: 90_000 } })
+    expect(custom.statusCode).toBe(201)
+    const projectId = (custom.json() as { id: string }).id
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第一集' } })
+    expect((episode.json() as { targetDurationMs: number }).targetDurationMs).toBe(90_000)
+
+    const tooShort = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '超短', format: 'short_drama', targetDurationMs: 5_000 } })
+    expect(tooShort.statusCode).toBe(400)
+    const tooLong = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '超长', format: 'film', targetDurationMs: 400 * 60_000 } })
+    expect(tooLong.statusCode).toBe(400)
+
+    // The film born with a 95-minute cut seeds its single episode accordingly.
+    const film = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '九十五分钟电影', format: 'film', targetDurationMs: 95 * 60_000 } })
+    expect(film.statusCode).toBe(201)
+    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${(film.json() as { id: string }).id}/episodes`, headers: authHeaders() })
+    expect(((episodes.json() as Array<{ targetDurationMs: number }>)[0]).targetDurationMs).toBe(95 * 60_000)
+
+    // Per-episode overrides are range-checked against the project's format.
+    const badEpisode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '越界', targetDurationMs: 60 * 60_000 } })
+    expect(badEpisode.statusCode).toBe(400)
+  })
 })
 
 describe('whole-book upload', () => {

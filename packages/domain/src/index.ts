@@ -39,6 +39,22 @@ export const formatDefaults: Record<ProjectFormat, { targetDurationMs: number; m
   film: { targetDurationMs: 120 * 60_000, maxEpisodes: 1 },
 }
 
+/**
+ * Defaults are only seeds: real dramas run 1-3 minute episodes and films are not
+ * necessarily 120 minutes, so each format carries a sane range the user can
+ * fine-tune inside. Validation clamps here; the pipeline stays duration-agnostic.
+ */
+export const formatDurationRange: Record<ProjectFormat, { minMs: number; maxMs: number }> = {
+  short_drama: { minMs: 30_000, maxMs: 30 * 60_000 },
+  series: { minMs: 5 * 60_000, maxMs: 120 * 60_000 },
+  film: { minMs: 10 * 60_000, maxMs: 300 * 60_000 },
+}
+
+export function durationOutOfRange(format: ProjectFormat, targetDurationMs: number): boolean {
+  const range = formatDurationRange[format]
+  return !Number.isInteger(targetDurationMs) || targetDurationMs < range.minMs || targetDurationMs > range.maxMs
+}
+
 /** Whole-book uploads get their own ceiling; the 200k per-version limit stays episode-level. */
 export const PROJECT_SOURCE_CHAR_LIMIT = 1_000_000
 

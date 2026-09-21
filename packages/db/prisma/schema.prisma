@@ -101,6 +101,9 @@ model Project {
   status WorkflowStatus @default(DRAFT)
   contentLocale String @default("zh")
   format ProjectFormat @default(SHORT_DRAMA)
+  // The project's own default for its episodes' target duration; null means the
+  // format constant seeds episodes instead. Episodes may still override.
+  targetDurationMs Int?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
