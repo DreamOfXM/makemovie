@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { ArrowRightIcon, ClapperboardIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import type { WorkflowStatus } from '@studio/domain'
@@ -261,6 +262,7 @@ interface ProjectRowProps {
 }
 
 function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete }: ProjectRowProps) {
+  const router = useRouter()
   const { t } = useI18n()
   const episodes = [...(project.episodes ?? [])].sort((a, b) => a.number - b.number)
   const statuses = episodes.map(episode => toWorkflowStatus(episode.status))
@@ -272,7 +274,12 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
   const projectStatus = toWorkflowStatus(project.status)
 
   return (
-    <li className="group/project flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-accent/40 sm:flex-row sm:items-center sm:gap-6">
+    // The whole row opens the project: users click the name, the band, the empty
+    // space — aiming at a text-sized link inside a full-width row loses every time.
+    <li
+      className="group/project flex cursor-pointer flex-col gap-3 px-5 py-4 transition-colors hover:bg-accent/40 sm:flex-row sm:items-center sm:gap-6"
+      onClick={() => router.push(`/projects/${project.id}`)}
+    >
       <div className="min-w-0 sm:w-56 sm:shrink-0">
         <Link href={`/projects/${project.id}`} className="hover:text-primary block truncate text-[15px] font-semibold transition-colors">
           {project.name}
@@ -320,10 +327,10 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
             <ArrowRightIcon />
           </Link>
         </Button>
-        <Button variant="ghost" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={onRename}>
+        <Button variant="ghost" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={event => { event.stopPropagation(); onRename() }}>
           <PencilIcon />
         </Button>
-        <Button variant="ghost" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={onDelete}>
+        <Button variant="ghost" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={event => { event.stopPropagation(); onDelete() }}>
           <Trash2Icon className="text-muted-foreground group-hover/project:text-destructive" />
         </Button>
       </div>
