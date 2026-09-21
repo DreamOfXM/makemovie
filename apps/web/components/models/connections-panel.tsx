@@ -449,6 +449,12 @@ function ConnectionCard({
             <AlertTitle>{t('models.lastError')}</AlertTitle>
             <AlertDescription className="justify-items-start">
               <p className="font-mono text-xs break-all">{connection.lastError}</p>
+              {/* The banner survives until the next connection-level probe clears
+                  it, so its age is the difference between "broken now" and an
+                  "old failure already fixed" — say which. */}
+              <p className="text-muted-foreground text-xs">
+                {t('models.lastErrorAt', { when: relativeTime(connection.updatedAt, locale) })}
+              </p>
             </AlertDescription>
           </Alert>
         </CardContent>

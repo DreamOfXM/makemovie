@@ -88,6 +88,8 @@ export interface Connection {
   baseUrl: string
   enabled: boolean
   lastError: string | null
+  /** When the connection row last changed — for the banner this names the failed probe's age. */
+  updatedAt: string
   apiKeySet?: boolean
   accessKeySet?: boolean
   createdAt: string
