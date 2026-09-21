@@ -50,9 +50,23 @@ interface UsageRowDto {
   binding: UsageBindingDto | null
 }
 
+interface UsageProjectDto {
+  projectId: string
+  projectName: string
+  taskCount: number
+  entryCount: number
+  inputUnits: number
+  outputUnits: number
+}
+
 interface UsageReportDto {
   rows: UsageRowDto[]
   total: { taskCount: number; entryCount: number; retriedTaskCount: number; inputUnits: number; outputUnits: number }
+  /** Space-scope view only: the same totals decomposed per project, so the organization
+   * ledger can point at a project without a second round-trip. Rows whose task is gone
+   * belong to no project and are reported in `ungrouped` rather than dropped. */
+  byProject?: UsageProjectDto[]
+  ungrouped?: { entryCount: number; inputUnits: number; outputUnits: number }
   /** What the unit columns mean. The only unit statement this API makes; there is no
    * second one anywhere, and a reader that needs a price has come to the wrong repository. */
   units: { input: 'prompt_characters'; output: 'bytes' }
@@ -109,6 +123,13 @@ interface Group {
   modality: string
   taskIds: Set<string>
   retriedTaskIds: Set<string>
+  entryCount: number
+  inputUnits: number
+  outputUnits: number
+}
+
+interface ProjectBucket {
+  taskIds: Set<string>
   entryCount: number
   inputUnits: number
   outputUnits: number
@@ -178,10 +199,32 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
       )
 
       const groups = new Map<string, Group>()
+      // Space scope (no project/episode filter) also buckets by project, for the
+      // organization ledger's drill-down column.
+      const byProjectMap = new Map<string, ProjectBucket>()
+      let ungrouped: { entryCount: number; inputUnits: number; outputUnits: number } | null = null
       for (const entry of entries) {
         const task = entry.taskId ? taskById.get(entry.taskId) ?? null : null
         if (projectId && task?.projectId !== projectId) continue
         if (episodeId && task?.episodeId !== episodeId) continue
+        if (!projectId && !episodeId) {
+          if (task) {
+            let bucket = byProjectMap.get(task.projectId)
+            if (!bucket) {
+              bucket = { taskIds: new Set(), entryCount: 0, inputUnits: 0, outputUnits: 0 }
+              byProjectMap.set(task.projectId, bucket)
+            }
+            bucket.entryCount += 1
+            bucket.inputUnits += entry.inputUnits
+            bucket.outputUnits += entry.outputUnits
+            bucket.taskIds.add(task.id)
+          } else {
+            ungrouped ??= { entryCount: 0, inputUnits: 0, outputUnits: 0 }
+            ungrouped.entryCount += 1
+            ungrouped.inputUnits += entry.inputUnits
+            ungrouped.outputUnits += entry.outputUnits
+          }
+        }
         const stage = task?.stage ?? null
         const key = `${stage ?? '-'}\u0000${entry.provider}\u0000${entry.model}`
         let group = groups.get(key)
@@ -238,6 +281,27 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
         })
       }
 
+      let byProject: UsageProjectDto[] | undefined
+      let ungroupedDto: UsageReportDto['ungrouped']
+      if (!projectId && !episodeId && (byProjectMap.size > 0 || ungrouped)) {
+        const names = await app.db.project.findMany({
+          where: { id: { in: [...byProjectMap.keys()] }, organizationId: auth.organizationId },
+          select: { id: true, name: true },
+        })
+        const nameById = new Map(names.map(project => [project.id, project.name]))
+        byProject = [...byProjectMap.entries()]
+          .map(([id, bucket]) => ({
+            projectId: id,
+            projectName: nameById.get(id) ?? id,
+            taskCount: bucket.taskIds.size,
+            entryCount: bucket.entryCount,
+            inputUnits: bucket.inputUnits,
+            outputUnits: bucket.outputUnits,
+          }))
+          .sort((a, b) => b.entryCount - a.entryCount)
+        ungroupedDto = ungrouped ?? undefined
+      }
+
       const report: UsageReportDto = {
         rows,
         total: {
@@ -247,6 +311,8 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
           inputUnits: rows.reduce((sum, row) => sum + row.inputUnits, 0),
           outputUnits: rows.reduce((sum, row) => sum + row.outputUnits, 0),
         },
+        ...(byProject ? { byProject } : {}),
+        ...(ungroupedDto ? { ungrouped: ungroupedDto } : {}),
         units: { input: 'prompt_characters', output: 'bytes' },
       }
       return report

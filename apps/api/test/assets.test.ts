@@ -25,6 +25,7 @@ interface AssetDto {
   name: string
   description: string
   status: string
+  usageCount: number
   versions: AssetVersionDto[]
   generationTaskId: string | null
 }
@@ -119,8 +120,9 @@ describe('episode assets', () => {
     const created = await env.app.inject({ method: 'POST', url: assetsUrl, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(created.statusCode).toBe(201)
     const asset = created.json().asset as AssetDto
-    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'status', 'versions'])
-    // Authored by a human, so no task produced it yet.
+    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'projectAssetId', 'status', 'usageCount', 'versions'])
+    // Authored by a human and bound to no shot yet.
+    expect(asset.usageCount).toBe(0)
     expect(asset.generationTaskId).toBeNull()
     expect(asset.kind).toBe('character')
     expect(asset.name).toBe('小雨')
@@ -202,6 +204,35 @@ describe('asset version approval', () => {
     const again = await env.app.inject({ method: 'POST', url: approveUrl, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
     expect(again.json()).toEqual({ error: 'assets:alreadyApproved' })
+  })
+
+  it('demotes the older approved version when a newer one is approved, and deprecation retires it', async () => {
+    // 治理语义与剧本/源文档一致:同一素材同时只有一个已通过版本。否则新旧两行
+    // 都挂着"已通过",用户无从知道生成时参考图用的是哪张(实景教训)。
+    const created = await env.app.inject({ method: 'POST', url: assetsUrl, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小满', description: '十六岁少女' } })
+    expect(created.statusCode).toBe(201)
+    const assetId = created.json().asset.id as string
+    await env.db.assetVersion.create({ data: { assetId, version: 1, description: '第一版', status: 'DRAFT' } })
+    await env.db.assetVersion.create({ data: { assetId, version: 2, description: '第二版', status: 'DRAFT' } })
+
+    const approveV1 = await env.app.inject({ method: 'POST', url: `${assetsUrl}/${assetId}/versions/1/approve`, headers: authHeaders(editorToken) })
+    expect(approveV1.statusCode).toBe(200)
+    const approveV2 = await env.app.inject({ method: 'POST', url: `${assetsUrl}/${assetId}/versions/2/approve`, headers: authHeaders(editorToken) })
+    expect(approveV2.statusCode).toBe(200)
+
+    const versions = await env.db.assetVersion.findMany({ where: { assetId }, orderBy: { version: 'asc' } })
+    expect(versions.map(version => [version.version, version.status])).toEqual([[1, 'DRAFT'], [2, 'APPROVED']])
+
+    // 废弃当前已通过版本:退回草稿,参考图解析不再选中它;再废弃一次 409。
+    const deprecate = await env.app.inject({ method: 'POST', url: `${assetsUrl}/${assetId}/versions/2/deprecate`, headers: authHeaders(editorToken) })
+    expect(deprecate.statusCode).toBe(200)
+    expect(deprecate.json().version).toMatchObject({ version: 2, status: 'DRAFT' })
+    const again = await env.app.inject({ method: 'POST', url: `${assetsUrl}/${assetId}/versions/2/deprecate`, headers: authHeaders(editorToken) })
+    expect(again.statusCode).toBe(409)
+    expect(again.json()).toEqual({ error: 'assets:notApproved' })
+    // 退回草稿后可重新审批(v2 恢复使用)或直接删除。
+    const reapprove = await env.app.inject({ method: 'POST', url: `${assetsUrl}/${assetId}/versions/2/approve`, headers: authHeaders(editorToken) })
+    expect(reapprove.statusCode).toBe(200)
   })
 
   it('404s on unknown assets, versions and episodes of another organization', async () => {

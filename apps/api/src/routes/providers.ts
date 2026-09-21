@@ -167,7 +167,9 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
             probeStatus: result.ok ? 'verified' : 'failed',
             probeMessage: result.message ?? null,
             lastProbedAt: new Date(),
-            entitlementVerifiedAt: result.ok ? new Date() : null,
+            // The credential probe never addresses this model — it pings a hardcoded
+            // model name to prove the key. It must not claim model-level entitlement.
+            credentialVerifiedAt: result.ok ? new Date() : null,
           },
         })
         results.push({ capabilityId: capability.id, model: capability.model, modality: capability.modality, ...result })
@@ -206,8 +208,14 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const acceptsReferenceImages = Boolean(request.body?.acceptsReferenceImages)
       // Refusing beats dropping: a row that quietly lost the flag the operator set would
       // fail at generation time with a message about reference media, far from here.
-      if (modality !== 'i2v' && modality !== 'r2v' && (acceptsFirstFrame || acceptsReferenceImages || maxReferenceImages > 0)) {
-        return reply.code(400).send({ error: `first-frame and reference input describe video models, not a "${modality}" one` })
+      // First frames stay a video dialect, but reference images are not: qwen-image-edit
+      // is an image model that draws its subject from approved asset sheets, so an image
+      // row may declare references — it just may not take a video's starting frame.
+      if (modality !== 'i2v' && modality !== 'r2v' && modality !== 'image' && (acceptsFirstFrame || acceptsReferenceImages || maxReferenceImages > 0)) {
+        return reply.code(400).send({ error: `first-frame and reference input describe video or image models, not a "${modality}" one` })
+      }
+      if (modality !== 'i2v' && modality !== 'r2v' && acceptsFirstFrame) {
+        return reply.code(400).send({ error: `a first frame is video conditioning, not something a "${modality}" model takes` })
       }
       const displayName = request.body?.displayName?.trim()
       if (displayName && displayName.length > 120) return reply.code(400).send({ error: 'displayName must be 120 characters or fewer' })
@@ -271,8 +279,26 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       if (!connection.enabled) return reply.code(409).send({ error: 'connection is disabled' })
 
       if (capability.modality !== 'text' && capability.modality !== 'vlm') {
-        return reply.code(400).send({ error: `a "${capability.modality}" model cannot be probed without spending on it — one real generation will verify it` })
+        // 生成类模态(图/视频/配音/音乐)没有"免费点名"请求,但用户需要能对单行
+        // 做密钥级定向探测(比如手动新增一个视频模型后):发一条密钥测试消息,
+        // 只盖 credentialVerifiedAt,不碰该模型的生成额度。模型权限仍由首次
+        // 真实生成验证。
+        const adapter = await adapterFor(connection)
+        const result = await adapter.probe(domainCapability(connection, capability))
+        await app.db.modelCapability.update({
+          where: { id: capability.id },
+          data: {
+            probeStatus: result.ok ? 'verified' : 'failed',
+            probeMessage: result.message ?? null,
+            lastProbedAt: new Date(),
+            credentialVerifiedAt: result.ok ? new Date() : null,
+          },
+        })
+        await app.db.providerConnection.update({ where: { id: connection.id }, data: { lastError: result.ok ? null : result.message ?? 'probe failed' } })
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.probe', entityType: 'ModelCapability', entityId: capability.id, payload: { model: capability.model, modality: capability.modality, ok: result.ok, status: result.status, tier: 'credential' } })
+        return { capabilityId: capability.id, model: capability.model, modality: capability.modality, ...result }
       }
+
       const adapter = await adapterFor(connection)
       if (!adapter.verifyModel) {
         return reply.code(400).send({ error: `${connection.provider} offers no request that names a single model without generating from it — one real generation will verify it` })

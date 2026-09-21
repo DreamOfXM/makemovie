@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createPipelineQueue, type ComposeEpisodePayload, type RunTaskPayload } from '@studio/jobs'
+import { generationSeed, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
 import { startTestEnv, type TestEnv } from './env.js'
 
 // The api suite shares the Redis instance with the worker suite; a private
@@ -52,6 +54,7 @@ interface TaskDto {
   updatedAt: string
   artifacts: ArtifactDto[]
   qc: { kind: string; score: number; status: string } | null
+  retryTrace: { attempt: number | null; candidateErrors: string[]; reference: { model: string; conditioned: boolean; reason?: string }[] } | null
 }
 
 interface BatchDto {
@@ -186,7 +189,8 @@ describe('generation trigger', () => {
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(stored.stage).toBe('SCRIPT')
     expect(stored.idempotencyKey).toBe(`${episodeId}:SCRIPT:${episodeId}`)
-    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({ input: { prompt: `根据以下源文档，写出这一集的完整拍摄剧本：\n\n${sourceContent}` } })
+    // 集自 API 建出即带短剧默认 8 分钟时长,prompt 因此含时长与场景规则(形态真驱动)。
+    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({ input: { prompt: `根据以下源文档，写出这一集的完整拍摄剧本。\n\n时长与结构要求（最高优先级）：\n- 本集目标时长约 8 分钟。\n- 篇幅预算：中文剧本全篇约 2800 字以内，英文剧本约 1440 词以内（按每分钟约 350 字 / 180 词折算）。宁可精炼，不得注水。\n- 剧本必须按场景分段：每个场景以「场景 1」「场景 2」……这样的场景标记行开头（标记独占一行，场景正文写在标记之后）。场景标记是后续分镜切分的锚点，必须逐场编号、不得省略。\n\n源文档：\n${sourceContent}` } })
   })
 
   it('fans a storyboard stage out over the requested storyboards only', async () => {
@@ -212,7 +216,14 @@ describe('generation trigger', () => {
 
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: videoTaskId } })
     expect(stored.idempotencyKey).toBe(`${episodeId}:VIDEO:${storyboardIds[1]}`)
-    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({ input: { prompt: 'SB2: Chase scene' } })
+    // A paid media request pins its base seed in the snapshot, derived from that key.
+    // P7 守卫给每条无风格的媒体 prompt 补上真人质感基准，并把改写留痕写进快照——
+    // 快照不再是"原样的输入"，而是"实际付钱买的东西"。
+    expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
+      input: { prompt: `SB2: Chase scene\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      parameters: { seed: generationSeed(stored.idempotencyKey!) },
+      promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
+    })
 
     // The composition worker finds each clip through the batch → storyboards link.
     const linked = await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id }, include: { storyboards: true } })
@@ -231,6 +242,23 @@ describe('generation trigger', () => {
     expect(res.json().batch.id).toBe(scriptBatchId)
     expect(await env.db.generationTask.count({ where: { batchId: scriptBatchId } })).toBe(1)
     expect(await env.db.generationBatch.count({ where: { episodeId } })).toBe(2)
+  })
+
+  it('re-queues only FAILED tasks on a plain re-trigger and never burns a new batch', async () => {
+    // 一键重试失败项的契约底座:幂等撞库时死任务重置排队、活任务不动、批次不新增。
+    await env.db.generationTask.update({ where: { id: scriptTaskId }, data: { status: 'FAILED', attempts: 3, provider: 'mock', model: 'mock-text', errorSnapshot: 'quota exhausted after 3 attempts' } })
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().batch.id).toBe(scriptBatchId)
+
+    const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: scriptTaskId } })
+    expect(stored).toMatchObject({ status: 'QUEUED', attempts: 0, provider: null, model: null, errorSnapshot: null })
+    expect(await env.db.generationBatch.count({ where: { episodeId } })).toBe(2)
+
+    const retryEvent = await env.db.auditEvent.findFirst({ where: { organizationId, action: 'generation.retry' }, orderBy: { createdAt: 'desc' } })
+    expect(retryEvent).not.toBeNull()
+    expect(JSON.parse(retryEvent!.payload)).toMatchObject({ stage: 'SCRIPT', retried: 1, created: 0 })
   })
 
   it('rejects a stage whose slot has no verified binding', async () => {
@@ -281,6 +309,138 @@ describe('task cancellation', () => {
 
     const missing = await env.app.inject({ method: 'POST', url: '/generations/tasks/does-not-exist/cancel', headers: authHeaders(editorToken) })
     expect(missing.statusCode).toBe(404)
+  })
+})
+
+describe('batch cancellation', () => {
+  it('cancels only the queued tasks of a batch, refuses a second stop, and audits it', async () => {
+    const missing = await env.app.inject({ method: 'POST', url: '/generations/batches/no-such-batch/cancel', headers: authHeaders(editorToken) })
+    expect(missing.statusCode).toBe(404)
+
+    const batch = await env.db.generationBatch.create({
+      data: {
+        organizationId, episodeId, stage: 'MUSIC', status: 'RUNNING', plannedCount: 3,
+        tasks: { create: [
+          { organizationId, stage: 'MUSIC', status: 'QUEUED', idempotencyKey: `${episodeId}:batch-stop:1` },
+          { organizationId, stage: 'MUSIC', status: 'QUEUED', idempotencyKey: `${episodeId}:batch-stop:2` },
+          { organizationId, stage: 'MUSIC', status: 'RUNNING', idempotencyKey: `${episodeId}:batch-stop:3` },
+        ] },
+      },
+    })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(viewerToken) })
+    expect(forbidden.statusCode).toBe(403)
+
+    const res = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { cancelled: number; batch: BatchDto }
+    expect(body.cancelled).toBe(2)
+    expect(body.batch.tasks.filter(task => task.status === 'CANCELLED')).toHaveLength(2)
+    // 执行中的任务不掐:provider 请求已发出,那笔已经烧掉;批次仍 RUNNING,
+    // 等它落定后由 rollUp 归位(部分成功 → NEEDS_REVIEW),自动推进链随之停住。
+    const running = await env.db.generationTask.findFirstOrThrow({ where: { idempotencyKey: `${episodeId}:batch-stop:3` } })
+    expect(running.status).toBe('RUNNING')
+    expect((await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id } })).status).toBe('RUNNING')
+
+    const again = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
+    expect(again.statusCode).toBe(409)
+
+    const event = await env.db.auditEvent.findFirst({ where: { organizationId, action: 'generation.cancel', entityType: 'generation-batch' }, orderBy: { createdAt: 'desc' } })
+    expect(event).not.toBeNull()
+    expect(JSON.parse(event!.payload)).toMatchObject({ stage: 'MUSIC', cancelled: 2 })
+
+    // 清场:这条批次不属于本集的真实账,后面的批次计数测试不能被它污染。
+    await env.db.generationTask.deleteMany({ where: { batchId: batch.id } })
+    await env.db.generationBatch.delete({ where: { id: batch.id } })
+  })
+})
+
+describe('prompt guards on trigger', () => {
+  async function newProject(name: string): Promise<{ projectId: string; episodeId: string }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+    expect(episode.statusCode).toBe(201)
+    return { projectId, episodeId: episode.json().id as string }
+  }
+
+  async function addShot(targetEpisodeId: string, number: number, title: string, description: string): Promise<string> {
+    const created = await env.app.inject({
+      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number, title, durationMs: 5000, description, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(created.statusCode).toBe(201)
+    return created.json().id as string
+  }
+
+  let guardEpisodeId: string
+  let unboundShotId: string
+
+  it('blocks the unbound shot, repairs the bound one, and records both in the snapshot and audit', async () => {
+    const { projectId: guardProjectId, episodeId } = await newProject(`Guard Drama ${randomUUID().slice(0, 8)}`)
+    guardEpisodeId = episodeId
+    const anchoredShotId = await addShot(episodeId, 1, '点睛', '一只枯瘦的手悬在砚台上方')
+    unboundShotId = await addShot(episodeId, 2, '空巷', '夜色下的青石板路')
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '守夜人点睛', checksum: `guard-${randomUUID()}`, status: 'APPROVED' } })
+
+    const asset = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'character', name: '关师傅', description: '六十岁老匠人，灰白长须，粗布对襟衫' } })
+    expect(asset.statusCode).toBe(201)
+    const assetId = asset.json().asset.id as string
+    await env.db.asset.update({ where: { id: assetId }, data: { status: 'APPROVED' } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: anchoredShotId, assetId, role: 'character' } })
+
+    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'guard-gen', apiKey: 'test-key' } })
+    const capabilities = (connection.json() as Connection).capabilities
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    const binding = await env.app.inject({
+      method: 'POST', url: '/bindings', headers: authHeaders(ownerToken),
+      payload: { slot: 'image_gen', capabilityId: capabilities.find(capability => capability.model === 'mock-image')!.id, projectId: guardProjectId },
+    })
+    expect(binding.statusCode).toBe(201)
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    expect(res.statusCode).toBe(201)
+    const batch = res.json().batch as BatchDto
+    expect(batch.plannedCount).toBe(2)
+
+    const blocked = batch.tasks.find(task => task.storyboardId === unboundShotId)!
+    expect(blocked.status).toBe('BLOCKED')
+    expect(blocked.error).toContain('未绑定任何素材')
+    // 拦下的任务不排队:额度一分不烧。
+    expect(await queue.getJob(`run-${blocked.id}-1`)).toBeUndefined()
+
+    const repaired = batch.tasks.find(task => task.storyboardId === anchoredShotId)!
+    expect(repaired.status).toBe('QUEUED')
+    expect(await queue.getJob(`run-${repaired.id}-1`)).toBeDefined()
+    const snapshot = JSON.parse((await env.db.generationTask.findUniqueOrThrow({ where: { id: repaired.id } })).requestSnapshot ?? '')
+    // 人物没被画面文本点名 → 素材上下文只给了"其他出场素材"一行;外观锚点由守卫补上,
+    // 风格基准同批注入 —— 两者都留痕,审计能回答"这条 prompt 被动过什么"。
+    expect(snapshot.input.prompt).toContain('画面中出现的人物必须与以下已绑定角色的外观设定严格一致')
+    expect(snapshot.input.prompt).toContain('关师傅：六十岁老匠人')
+    expect(snapshot.promptGuards.map((finding: { guard: string }) => finding.guard)).toEqual(['style-anchor', 'character-anchor'])
+    expect(snapshot.promptGuards.every((finding: { action: string }) => finding.action === 'repair')).toBe(true)
+
+    const triggerEvent = await env.db.auditEvent.findFirst({ where: { organizationId, action: 'generation.trigger', entityType: 'generation-batch', entityId: batch.id } })
+    expect(JSON.parse(triggerEvent!.payload)).toMatchObject({ stage: 'IMAGE', guardsBlocked: 1 })
+  })
+
+  it('revives the blocked shot through the retry path once a human binds an asset', async () => {
+    const scene = await env.app.inject({ method: 'POST', url: `/episodes/${guardEpisodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'scene', name: '青石巷', description: '夜色下的青石板路' } })
+    const sceneId = scene.json().asset.id as string
+    await env.db.asset.update({ where: { id: sceneId }, data: { status: 'APPROVED' } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: unboundShotId, assetId: sceneId, role: 'scene' } })
+
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${guardEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    expect(res.statusCode).toBe(200)
+    const blockedBefore = await env.db.generationTask.findFirstOrThrow({ where: { storyboardId: unboundShotId, stage: 'FIRST_FRAME' } })
+    expect(blockedBefore.status).toBe('QUEUED')
+    expect(blockedBefore.errorSnapshot).toBeNull()
+    expect(await queue.getJob(`run-${blockedBefore.id}-1`)).not.toBeNull()
+    // 复活后的快照按当前事实重排:这一镜不再缺锚。
+    const revived = JSON.parse(blockedBefore.requestSnapshot ?? '')
+    expect(revived.input.prompt).toContain('青石巷')
+    expect(revived.promptGuards ?? []).toEqual(expect.arrayContaining([expect.objectContaining({ guard: 'style-anchor' })]))
   })
 })
 
@@ -438,6 +598,21 @@ describe('generation candidate resolution', () => {
     expect(storyboard.statusCode).toBe(201)
   }
 
+  // IMAGE triggers now run the prompt guard chain, and an unbound shot is blocked
+  // before it can reach the candidate pool. This suite pins candidate ordering, so
+  // its shots carry one bound asset each.
+  async function bindSceneTo(targetEpisodeId: string, name: string): Promise<void> {
+    const storyboard = await env.db.storyboard.findFirstOrThrow({ where: { episodeId: targetEpisodeId } })
+    const created = await env.app.inject({
+      method: 'POST', url: `/episodes/${targetEpisodeId}/assets`, headers: authHeaders(editorToken),
+      payload: { kind: 'scene', name, description: `${name}，夜景` },
+    })
+    expect(created.statusCode).toBe(201)
+    const assetId = created.json().asset.id as string
+    await env.db.asset.update({ where: { id: assetId }, data: { status: 'APPROVED' } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: storyboard.id, assetId, role: 'scene' } })
+  }
+
   async function newConnection(name: string): Promise<Connection> {
     const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
@@ -457,6 +632,7 @@ describe('generation candidate resolution', () => {
   it('enqueues project scope first, priority descending within a scope, deduplicated by capability', async () => {
     const { projectId, episodeId: freshEpisodeId } = await newEpisode('Resolve Order Drama')
     await addStoryboard(freshEpisodeId)
+    await bindSceneTo(freshEpisodeId, '天台')
     // IMAGE is gated on an approved script.
     await env.db.scriptVersion.create({ data: { episodeId: freshEpisodeId, version: 1, content: 'a script', checksum: 'resolve-order-script', status: 'APPROVED' } })
     const first = await newConnection('order-first')
@@ -507,7 +683,8 @@ describe('generation candidate resolution', () => {
     const unverifiedConnection = await newConnection('filter-stale-gen')
     const capabilityId = capabilityOf(unverifiedConnection, 'mock-text')
     await bindSlot('storyboard_text', capabilityId)
-    await env.db.modelCapability.update({ where: { id: capabilityId }, data: { entitlementVerifiedAt: null } })
+    // Revoke both tiers: the connection probe's credential stamp and any model-level belief.
+    await env.db.modelCapability.update({ where: { id: capabilityId }, data: { entitlementVerifiedAt: null, credentialVerifiedAt: null } })
 
     const afterRevoke = await env.app.inject({ method: 'POST', url: `/episodes/${entitlementEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
     expect(afterRevoke.statusCode).toBe(409)
@@ -589,7 +766,21 @@ describe('asset generation trigger', () => {
       expect(task).toBeTruthy()
       expect(task!.stage).toBe('ASSET')
       const seed = assetSeeds[index]
-      expect(JSON.parse(task!.requestSnapshot ?? '')).toEqual({ input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}` }, assetId })
+      // 定妆照提示词 = 素材描述 + 该类型的设定图规格（角色为角色板新标准）。
+      const spec = seed.kind === 'character'
+        ? '角色设定板（Character Board）：单张竖版海报式排版，CG 游戏立绘风格、插画质感（严禁照片级真人质感）。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。'
+        : seed.kind === 'scene'
+          ? '场景概念图：无人物空镜，构图与光线符合描述，细节清晰，无文字无水印。'
+          : '道具设定图：单品居中，中性背景，细节清晰，无文字无水印。'
+      // An ASSET task is a paid image request, so its snapshot carries the base seed the
+      // reproducibility question is answered from (the worker test pins how it is derived).
+      const snapshot = JSON.parse(task!.requestSnapshot ?? '')
+      expect(snapshot).toEqual({
+        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}` },
+        parameters: { seed: expect.any(Number) },
+        assetId,
+      })
+      expect(Number.isInteger(snapshot.parameters.seed) && snapshot.parameters.seed >= 0 && snapshot.parameters.seed < 2_147_483_648).toBe(true)
     }
 
     // A per-asset batch connects no storyboards.
@@ -659,6 +850,27 @@ describe('storyboard media', () => {
     expect(bare.video).toBeNull()
   })
 
+  it('serves the execution log trail of a task', async () => {
+    // 直接给任务种日志行,验证查询端点按时间返回且只属于自己的组织。
+    const logTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: scriptBatchId ?? (await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'SCRIPT', status: 'COMPLETED', plannedCount: 1 } })).id, stage: 'SCRIPT', status: 'RUNNING', idempotencyKey: `${episodeId}:LOG:${randomUUID()}` },
+    })
+    await env.db.generationLog.createMany({
+      data: [
+        { organizationId, taskId: logTask.id, batchId: logTask.batchId, episodeId, stage: 'SCRIPT', level: 'info', event: 'task.start', message: 'attempt 1' },
+        { organizationId, taskId: logTask.id, batchId: logTask.batchId, episodeId, stage: 'SCRIPT', level: 'warn', event: 'candidate.skip', message: 'wan3.0-video: quota gone' },
+      ],
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/generations/tasks/${logTask.id}/logs`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { logs: Array<{ event: string; level: string; message: string }> }
+    expect(body.logs.map(log => log.event)).toEqual(['task.start', 'candidate.skip'])
+
+    const missing = await env.app.inject({ method: 'GET', url: '/generations/tasks/nope/logs', headers: authHeaders(viewerToken) })
+    expect(missing.statusCode).toBe(404)
+  })
+
   it('prefers the latest revision when a storyboard has been regenerated', async () => {
     const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 8, title: 'Revision EP' } })
     expect(episode.statusCode).toBe(201)
@@ -695,6 +907,54 @@ describe('storyboard media', () => {
     const row = rows.find(candidate => candidate.id === sbId)!
     expect(row.firstFrame).toMatchObject({ id: regenArtifact.id, downloadUrl: `/artifacts/${regenArtifact.id}/content` })
     expect(row.firstFrame?.id).not.toBe(baseArtifact.id)
+  })
+
+  it('clears a stage error the moment a newer take succeeds, and shows a newer failure over an older win', async () => {
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 10, title: 'Error Cleared EP' } })
+    expect(episode.statusCode).toBe(201)
+    const errorEpisodeId = episode.json().id as string
+    const created = await env.app.inject({
+      method: 'POST', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'Err SB1', durationMs: 5000, description: 'a lane', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(created.statusCode).toBe(201)
+    const sbId = created.json().id as string
+
+    async function createTask(stage: 'FIRST_FRAME' | 'VIDEO', status: 'SUCCEEDED' | 'FAILED' | 'QUEUED', at: string, key: string, errorSnapshot?: string) {
+      return env.db.generationTask.create({
+        data: {
+          organizationId, stage, status, storyboardId: sbId,
+          idempotencyKey: `${errorEpisodeId}:${stage}:${sbId}${key}`,
+          createdAt: new Date(at), ...(errorSnapshot ? { errorSnapshot } : {}),
+          batchId: (await env.db.generationBatch.create({ data: { organizationId, episodeId: errorEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })).id,
+        },
+      })
+    }
+
+    // 旧失败:额度耗尽,横幅出现在首帧列。
+    await createTask('FIRST_FRAME', 'FAILED', '2024-01-01T00:00:00Z', '', '["quota gone"]')
+    let rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    expect(rows.find(row => row.id === sbId)!.firstFrameError).toContain('quota gone')
+
+    // 重生成成功:产物落位,旧失败横幅必须随之消失。
+    const okTask = await createTask('FIRST_FRAME', 'SUCCEEDED', '2024-06-01T00:00:00Z', ':r1')
+    await env.db.mediaArtifact.create({ data: { organizationId, taskId: okTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/err/ff.png`, checksum: 'err-ff', mimeType: 'image/png', version: 1, width: 320, height: 240 } })
+    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    const cleared = rows.find(row => row.id === sbId)!
+    expect(cleared.firstFrame).not.toBeNull()
+    expect(cleared.firstFrameError).toBeNull()
+
+    // 成功之后又失败:显示的是新失败,而不是继续挂着旧失败。
+    await createTask('FIRST_FRAME', 'FAILED', '2024-09-01T00:00:00Z', ':r2', '["new failure"]')
+    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    const refailed = rows.find(row => row.id === sbId)!
+    expect(refailed.firstFrameError).toContain('new failure')
+    expect(refailed.firstFrameError).not.toContain('quota gone')
+
+    // 点了重新生成:一次更新的尝试在途,旧失败横幅退场(进行中的展示由 busy 指示负责)。
+    await createTask('FIRST_FRAME', 'QUEUED', '2024-12-01T00:00:00Z', ':r3')
+    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    expect(rows.find(row => row.id === sbId)!.firstFrameError).toBeNull()
   })
 
   it('files a hand-added shot in the live revision and scopes number conflicts to it', async () => {
@@ -1722,8 +1982,9 @@ describe('project content language', () => {
     const script = await requestInput(scriptBatch.tasks[0].id)
     expect(script.contentLocale).toBe('en')
     // The Chinese template is still the base — the directive is appended to it, which
-    // is what keeps a Chinese project's bytes untouched.
+    // is what keeps a Chinese project's bytes untouched; duration rules ride the base.
     expect(script.prompt).toContain('根据以下源文档')
+    expect(script.prompt).toContain('时长与结构要求')
     expect(script.prompt).toContain('## Output language (highest priority)')
 
     await env.db.scriptVersion.create({
@@ -1749,15 +2010,232 @@ describe('project content language', () => {
     expect(await requestInput(audioBatch.tasks[0].id)).toEqual({ prompt: 'Shen Yi: There is writing on the back.', contentLocale: 'en' })
   })
 
-  it('sends a Chinese project the prompt it has always sent, with no new field at all', async () => {
+  it('sends a Chinese project the same base template, plus only the sanctioned duration block', async () => {
     const { episodeId } = await newEpisode('Chinese Episode Drama')
     await env.db.sourceDocumentVersion.create({
       data: { episodeId, version: 1, content: '原著节选：雨夜的滨江老城区。', checksum: `zh-locale-src-${episodeId}`, status: 'APPROVED' },
     })
 
     const batch = await trigger(episodeId, 'SCRIPT')
-    // Not even a key: the request a Chinese project makes is the one this install has
-    // always sent, which is the whole point of appending rather than rewriting.
-    expect(await requestInput(batch.tasks[0].id)).toEqual({ prompt: '根据以下源文档，写出这一集的完整拍摄剧本：\n\n原著节选：雨夜的滨江老城区。' })
+    // 中文集的请求除「时长与场景规则」外没有任何新键:附加而非改写仍是底线,
+    // 新增的只有拍板过的时长块——它是形态驱动生成的一部分,不是偷偷加字段。
+    expect(await requestInput(batch.tasks[0].id)).toEqual({ prompt: '根据以下源文档，写出这一集的完整拍摄剧本。\n\n时长与结构要求（最高优先级）：\n- 本集目标时长约 8 分钟。\n- 篇幅预算：中文剧本全篇约 2800 字以内，英文剧本约 1440 词以内（按每分钟约 350 字 / 180 词折算）。宁可精炼，不得注水。\n- 剧本必须按场景分段：每个场景以「场景 1」「场景 2」……这样的场景标记行开头（标记独占一行，场景正文写在标记之后）。场景标记是后续分镜切分的锚点，必须逐场编号、不得省略。\n\n源文档：\n原著节选：雨夜的滨江老城区。' })
+  })
+})
+
+describe('composition selection gate', () => {
+  async function newEpisodeWithClips(name: string, clipCount: number): Promise<{ episodeId: string; shotId: string; clips: string[] }> {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    expect(episode.statusCode).toBe(201)
+    const episodeId = episode.json().id as string
+    const shot = await env.app.inject({
+      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
+    })
+    expect(shot.statusCode).toBe(201)
+    const shotId = shot.json().id as string
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', status: 'COMPLETED', plannedCount: 1 } })
+    const task = await env.db.generationTask.create({ data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', storyboardId: shotId } })
+    const clips: string[] = []
+    for (const version of Array.from({ length: clipCount }, (_, index) => index + 1)) {
+      const artifact = await env.db.mediaArtifact.create({
+        data: { organizationId, taskId: task.id, stage: 'VIDEO', objectKey: `${organizationId}/${episodeId}/clip/${shotId}/v${version}.mp4`, checksum: `gate-${name}-${version}`, mimeType: 'video/mp4', version, durationMs: 5000 },
+      })
+      clips.push(artifact.id)
+    }
+    return { episodeId, shotId, clips }
+  }
+
+  it('holds a manual compose while a multi-clip shot has no pick, and releases once a human chooses', async () => {
+    const { episodeId, shotId, clips } = await newEpisodeWithClips('Gate Drama', 2)
+    const held = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    expect(held.statusCode).toBe(409)
+    expect(held.json().error).toBe('composition:selectionOpen')
+    expect(held.json().reasons).toEqual(['#1 SB1'])
+    expect(await env.db.composition.count({ where: { episodeId } })).toBe(0)
+
+    const pick = await env.app.inject({ method: 'POST', url: `/storyboards/${shotId}/video-selection`, headers: authHeaders(editorToken), payload: { artifactId: clips[0] } })
+    expect(pick.statusCode).toBe(200)
+    const go = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    expect(go.statusCode).toBe(201)
+    expect((go.json().composition as CompositionDto).status).toBe('RUNNING')
+  })
+
+  it('leaves a single-clip shot ungated: one version is not a choice', async () => {
+    const { episodeId } = await newEpisodeWithClips('Single Clip Drama', 1)
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    expect(res.statusCode).toBe(201)
+  })
+
+  it('lets allowAuto through the gate but records the escape in the audit trail', async () => {
+    const { episodeId } = await newEpisodeWithClips('Auto Escape Drama', 2)
+    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken), payload: { allowAuto: true } })
+    expect(res.statusCode).toBe(201)
+    const composition = res.json().composition as CompositionDto
+    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=composition.trigger', headers: authHeaders(ownerToken) })
+    const events = audit.json().events as { entityId: string; payload: { allowAuto?: boolean } }[]
+    expect(events.some(event => event.entityId === composition.id && event.payload.allowAuto === true)).toBe(true)
+  })
+})
+
+describe('retry trace on the task DTO', () => {
+  it('exposes the losing candidates and reference degradations of the winning attempt, capped', async () => {
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', plannedCount: 3 } })
+    const winner = await env.db.generationTask.create({
+      data: {
+        organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', storyboardId: storyboardIds[0], attempts: 3,
+        responseSnapshot: JSON.stringify({
+          attempt: 3,
+          candidateErrors: Array.from({ length: 12 }, (_, index) => `qc: candidate ${index} below threshold`),
+          reference: [
+            { model: 'mock-t2v', conditioned: true },
+            { model: 'mock-ref', conditioned: false, reason: 'x'.repeat(500) },
+            { nonsense: true },
+          ],
+        }),
+      },
+    })
+    const loser = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'FAILED', storyboardId: storyboardIds[1], attempts: 1, responseSnapshot: 'not json at all' },
+    })
+    const plain = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'AUDIO', status: 'SUCCEEDED', storyboardId: storyboardIds[1] },
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(ownerToken) })
+    const tasks = (res.json() as { batches: BatchDto[] }).batches.flatMap(item => item.tasks)
+    const winnerDto = tasks.find(candidate => candidate.id === winner.id)!
+    expect(winnerDto.retryTrace).not.toBeNull()
+    expect(winnerDto.retryTrace!.attempt).toBe(3)
+    // 面板原样展示这些字符串,所以后端负责封顶:十条错误、每条四百字符。
+    expect(winnerDto.retryTrace!.candidateErrors).toHaveLength(10)
+    expect(winnerDto.retryTrace!.candidateErrors[0]).toBe('qc: candidate 0 below threshold')
+    expect(winnerDto.retryTrace!.reference).toEqual([
+      { model: 'mock-t2v', conditioned: true },
+      { model: 'mock-ref', conditioned: false, reason: 'x'.repeat(400) },
+    ])
+    expect(tasks.find(candidate => candidate.id === loser.id)!.retryTrace).toBeNull()
+    expect(tasks.find(candidate => candidate.id === plain.id)!.retryTrace).toBeNull()
+  })
+})
+
+describe('generation plan pre-flight', () => {
+  interface PlanDto {
+    stage: string
+    models: string[]
+    items: { id: string; label: string; disposition: string }[]
+    newCount: number
+    retryCount: number
+    skippedCount: number
+    durationMs: number | null
+    revision: number
+  }
+
+  async function plan(token: string, ep: string, query: string): Promise<{ statusCode: number; body: { plan?: PlanDto; error?: string; reasons?: string[] } }> {
+    const res = await env.app.inject({ method: 'GET', url: `/episodes/${ep}/generation-plan?${query}`, headers: authHeaders(token) })
+    return { statusCode: res.statusCode, body: res.json() as { plan?: PlanDto; error?: string; reasons?: string[] } }
+  }
+
+  let planEpisodeId: string
+  let planStoryboardIds: string[] = []
+
+  it('refuses unknown stages and episodes, and mirrors the trigger gate before promising a run', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Plan Drama' } })
+    expect(project.statusCode).toBe(201)
+    const planProjectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/projects/${planProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Plan EP1' } })
+    expect(episode.statusCode).toBe(201)
+    planEpisodeId = episode.json().id as string
+    for (const [number, dialogue] of [['1', '我有台词。'], ['2', '我也有一句。'], ['3', '']] as const) {
+      const storyboard = await env.app.inject({
+        method: 'POST', url: `/episodes/${planEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number: Number(number), title: `Plan SB${number}`, durationMs: number === '1' ? 3000 : number === '2' ? 5000 : 4000, description: `镜头 ${number}`, dialogue, ...(dialogue ? { speaker: '小雨' } : {}) },
+      })
+      expect(storyboard.statusCode).toBe(201)
+      planStoryboardIds.push(storyboard.json().id as string)
+    }
+    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'plan-gen', apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    const capabilities = connection.capabilities
+    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    expect(probe.statusCode).toBe(200)
+    for (const [slot, model] of [['image_gen', 'mock-image'], ['tts_voice', 'mock-tts']] as const) {
+      const capabilityId = capabilities.find(capability => capability.model === model)?.id
+      if (!capabilityId) continue
+      const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: planProjectId } })
+      expect(binding.statusCode).toBe(201)
+    }
+
+    expect((await plan(ownerToken, planEpisodeId, 'stage=DELIVERY')).statusCode).toBe(400)
+    expect((await plan(ownerToken, 'does-not-exist', 'stage=IMAGE')).statusCode).toBe(404)
+    // No approved script yet: the plan refuses with the very code the trigger would return.
+    const gated = await plan(ownerToken, planEpisodeId, 'stage=IMAGE')
+    expect(gated.statusCode).toBe(409)
+    expect(gated.body.error).toBe('generations:noApprovedScript')
+
+    await env.db.scriptVersion.create({ data: { episodeId: planEpisodeId, version: 1, content: 'plan script', checksum: 'plan-script', status: 'APPROVED' } })
+    // Viewers may read the plan — it is a physical-quantity preview, not a spend action.
+    const viewerPlan = await plan(viewerToken, planEpisodeId, 'stage=IMAGE')
+    expect(viewerPlan.statusCode).toBe(200)
+    const imagePlan = viewerPlan.body.plan!
+    expect(imagePlan).toMatchObject({ stage: 'IMAGE', newCount: 3, retryCount: 0, skippedCount: 0, durationMs: 12000, revision: 0 })
+    expect(imagePlan.models.length).toBeGreaterThan(0)
+    expect(imagePlan.models.every(model => model.startsWith('mock/'))).toBe(true)
+    expect(imagePlan.items.map(item => item.label)).toEqual(['#1 Plan SB1', '#2 Plan SB2', '#3 Plan SB3'])
+    expect(imagePlan.items.every(item => item.disposition === 'new')).toBe(true)
+    // AUDIO only voices the shots that speak.
+    const audioPlan = (await plan(ownerToken, planEpisodeId, 'stage=AUDIO')).body.plan!
+    expect(audioPlan.items.map(item => item.label)).toEqual(['#1 Plan SB1', '#2 Plan SB2'])
+    expect(audioPlan).toMatchObject({ newCount: 2, skippedCount: 0 })
+    // 预审账面上只有物理量:项数、秒数、模型名,没有任何钱相关字段。
+    expect(JSON.stringify(imagePlan)).not.toMatch(/pric|cost|amount|currenc|invoice|quota|refund|balance|[$¥€£₹₩]/i)
+  })
+
+  it('splits covered targets into retry and skipped, and reads a regenerate as all-new', async () => {
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId: planEpisodeId, stage: 'FIRST_FRAME', plannedCount: 2 } })
+    await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'FIRST_FRAME', status: 'SUCCEEDED', storyboardId: planStoryboardIds[0], idempotencyKey: `${planEpisodeId}:IMAGE:${planStoryboardIds[0]}` },
+    })
+    await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'FIRST_FRAME', status: 'FAILED', storyboardId: planStoryboardIds[1], idempotencyKey: `${planEpisodeId}:IMAGE:${planStoryboardIds[1]}` },
+    })
+
+    const mixed = (await plan(ownerToken, planEpisodeId, 'stage=IMAGE')).body.plan!
+    expect(mixed).toMatchObject({ newCount: 1, retryCount: 1, skippedCount: 1, revision: 0 })
+    // Only what the plan still runs counts toward the runtime it promises.
+    expect(mixed.durationMs).toBe(9000)
+    expect(mixed.items.map(item => item.disposition)).toEqual(['skipped', 'retry', 'new'])
+
+    // A regenerate carries a fresh revision suffix, so nothing collides and all read new.
+    const redo = (await plan(ownerToken, planEpisodeId, 'stage=IMAGE&regenerate=1')).body.plan!
+    expect(redo).toMatchObject({ newCount: 3, retryCount: 0, skippedCount: 0, revision: 1, durationMs: 12000 })
+
+    // Scoping to named shots narrows the plan the same way the trigger narrows.
+    const scoped = (await plan(ownerToken, planEpisodeId, `stage=IMAGE&storyboardIds=${planStoryboardIds[0]}`)).body.plan!
+    expect(scoped.items).toEqual([{ id: planStoryboardIds[0], label: '#1 Plan SB1', disposition: 'skipped' }])
+    expect((await plan(ownerToken, planEpisodeId, 'stage=IMAGE&storyboardIds=not-a-shot')).statusCode).toBe(400)
+  })
+
+  it('blocks behind the same asset gate the IMAGE trigger refuses, and clears once approved', async () => {
+    const assetRes = await env.app.inject({ method: 'POST', url: `/episodes/${planEpisodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'character', name: '阿墨', description: '黑衣剑客' } })
+    expect(assetRes.statusCode).toBe(201)
+    const assetId = assetRes.json().asset.id as string
+    const link = await env.app.inject({ method: 'PUT', url: `/storyboards/${planStoryboardIds[2]}/assets`, headers: authHeaders(ownerToken), payload: { assets: [{ assetId, role: 'lead' }] } })
+    expect(link.statusCode).toBe(200)
+
+    const blocked = await plan(ownerToken, planEpisodeId, 'stage=IMAGE')
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.body.error).toBe('generations:assetsNotApproved')
+    expect(blocked.body.reasons).toEqual(['character · 阿墨'])
+
+    await env.db.$transaction([
+      env.db.assetVersion.updateMany({ where: { assetId }, data: { status: 'APPROVED' } }),
+      env.db.asset.update({ where: { id: assetId }, data: { status: 'APPROVED' } }),
+    ])
+    expect((await plan(ownerToken, planEpisodeId, 'stage=IMAGE')).statusCode).toBe(200)
   })
 })

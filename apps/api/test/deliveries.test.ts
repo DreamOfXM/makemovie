@@ -26,6 +26,8 @@ interface DeliveryManifest {
   source: { version: number; checksum: string; status: string } | null
   script: { version: number; checksum: string; status: string } | null
   storyboards: { number: number; title: string; durationMs: number; artifacts: ManifestArtifact[] }[]
+  labeling: { standard: string; badgeText: string; explicit: string; implicit: string; reason?: string } | null
+  postProcess: { status: string; steps: { step: string; outcome: string; reason?: string }[]; loudness?: { before: { i: number; tp: number }; after?: { i: number; tp: number } }; target?: { i: number; tp: number }; reason?: string } | null
   composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null; tracks: ManifestArtifact[] }
   quality: { checks: number; approved: number; rejected: number; threshold: number }
   acceptance?: ManifestAcceptance
@@ -197,7 +199,17 @@ describe('delivery acceptance gate', () => {
     masterArtifactId = master.id
     masterObjectKey = master.objectKey
     await env.db.composition.create({
-      data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: master.id },
+      data: {
+        episodeId,
+        status: 'COMPLETED',
+        // The compose worker's labeling + quality-floor records, as the worker writes them.
+        manifest: JSON.stringify({
+          storyboardIds,
+          labeling: { standard: 'GB 45438-2025', badgeText: 'AI生成内容 · AI-Generated Content', explicit: 'burned', implicit: 'written' },
+          postProcess: { status: 'applied', steps: [{ step: 'loudnorm', outcome: 'applied' }], loudness: { before: { i: -3.2, tp: 0.1 }, after: { i: -16.1, tp: -1.5 } }, target: { i: -16, tp: -1.5 } },
+        }),
+        artifactId: master.id,
+      },
     })
 
     await seedTask('FIRST_FRAME', [0], [{
@@ -288,6 +300,10 @@ describe('delivery acceptance gate', () => {
     })
     // No subtitle and no score were mixed in, so the master is stated as silent.
     expect(manifest.composition).toEqual({ objectKey: masterObjectKey, checksum: 'master-checksum', mimeType: 'video/mp4', durationMs: 9000, tracks: [] })
+    // 交付清单必须原样转述合成员写入的双标识记录:买家看清单就知道文件带不带标。
+    expect(manifest.labeling).toEqual({ standard: 'GB 45438-2025', badgeText: 'AI生成内容 · AI-Generated Content', explicit: 'burned', implicit: 'written' })
+    // 质量地板记录同样透传:音质/音量项的实测证据要能在清单里读到。
+    expect(manifest.postProcess).toMatchObject({ status: 'applied', loudness: { before: { i: -3.2 }, after: { i: -16.1 } }, target: { i: -16 } })
     expect(manifest.quality).toEqual({ checks: 5, approved: 3, rejected: 2, threshold: 0.7 })
     expect(manifest.acceptance).toBeUndefined()
 
@@ -314,6 +330,47 @@ describe('delivery reading', () => {
     expect((await env.app.inject({ method: 'GET', url: '/deliveries/does-not-exist/manifest', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/manifest` })).statusCode).toBe(401)
     expect((await env.app.inject({ method: 'GET', url: '/episodes/does-not-exist/deliveries', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+  })
+})
+
+describe('delivery edit handoff export', () => {
+  it('serves an EDL whose record timecodes accumulate over the packaged clips', async () => {
+    const res = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('text/plain')
+    expect(res.headers['content-disposition']).toContain('episode-1-edit.edl')
+    // SB1 实测 5000ms=125 帧；SB2 取最新 v2.mp4 的 6100ms→152.5 四舍五入 153 帧。
+    const edl = res.body
+    expect(edl).toContain('TITLE: EP1 EP1')
+    expect(edl).toContain('FCM: NON-DROP FRAME')
+    expect(edl).toMatch(/^001 {2}AX {23}V {5}C {8}00:00:00:00 00:00:05:00 00:00:00:00 00:00:05:00$/m)
+    expect(edl).toMatch(/^002 {2}AX {23}V {5}C {8}00:00:00:00 00:00:06:03 00:00:05:00 00:00:11:03$/m)
+    expect(edl).toContain('* FROM CLIP NAME: #2 SB2')
+    expect(edl).toContain(`* SOURCE: ${objectKey('video', 'sb2', 'v2.mp4')}`)
+    // 两份切片都带实测时长，导出就不该出现回退标注。
+    expect(edl).not.toContain('planned duration')
+  })
+
+  it('serves an FCPXML timeline with the same frame math and spine order', async () => {
+    const res = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list?format=fcpxml`, headers: authHeaders(ownerToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('application/xml')
+    expect(res.headers['content-disposition']).toContain('episode-1-edit.fcpxml')
+    expect(res.body).toContain('<fcpxml version="1.10">')
+    expect(res.body).toContain('duration="125/25s"')
+    expect(res.body).toContain('duration="153/25s"')
+    expect(res.body).toContain('ref="x2" offset="125/25s"')
+    expect(res.body).toContain('tcDuration="278/25s"')
+  })
+
+  it('refuses unknown formats and hides other organizations\' deliveries', async () => {
+    const bad = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list?format=xml`, headers: authHeaders(editorToken) })
+    expect(bad.statusCode).toBe(400)
+    const missing = await env.app.inject({ method: 'GET', url: '/deliveries/does-not-exist/edit-list', headers: authHeaders(ownerToken) })
+    expect(missing.statusCode).toBe(404)
+    const foreign = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(outsiderToken) })
+    expect(foreign.statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list` })).statusCode).toBe(401)
   })
 })
 

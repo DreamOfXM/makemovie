@@ -27,6 +27,8 @@ interface UsageRow {
 interface UsageReport {
   rows: UsageRow[]
   total: { taskCount: number; entryCount: number; retriedTaskCount: number; inputUnits: number; outputUnits: number }
+  byProject?: { projectId: string; projectName: string; taskCount: number; entryCount: number; inputUnits: number; outputUnits: number }[]
+  ungrouped?: { entryCount: number; inputUnits: number; outputUnits: number }
   units: { input: string; output: string }
 }
 
@@ -297,9 +299,44 @@ describe('GET /usage', () => {
     expect(all.body.rows[1]).toMatchObject({ stage: null, taskCount: 0, entryCount: 1, inputUnits: 7, outputUnits: 70 })
     expect(all.body.total).toEqual({ taskCount: 1, entryCount: 2, retriedTaskCount: 0, inputUnits: 10, outputUnits: 100 })
 
+    // The space ledger names the project its attributed units came from, and leaves the
+    // entry that belongs to none on its own line rather than borrowing a neighbour.
+    expect(all.body.byProject).toEqual([{ projectId: tenant.projectId, projectName: 'Usage Orphan Org Project', taskCount: 1, entryCount: 1, inputUnits: 3, outputUnits: 30 }])
+    expect(all.body.ungrouped).toEqual({ entryCount: 1, inputUnits: 7, outputUnits: 70 })
+    expect((all.body.byProject?.[0]?.inputUnits ?? 0) + (all.body.ungrouped?.inputUnits ?? 0)).toBe(all.body.total.inputUnits)
+
     const scoped = await getUsage(tenant.token, { projectId: tenant.projectId })
     expect(scoped.body.rows).toHaveLength(1)
     expect(scoped.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, inputUnits: 3, outputUnits: 30 })
+    // Asking for one project already is the breakdown; it does not repeat itself.
+    expect(scoped.body.byProject).toBeUndefined()
+    expect(scoped.body.ungrouped).toBeUndefined()
+  })
+
+  it('splits the space ledger by project so the heaviest consumer leads', async () => {
+    const tenant = await createTenant('usage-split@example.com', 'Usage Split Org', 'usage-split-main')
+    const second = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(tenant.token), payload: { name: 'Second Project' } })
+    expect(second.statusCode).toBe(201)
+    const secondEpisode = await env.app.inject({
+      method: 'POST', url: `/projects/${second.json().id}/episodes`, headers: authHeaders(tenant.token),
+      payload: { number: 1, title: 'EP1' },
+    })
+    expect(secondEpisode.statusCode).toBe(201)
+
+    await seedRun(tenant, { stage: 'SCRIPT', model: 'mock-text', modality: 'text', inputUnits: 400, outputUnits: 2048 })
+    await seedRun(tenant, { stage: 'SCRIPT', model: 'mock-text', modality: 'text', inputUnits: 200, outputUnits: 1024, episodeId: secondEpisode.json().id as string })
+    await seedRun(tenant, { stage: 'VIDEO', model: 'mock-t2v', modality: 't2v', inputUnits: 50, outputUnits: 9000, episodeId: secondEpisode.json().id as string })
+
+    const { body } = await getUsage(tenant.token)
+    expect(body.byProject).toEqual([
+      { projectId: second.json().id, projectName: 'Second Project', taskCount: 2, entryCount: 2, inputUnits: 250, outputUnits: 10024 },
+      { projectId: tenant.projectId, projectName: 'Usage Split Org Project', taskCount: 1, entryCount: 1, inputUnits: 400, outputUnits: 2048 },
+    ])
+    expect(body.ungrouped).toBeUndefined()
+    expect(body.byProject?.reduce((sum, row) => sum + row.inputUnits, 0)).toBe(body.total.inputUnits)
+
+    const inSecond = await getUsage(tenant.token, { projectId: second.json().id as string })
+    expect(inSecond.body.total).toEqual({ taskCount: 2, entryCount: 2, retriedTaskCount: 0, inputUnits: 250, outputUnits: 10024 })
   })
 
   it('requires a session', async () => {
@@ -340,8 +377,10 @@ function assertNoPriceTags(payload: string): void {
   ].join(' ')
 
   const topLevel = Object.keys(body).sort().join(',')
-  if (topLevel !== 'rows,total,units') {
-    throw new Error(`${boundary} — top-level keys changed to "${topLevel}" (expected "rows,total,units").`)
+  const expectedTop = 'byProject,rows,total,ungrouped,units'
+  const actualTop = topLevel.split(',').filter(key => key !== 'byProject' && key !== 'ungrouped').join(',')
+  if (actualTop !== 'rows,total,units') {
+    throw new Error(`${boundary} — top-level keys changed to "${topLevel}" (expected "${expectedTop}" at most).`)
   }
 
   const rows = body.rows as Record<string, unknown>[]
@@ -357,6 +396,19 @@ function assertNoPriceTags(payload: string): void {
   const totalKeys = Object.keys(body.total as Record<string, unknown>).sort().join(',')
   if (totalKeys !== 'entryCount,inputUnits,outputUnits,retriedTaskCount,taskCount') {
     throw new Error(`${boundary} — usage total keys changed to "${totalKeys}".`)
+  }
+
+  const projects = body.byProject as Record<string, unknown>[] | undefined
+  if (projects !== undefined) {
+    const projectKeys = Object.keys(projects[0] ?? {}).sort().join(',')
+    if (projectKeys !== 'entryCount,inputUnits,outputUnits,projectId,projectName,taskCount') {
+      throw new Error(`${boundary} — usage per-project row keys changed to "${projectKeys}".`)
+    }
+  }
+
+  const ungroupedKeys = body.ungrouped === undefined ? '' : Object.keys(body.ungrouped as Record<string, unknown>).sort().join(',')
+  if (ungroupedKeys !== '' && ungroupedKeys !== 'entryCount,inputUnits,outputUnits') {
+    throw new Error(`${boundary} — usage ungrouped keys changed to "${ungroupedKeys}".`)
   }
 
   const moneyKey = /pric|cost|amount|currenc|billing|invoice|quota|refund|charge|fee|payment|money|balance|topup|top-up|seat|usd|eur|gbp|jpy|cny/i

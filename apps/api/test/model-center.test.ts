@@ -315,7 +315,9 @@ describe('entitlement probing', () => {
     const results = res.json().results as { ok: boolean }[]
     expect(results.every(r => r.ok)).toBe(true)
     const capabilities = await env.db.modelCapability.findMany({ where: { connectionId: connection.id } })
-    expect(capabilities.every(c => c.probeStatus === 'verified' && c.entitlementVerifiedAt !== null)).toBe(true)
+    // The connection probe proves the key, never the models: it stamps the credential
+    // tier for every row and leaves entitlement to probes addressed at each model.
+    expect(capabilities.every(c => c.probeStatus === 'verified' && c.credentialVerifiedAt !== null && c.entitlementVerifiedAt === null)).toBe(true)
   })
 
   it('records failure without granting entitlement for a bad key', async () => {
@@ -498,7 +500,7 @@ describe('per-model verification', () => {
     expect(probed.json()).toMatchObject({ ok: true, model: 'mock-entered', modality: 'text' })
 
     expect((await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })).statusCode).toBe(201)
-    // The connection-wide probe stamps every row at once; this one may not.
+    // The per-model probe earns this row its entitlement; rows it never addressed stay unverified.
     const rows = await env.db.modelCapability.findMany({ where: { connectionId: connection.id } })
     expect(rows.find(r => r.id === capabilityId)!.entitlementVerifiedAt).toBeTruthy()
     expect(rows.filter(r => r.id !== capabilityId).every(r => r.entitlementVerifiedAt === null)).toBe(true)
@@ -523,24 +525,28 @@ describe('per-model verification', () => {
     const row = await env.db.modelCapability.findUniqueOrThrow({ where: { id: capabilityId } })
     expect(row.probeStatus).toBe('failed')
     expect(row.entitlementVerifiedAt).toBeNull()
-    // Evidence about one name, not about the line: the catalog rows keep their stamp.
+    // Evidence about one name, not about the line: the catalog rows keep their
+    // credential stamp from the connection probe.
     const kept = await env.db.modelCapability.findFirstOrThrow({ where: { connectionId: connection.id, model: 'mock-text' } })
-    expect(kept.entitlementVerifiedAt).toBeTruthy()
+    expect(kept.credentialVerifiedAt).toBeTruthy()
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.lastError).toContain('typo-model-name')
   })
 
-  it('refuses to spend money or invent a green light for a model it cannot ask about', async () => {
+  it('generation-modality rows get a credential-tier probe, never a fabricated entitlement', async () => {
     const owner = await env.register('mc-refuse@example.com', 'Refuse Org')
     const connection = await createMockConnection(owner.token, 'refuse-main')
     const video = connection.capabilities.find(c => c.model === 'mock-t2v')!
 
-    const spendable = await probeModel(owner.token, video.id)
-    expect(spendable.statusCode).toBe(400)
-    expect(spendable.json().error).toMatch(/cannot be probed without spending on it/)
-    const untouched = await env.db.modelCapability.findUniqueOrThrow({ where: { id: video.id } })
-    expect(untouched.probeStatus).toBe('unverified')
-    expect(untouched.lastProbedAt).toBeNull()
+    // 定向探测对生成类模态退化为密钥级测试:发一条密钥消息,盖 credential 戳,
+    // 绝不虚构模型级权限(模型本身由首次真实生成验证)。
+    const probed = await probeModel(owner.token, video.id)
+    expect(probed.statusCode).toBe(200)
+    expect(probed.json().ok).toBe(true)
+    const row = await env.db.modelCapability.findUniqueOrThrow({ where: { id: video.id } })
+    expect(row.probeStatus).toBe('verified')
+    expect(row.credentialVerifiedAt).toBeTruthy()
+    expect(row.entitlementVerifiedAt).toBeNull()
 
     // A seedance connection can carry a hand-entered text row, and that vendor has no
     // request that names a model without generating from it.
@@ -721,7 +727,7 @@ describe('candidate resolution filtering', () => {
     expect((await bind(capId(stale), undefined, 80)).statusCode).toBe(201)
 
     await env.app.inject({ method: 'PATCH', url: `/providers/connections/${dark.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
-    await env.db.modelCapability.update({ where: { id: capId(stale) }, data: { entitlementVerifiedAt: null } })
+    await env.db.modelCapability.update({ where: { id: capId(stale) }, data: { entitlementVerifiedAt: null, credentialVerifiedAt: null } })
 
     const scoped = await env.app.inject({ method: 'GET', url: `/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
     expect(scoped.statusCode).toBe(200)
@@ -745,7 +751,7 @@ describe('candidate resolution filtering', () => {
     // worker needs too, and the id is already exposed by GET /bindings.
     const [candidate] = scopedBody.candidates
     expect(Object.keys(candidate).sort()).toEqual([
-      'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope',
+      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
     ])
     expect(candidate).toMatchObject({
       scope: 'project',

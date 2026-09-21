@@ -1,18 +1,28 @@
 import type { FastifyInstance } from 'fastify'
-import { contentLocales, isContentLocale } from '@studio/domain'
+import { ProjectFormat } from '@studio/db'
+import { contentLocales, formatDefaults, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get('/projects', { preHandler: requirePermission('read') }, async request => {
     const auth = request.auth!
+    // The project list is a lifecycle board, not a name table: each row carries the
+    // episode status summary the lifecycle bar renders from, so the list needs no
+    // per-project drill-down request to draw itself.
     return app.db.project.findMany({
       where: { organizationId: auth.organizationId },
       orderBy: { createdAt: 'desc' },
+      include: {
+        episodes: {
+          orderBy: { number: 'asc' },
+          select: { id: true, number: true, title: true, status: true },
+        },
+      },
     })
   })
 
-  app.post<{ Body: { name?: string; contentLocale?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
+  app.post<{ Body: { name?: string; contentLocale?: string; format?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
     const auth = request.auth!
     const name = request.body?.name?.trim()
     if (!name) return reply.code(400).send({ error: 'name is required' })
@@ -20,8 +30,23 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
       return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
     }
-    const project = await app.db.project.create({ data: { organizationId: auth.organizationId, name, contentLocale } })
-    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale } })
+    const format = request.body?.format ?? 'short_drama'
+    if (!isProjectFormat(format)) {
+      return reply.code(400).send({ error: `format must be one of ${projectFormats.join(', ')}` })
+    }
+    const prismaFormat = ProjectFormat[format.toUpperCase() as keyof typeof ProjectFormat]
+    const project = await app.db.$transaction(async tx => {
+      const created = await tx.project.create({ data: { organizationId: auth.organizationId, name, contentLocale, format: prismaFormat } })
+      // A film is a one-episode project, so its single episode exists from the
+      // start, seeded with the format's target duration.
+      if (prismaFormat === 'FILM') {
+        await tx.episode.create({
+          data: { projectId: created.id, number: 1, title: '正片', targetDurationMs: formatDefaults.film.targetDurationMs },
+        })
+      }
+      return created
+    })
+    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale, format: project.format } })
     return reply.code(201).send(project)
   })
 

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { Delivery, GenerationTask, MediaArtifact, PrismaClient, Stage, WorkflowStatus } from '@studio/db'
+import { buildEdl, buildFcpxml, type EditClip } from '@studio/media'
 import { composedStoryboardIds, liveStoryboards } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -38,12 +39,34 @@ interface ManifestAcceptance {
   reason: string | null
 }
 
+/** What the compose worker actually applied to the master, read off its own record. */
+interface ManifestLabeling {
+  standard: string
+  badgeText: string
+  explicit: 'burned' | 'skipped' | 'unrecorded'
+  implicit: 'written' | 'unrecorded'
+  reason?: string
+}
+
+/** 质量地板处理记录:loudnorm 实测证据 + 失败回退原因,由 compose worker 落库。 */
+interface ManifestPostProcess {
+  status: 'applied' | 'fallback'
+  steps: Array<{ step: 'loudnorm' | 'upscale' | 'interpolate' | 'grade'; outcome: 'applied' | 'skipped'; reason?: string }>
+  loudness?: { before: { i: number; tp: number }; after?: { i: number; tp: number } }
+  target?: { i: number; tp: number }
+  reason?: string
+}
+
 interface DeliveryManifest {
   schemaVersion: number
   packagedAt: string
   episode: { id: string; number: number; title: string }
   source: VersionRef | null
   script: VersionRef | null
+  /** GB 45438-2025 dual-labeling record for the master; null = composed before labeling shipped. */
+  labeling: ManifestLabeling | null
+  /** 质量地板记录;null = 母带早于地板链上线时合成。 */
+  postProcess: ManifestPostProcess | null
   storyboards: ManifestStoryboard[]
   composition: {
     objectKey: string
@@ -59,6 +82,8 @@ interface DeliveryManifest {
 interface DeliveryDto {
   id: string
   status: WorkflowStatus
+  /** The composed master clip this delivery ships — what "download" should hand over. */
+  artifactId: string | null
   manifest: DeliveryManifest
 }
 
@@ -93,7 +118,7 @@ function parseManifest(raw: string): DeliveryManifest {
 }
 
 function toDeliveryDto(delivery: Delivery): DeliveryDto {
-  return { id: delivery.id, status: delivery.status, manifest: parseManifest(delivery.manifest) }
+  return { id: delivery.id, status: delivery.status, artifactId: delivery.artifactId, manifest: parseManifest(delivery.manifest) }
 }
 
 export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
@@ -169,12 +194,27 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       })
       const counts = Object.fromEntries(grouped.map(group => [group.status, group._count._all])) as Partial<Record<WorkflowStatus, number>>
 
+      // The compose worker records what labeling the master actually carries; a master
+      // from before labeling shipped reads as null instead of pretending compliance.
+      let labeling: DeliveryManifest['labeling'] = null
+      let postProcess: DeliveryManifest['postProcess'] = null
+      try {
+        const parsed = JSON.parse(finished.manifest) as { labeling?: ManifestLabeling; postProcess?: ManifestPostProcess }
+        labeling = parsed.labeling ?? null
+        postProcess = parsed.postProcess ?? null
+      } catch {
+        labeling = null
+        postProcess = null
+      }
+
       const manifest: DeliveryManifest = {
         schemaVersion: 1,
         packagedAt: new Date().toISOString(),
         episode: { id: episode.id, number: episode.number, title: episode.title },
         source: source ?? null,
         script: script ?? null,
+        labeling,
+        postProcess,
         storyboards: storyboards.map(storyboard => ({
           number: storyboard.number,
           title: storyboard.title,
@@ -233,6 +273,40 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       const delivery = await findDeliveryInOrg(app.db, request.params.id, auth.organizationId)
       if (!delivery) return reply.code(404).send({ error: 'Delivery not found' })
       return parseManifest(delivery.manifest)
+    },
+  )
+
+  // 剪辑交接:从这一份交付清单生成 EDL/FCPXML,精剪在 NLE 里做。时长优先用切片
+  // 实测值，缺失才回退分镜规划值并在导出里如实标注——导出必须诚实于母带。
+  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+    '/deliveries/:id/edit-list',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const format = request.query.format ?? 'edl'
+      if (format !== 'edl' && format !== 'fcpxml') return reply.code(400).send({ error: "format must be 'edl' or 'fcpxml'" })
+      const delivery = await findDeliveryInOrg(app.db, request.params.id, auth.organizationId)
+      if (!delivery) return reply.code(404).send({ error: 'Delivery not found' })
+
+      const manifest = parseManifest(delivery.manifest)
+      const clips: EditClip[] = manifest.storyboards.map(storyboard => {
+        // 清单按"新→旧"记录每镜产物：交付闸门保证每镜都有成功切片，取最新的
+        // VIDEO 即合成自动选版的同一对象；人工钦定版由选优门留痕另行核对。
+        const video = storyboard.artifacts.find(artifact => artifact.stage === 'VIDEO')
+        return {
+          number: storyboard.number,
+          title: storyboard.title,
+          durationMs: video?.durationMs ?? storyboard.durationMs,
+          sourceFile: video?.objectKey ?? `missing-shot-${storyboard.number}`,
+          measured: video?.durationMs != null,
+        }
+      })
+      const title = `EP${manifest.episode.number} ${manifest.episode.title}`
+      const body = format === 'edl' ? buildEdl({ title, clips }) : buildFcpxml({ title, clips })
+      const extension = format === 'edl' ? 'edl' : 'fcpxml'
+      reply.header('content-type', format === 'edl' ? 'text/plain; charset=utf-8' : 'application/xml; charset=utf-8')
+      reply.header('content-disposition', `attachment; filename="episode-${manifest.episode.number}-edit.${extension}"`)
+      return body
     },
   )
 

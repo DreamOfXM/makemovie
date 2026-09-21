@@ -17,6 +17,7 @@ interface VersionRow {
   content: string
   checksum: string
   status: WorkflowStatus
+  archivedAt: Date | null
 }
 
 interface ScriptVersionRow extends VersionRow {
@@ -29,6 +30,7 @@ interface VersionSummaryDto {
   checksum: string
   status: WorkflowStatus
   contentLength: number
+  archivedAt: string | null
 }
 
 interface VersionDto extends VersionSummaryDto {
@@ -72,6 +74,7 @@ function toVersionSummary(version: VersionRow): VersionSummaryDto {
     checksum: version.checksum,
     status: version.status,
     contentLength: version.content.length,
+    archivedAt: version.archivedAt?.toISOString() ?? null,
   }
 }
 
@@ -184,6 +187,12 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       if (current.status === 'APPROVED') return reply.code(409).send({ error: 'sources:alreadyApproved' })
 
       const approved = await app.db.sourceDocumentVersion.update({ where: { id: current.id }, data: { status: 'APPROVED' } })
+      // One approved source per episode: approving this version retires the previous
+      // approval, so "已通过" always names the single active story the pipeline reads.
+      await app.db.sourceDocumentVersion.updateMany({
+        where: { episodeId: episode.id, status: 'APPROVED', NOT: { id: approved.id } },
+        data: { status: 'DRAFT' },
+      })
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
         userId: auth.userId,
@@ -206,7 +215,31 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const versions = await app.db.scriptVersion.findMany({ where: { episodeId: episode.id }, orderBy: { version: 'desc' } })
-      return { versions: versions.map(toScriptVersionSummary) }
+      // A failed AI derivation must surface where the writer is looking. The copy-draft in
+      // this list reads as success, so the error rides along instead of living only in the
+      // generation panel's batch rows.
+      const lastScriptBatch = await app.db.generationBatch.findFirst({
+        where: { episodeId: episode.id, stage: 'SCRIPT' },
+        orderBy: { id: 'desc' },
+      })
+      let lastAiError: { model: string | null; error: string; at: string } | null = null
+      if (lastScriptBatch) {
+        const failed = await app.db.generationTask.findFirst({
+          where: { batchId: lastScriptBatch.id, stage: 'SCRIPT', status: 'FAILED' },
+          orderBy: { id: 'desc' },
+        })
+        if (failed?.errorSnapshot) {
+          let message = 'script generation failed'
+          try {
+            const parsed: unknown = JSON.parse(failed.errorSnapshot)
+            message = Array.isArray(parsed) ? parsed.map(String).join(' | ') : String(parsed)
+          } catch {
+            message = failed.errorSnapshot
+          }
+          lastAiError = { model: failed.model, error: message.slice(0, 400), at: failed.updatedAt.toISOString() }
+        }
+      }
+      return { versions: versions.map(toScriptVersionSummary), lastAiError }
     },
   )
 
@@ -297,6 +330,12 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       if (current.status === 'APPROVED') return reply.code(409).send({ error: 'sources:alreadyApproved' })
 
       const approved = await app.db.scriptVersion.update({ where: { id: current.id }, data: { status: 'APPROVED' } })
+      // One approved script per episode: this approval retires the previous one, so
+      // "已通过" always names the version the pipeline treats as current writing.
+      await app.db.scriptVersion.updateMany({
+        where: { episodeId: episode.id, status: 'APPROVED', NOT: { id: approved.id } },
+        data: { status: 'DRAFT' },
+      })
       // The cascade decides from the script version the live shots currently trace,
       // so it has to run before they are re-pointed at the one being approved.
       const cascade = await cascadeScriptApproval({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, episode.id, approved.id)
@@ -336,6 +375,104 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         await advanceAfterApproval(request, auth.organizationId, auth.userId, episode.id)
       }
       return { version: toScriptVersionDto(approved), storyboardsUpdated: repointed.count, cascaded: cascade.cascaded }
+    },
+  )
+
+  // Archive/unarchive: an approved version leaves the active list without losing its
+  // lineage. Fully reversible — unarchive restores whatever status it had.
+  app.post<{ Params: { episodeId: string; version: string }; Body: { archived?: boolean } }>(
+    '/episodes/:episodeId/script-versions/:version/archive',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const current = await findScriptVersion(app.db, episode.id, request.params.version)
+      if (!current) return reply.code(404).send({ error: 'Script version not found' })
+      const archived = request.body?.archived !== false
+      const updated = await app.db.scriptVersion.update({ where: { id: current.id }, data: { archivedAt: archived ? new Date() : null } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'script.archive',
+        entityType: 'ScriptVersion',
+        entityId: updated.id,
+        payload: { episodeId: episode.id, version: updated.version, archived },
+      })
+      return { version: toScriptVersionDto(updated) }
+    },
+  )
+
+  // Delete is for drafts only: approved versions are retired via archive, and versions
+  // that storyboards trace can never go away without breaking their lineage.
+  app.delete<{ Params: { episodeId: string; version: string } }>(
+    '/episodes/:episodeId/script-versions/:version',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const current = await findScriptVersion(app.db, episode.id, request.params.version)
+      if (!current) return reply.code(404).send({ error: 'Script version not found' })
+      if (current.status === 'APPROVED') return reply.code(409).send({ error: 'sources:deleteApproved' })
+      const referenced = await app.db.storyboard.findFirst({ where: { scriptVersionId: current.id } })
+      if (referenced) return reply.code(409).send({ error: 'sources:scriptInUse' })
+      await app.db.scriptVersion.delete({ where: { id: current.id } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'script.delete',
+        entityType: 'ScriptVersion',
+        entityId: current.id,
+        payload: { episodeId: episode.id, version: current.version },
+      })
+      return reply.code(204).send()
+    },
+  )
+
+  app.post<{ Params: { episodeId: string; version: string }; Body: { archived?: boolean } }>(
+    '/episodes/:episodeId/source-versions/:version/archive',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const current = await findSourceVersion(app.db, episode.id, request.params.version)
+      if (!current) return reply.code(404).send({ error: 'Source version not found' })
+      const archived = request.body?.archived !== false
+      const updated = await app.db.sourceDocumentVersion.update({ where: { id: current.id }, data: { archivedAt: archived ? new Date() : null } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'source.archive',
+        entityType: 'SourceDocumentVersion',
+        entityId: updated.id,
+        payload: { episodeId: episode.id, version: updated.version, archived },
+      })
+      return { version: toVersionDto(updated) }
+    },
+  )
+
+  app.delete<{ Params: { episodeId: string; version: string } }>(
+    '/episodes/:episodeId/source-versions/:version',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const current = await findSourceVersion(app.db, episode.id, request.params.version)
+      if (!current) return reply.code(404).send({ error: 'Source version not found' })
+      if (current.status === 'APPROVED') return reply.code(409).send({ error: 'sources:deleteApproved' })
+      await app.db.sourceDocumentVersion.delete({ where: { id: current.id } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'source.delete',
+        entityType: 'SourceDocumentVersion',
+        entityId: current.id,
+        payload: { episodeId: episode.id, version: current.version },
+      })
+      return reply.code(204).send()
     },
   )
 }

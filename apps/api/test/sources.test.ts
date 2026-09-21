@@ -154,7 +154,7 @@ describe('source document versions', () => {
     expect(versions.map(version => version.contentLength)).toEqual([sourceContentV2.length, sourceContentV1.length])
     expect(versions.map(version => version.status)).toEqual(['DRAFT', 'DRAFT'])
     for (const version of versions) {
-      expect(Object.keys(version).sort()).toEqual(['checksum', 'contentLength', 'id', 'status', 'version'])
+      expect(Object.keys(version).sort()).toEqual(['archivedAt', 'checksum', 'contentLength', 'id', 'status', 'version'])
     }
   })
 
@@ -168,6 +168,7 @@ describe('source document versions', () => {
       status: 'DRAFT',
       contentLength: sourceContentV1.length,
       content: sourceContentV1,
+      archivedAt: null,
     })
 
     expect((await env.app.inject({ method: 'GET', url: `${sourceUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
@@ -267,7 +268,7 @@ describe('script versions', () => {
     expect(versions.map(version => version.contentLength)).toEqual([sourceContentV2.length, sourceContentV1.length])
     expect(versions.map(version => version.status)).toEqual(['DRAFT', 'APPROVED'])
     for (const version of versions) {
-      expect(Object.keys(version).sort()).toEqual(['checksum', 'contentLength', 'generationTaskId', 'id', 'status', 'version'])
+      expect(Object.keys(version).sort()).toEqual(['archivedAt', 'checksum', 'contentLength', 'generationTaskId', 'id', 'status', 'version'])
     }
   })
 
@@ -284,6 +285,7 @@ describe('script versions', () => {
       contentLength: sourceContentV1.length,
       content: sourceContentV1,
       generationTaskId: null,
+      archivedAt: null,
     })
 
     expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)

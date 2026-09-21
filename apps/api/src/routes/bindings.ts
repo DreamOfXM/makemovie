@@ -60,7 +60,10 @@ export async function bindingRoutes(app: FastifyInstance): Promise<void> {
       entitlementVerifiedAt: capability.entitlementVerifiedAt,
     })
     if (!check.ok) return reply.code(422).send({ error: check.reason })
-    if (!capability.entitlementVerifiedAt) {
+    // Entitlement means a call addressed this exact model. A connection probe only proves
+    // the key (credentialVerifiedAt) — enough to bind, and the first real generation
+    // either proves the model or fails loudly.
+    if (!capability.entitlementVerifiedAt && !capability.credentialVerifiedAt) {
       return reply.code(422).send({ error: `model "${capability.model}" has no verified entitlement; run a provider probe first` })
     }
 
