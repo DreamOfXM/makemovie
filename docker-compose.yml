@@ -13,13 +13,17 @@ x-storage-env: &storage-env
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # Match the embedded-postgres 18.x the test suites run on, so dev and test
+    # share one major version.
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: studio
       POSTGRES_USER: studio
       POSTGRES_PASSWORD: studio
     ports: ["5433:5432"]
-    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    # postgres:18+ wants the mount at the parent dir and keeps version-specific
+    # subdirs inside (docker-library/postgres#1259); legacy .../data mounts abort.
+    volumes: ["postgres_data:/var/lib/postgresql"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U studio -d studio"]
       interval: 5s
@@ -38,7 +42,8 @@ services:
   # this service's health: on the default disk backend they never talk to it, and a
   # dependency would refuse to start them for a service they are not using.
   minio:
-    image: minio/minio:latest
+    # MinIO left Docker Hub in 2025; quay.io is the official registry now.
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: studio

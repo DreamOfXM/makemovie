@@ -80,10 +80,11 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 ```bash
 pnpm install
+cp .env.example .env                                  # defaults match the compose stack
 pnpm --filter @studio/db generate
 pnpm build
 docker compose up -d                                  # postgres, redis, minio
-pnpm --filter @studio/db exec prisma migrate deploy
+pnpm db:migrate                                       # prisma migrate deploy, with .env loaded
 pnpm dev                                              # api :4010 · web :3010 · worker
 ```
 
@@ -125,6 +126,27 @@ Notes:
 - `STUDIO_QC_MODE=model` requires a vision model probed and bound to the `visual_audit` slot, and costs one vision call per image or video artifact. Without a verified binding, image and video tasks fail with a null-score quality check instead of silently falling back.
 - DashScope music generation (`fun-music-v1`) is invitation-gated by the vendor; a refused probe there means the grant is missing, not that the connection is misconfigured.
 - Video vendors return signed links that expire — roughly a day for Seedance, longer for the others — so the worker downloads each artifact into its own storage the moment the task settles.
+
+## Self-hosting
+
+The stack runs under any Compose-compatible runtime (Docker Engine, Docker Desktop, OrbStack, colima, Podman); the repository ships a Compose spec, not a runtime preference. Two modes:
+
+**Services in containers, apps on the host** (the everyday development loop — hot reload stays local):
+
+```bash
+docker compose up -d postgres redis   # minio too, when STORAGE_BACKEND=s3
+pnpm db:migrate && pnpm dev
+```
+
+**Everything in containers** (evaluating or deploying):
+
+```bash
+cp .env.example .env                  # then set STUDIO_MASTER_KEY (openssl rand -hex 32)
+docker compose up -d --build          # postgres, redis, minio, api, worker, web
+docker compose exec api pnpm --filter @studio/db exec prisma migrate deploy
+```
+
+Points that bite: postgres and redis publish on host ports **5433** and **6380** to stay out of the way of any local installs — `.env.example` already points there; the api and worker share one artifacts volume (or an S3 bucket via `STORAGE_BACKEND=s3`, which MinIO can serve); in production set `STUDIO_MASTER_KEY`, `CORS_ORIGIN`, and `NEXT_PUBLIC_API_URL` to your real origin.
 
 ## Mock provider
 
