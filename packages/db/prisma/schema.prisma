@@ -7,6 +7,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// One axis, three shapes: a series and a short drama run the same pipeline and
+// differ only in per-episode target duration; a film is a one-episode project.
+// The pipeline never reads this directly — it reads Episode.targetDurationMs,
+// seeded from these shapes at episode creation.
+enum ProjectFormat {
+  SHORT_DRAMA
+  SERIES
+  FILM
+}
+
 enum MemberRole {
   OWNER
   ADMIN
@@ -90,9 +100,12 @@ model Project {
   name String
   status WorkflowStatus @default(DRAFT)
   contentLocale String @default("zh")
+  format ProjectFormat @default(SHORT_DRAMA)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projectAssets ProjectAsset[]
+  projectSourceVersions ProjectSourceVersion[]
   episodes Episode[]
   providerConnections ProviderConnection[]
   capabilityBindings CapabilityBinding[]
@@ -104,6 +117,9 @@ model Episode {
   number Int
   title String
   status WorkflowStatus @default(DRAFT)
+  // The pipeline-facing truth for "how long should this episode be". Seeded from
+  // the project format's default at creation, overridable per episode.
+  targetDurationMs Int?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -114,7 +130,56 @@ model Episode {
   batches GenerationBatch[]
   compositions Composition[]
   deliveries Delivery[]
+  segmentAllocations SegmentAllocation[]
   @@unique([projectId, number])
+}
+
+// Whole-book source at the project level: the novel as uploaded, versioned and
+// governed like the per-episode SourceDocumentVersion. Splitting a new upload
+// produces a fresh version's segments; allocations always reference the latest.
+model ProjectSourceVersion {
+  id String @id @default(cuid())
+  projectId String
+  version Int
+  filename String
+  content String
+  checksum String
+  charCount Int
+  status WorkflowStatus @default(DRAFT)
+  archivedAt DateTime?
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  segments SourceSegment[]
+  @@unique([projectId, version])
+}
+
+// One mechanically-detected chapter or trailing unmarked run of the book.
+// Content is stored inline (immutable, same total size as the book) so the
+// allocation UI never depends on offset arithmetic against the source text.
+model SourceSegment {
+  id String @id @default(cuid())
+  projectSourceVersionId String
+  index Int
+  title String?
+  marked Boolean @default(true)
+  content String
+  charCount Int
+  createdAt DateTime @default(now())
+  version ProjectSourceVersion @relation(fields: [projectSourceVersionId], references: [id], onDelete: Cascade)
+  allocation SegmentAllocation?
+  @@unique([projectSourceVersionId, index])
+}
+
+// The chapter-to-episode map as first-class data: the r01 matrix is a view over
+// this table, and moving a chapter between episodes is an update to one row.
+model SegmentAllocation {
+  id String @id @default(cuid())
+  segmentId String @unique
+  episodeId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  segment SourceSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  episode Episode? @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 
 model SourceDocumentVersion {
@@ -124,6 +189,7 @@ model SourceDocumentVersion {
   content String
   checksum String
   status WorkflowStatus @default(DRAFT)
+  archivedAt DateTime?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   auditChecks QualityCheck[]
   @@unique([episodeId, version])
@@ -136,6 +202,7 @@ model ScriptVersion {
   content String
   checksum String
   status WorkflowStatus @default(DRAFT)
+  archivedAt DateTime?
   generationTaskId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
@@ -150,6 +217,8 @@ model Asset {
   name String
   description String
   status WorkflowStatus @default(DRAFT)
+  projectAssetId String?
+  projectAsset ProjectAsset? @relation(fields: [projectAssetId], references: [id], onDelete: SetNull)
   generationTaskId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
@@ -171,6 +240,40 @@ model AssetVersion {
   @@unique([assetId, version])
 }
 
+// The project-level asset library: a character/prop/scene's identity lives here, once,
+// and every episode links to it instead of re-inventing the same cast (the reuse model
+// LTX Elements, 可灵主体库 and novelvids all converged on). Reference images accumulate
+// as versions so a face can be re-mastered without silently changing shipped episodes.
+model ProjectAsset {
+  id String @id @default(cuid())
+  projectId String
+  kind String
+  name String
+  description String @default("")
+  status WorkflowStatus @default(DRAFT)
+  generationTaskId String?
+  archivedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions ProjectAssetVersion[]
+  episodeAssets Asset[]
+  @@unique([projectId, kind, name])
+}
+
+model ProjectAssetVersion {
+  id String @id @default(cuid())
+  projectAssetId String
+  version Int
+  description String
+  promptSnapshot String?
+  artifactId String?
+  status WorkflowStatus @default(DRAFT)
+  projectAsset ProjectAsset @relation(fields: [projectAssetId], references: [id], onDelete: Cascade)
+  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+  @@unique([projectAssetId, version])
+}
+
 model Storyboard {
   id String @id @default(cuid())
   episodeId String
@@ -188,6 +291,10 @@ model Storyboard {
   continuityOut String
   status WorkflowStatus @default(DRAFT)
   supersededAt DateTime?
+  /// 选优门:人工为这一镜钦定的成片版本(MediaArtifact.id,stage=VIDEO)。裸 id 与
+  /// UsageLedger.taskId 同一先例——产物行永不删除,读侧仍会校验归属,悬空即回退
+  /// "最新成功任务"。null 表示未选定,compose 按旧规则取最新。
+  selectedVideoArtifactId String?
   episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   scriptVersion ScriptVersion? @relation(fields: [scriptVersionId], references: [id])
   generationTask GenerationTask? @relation("StoryboardAuthor", fields: [generationTaskId], references: [id])
@@ -254,6 +361,25 @@ model GenerationTask {
   @@index([storyboardId, stage, status])
 }
 
+model GenerationLog {
+  id String @id @default(cuid())
+  organizationId String
+  taskId String
+  batchId String
+  episodeId String
+  stage String
+  /// info | warn | error
+  level String
+  /// task.start / candidate.start / candidate.params / candidate.skip / candidate.error / qc.verdict / task.success / task.fail
+  event String
+  message String
+  data Json?
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
 model MediaArtifact {
   id String @id @default(cuid())
   organizationId String
@@ -270,6 +396,7 @@ model MediaArtifact {
   createdAt DateTime @default(now())
   task GenerationTask? @relation(fields: [taskId], references: [id])
   assetVersions AssetVersion[]
+  projectAssetVersions ProjectAssetVersion[]
   qualityChecks QualityCheck[]
   @@unique([objectKey, version])
   @@index([organizationId, stage])
@@ -343,6 +470,7 @@ model ModelCapability {
   probeStatus String @default("unverified")
   probeMessage String?
   entitlementVerifiedAt DateTime?
+  credentialVerifiedAt DateTime?
   lastProbedAt DateTime?
   connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   bindings CapabilityBinding[]

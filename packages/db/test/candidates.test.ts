@@ -13,6 +13,8 @@ interface BindingRow {
     model: string
     displayName: string | null
     modality: string
+    acceptsReferenceImages: boolean
+    spec: unknown
     entitlementVerifiedAt: Date | null
     connection: { id: string; name: string; provider: string; enabled: boolean }
   }
@@ -43,6 +45,8 @@ function binding(
       model: capabilityId,
       displayName: `Display ${capabilityId}`,
       modality: 't2v',
+      acceptsReferenceImages: false,
+      spec: null,
       entitlementVerifiedAt: overrides.verified === false ? null : VERIFIED,
       connection: {
         id: `conn-${capabilityId}`,
@@ -149,8 +153,10 @@ describe('resolveSlotCandidates', () => {
     const { candidates } = await resolve([binding('b-1', { capabilityId: 'cap-1', priority: 7 })])
     expect(candidates).toHaveLength(1)
     const [candidate] = candidates
+    // 排序与请求装配都要用到的两个能力字段:参考图标志(图像候选按需排序)
+    // 与 spec(时长/分辨率档位的唯一事实来源)。
     expect(Object.keys(candidate).sort()).toEqual([
-      'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope',
+      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
     ])
     expect(candidate).toEqual({
       bindingId: 'b-1',
@@ -163,6 +169,8 @@ describe('resolveSlotCandidates', () => {
       model: 'cap-1',
       displayName: 'Display cap-1',
       modality: 't2v',
+      acceptsReferenceImages: false,
+      spec: null,
     })
   })
 })

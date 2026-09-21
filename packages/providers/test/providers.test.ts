@@ -406,21 +406,24 @@ describe('dashscope request building', () => {
   // prompt_extend is the one parameter that must never be left to the vendor's default:
   // if the endpoint rewrites the prompt, the snapshot we stored for this task is not the
   // prompt that produced the video, and every later "why does this shot look like that"
-  // answer built from it is wrong.
-  it('pins watermark and prompt_extend off on every video request', () => {
+  // answer built from it is wrong. watermark is the opposite case: GB 45438 labels
+  // AI-generated video, so the adapter no longer strips the vendor's label by default —
+  // only a caller that writes the decision into the snapshot can opt a clip out.
+  it('pins prompt_extend off and leaves watermark to the caller on every video request', () => {
     const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
       model: 'wan2.7-t2v',
       input: { prompt: 'a rainy street' },
       parameters: { resolution: '1080P' },
     })
-    expect(req.body).toMatchObject({ parameters: { watermark: false, prompt_extend: false, resolution: '1080P' } })
+    expect(req.body).toMatchObject({ parameters: { prompt_extend: false, resolution: '1080P' } })
+    expect((req.body as { parameters: Record<string, unknown> }).parameters.watermark).toBeUndefined()
 
-    const overridden = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
+    const optedOut = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
       model: 'wan2.7-t2v',
       input: { prompt: 'a rainy street' },
-      parameters: { watermark: true },
+      parameters: { watermark: false },
     })
-    expect(overridden.body).toMatchObject({ parameters: { watermark: true, prompt_extend: false } })
+    expect(optedOut.body).toMatchObject({ parameters: { watermark: false, prompt_extend: false } })
   })
 
   // The newest Wan generation takes the media array as it stands, so the neutral contract

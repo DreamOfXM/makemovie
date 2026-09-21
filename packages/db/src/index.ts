@@ -55,6 +55,10 @@ export interface SlotCandidate {
   model: string
   displayName: string | null
   modality: string
+  /// 定妆照(纯文字出图)应优先纯文生图模型,带参考图的任务才优先编辑模型。
+  acceptsReferenceImages: boolean
+  /// 模型自述的能力规格(时长/分辨率等),分镜容量按它动态取值。
+  spec: unknown
 }
 
 /**
@@ -84,7 +88,7 @@ export async function resolveSlotCandidates(
   const candidates: SlotCandidate[] = []
   for (const binding of [...projectScoped, ...orgScoped]) {
     if (seen.has(binding.capabilityId)) continue
-    if (!binding.capability.entitlementVerifiedAt) continue
+    if (!binding.capability.entitlementVerifiedAt && !binding.capability.credentialVerifiedAt) continue
     if (!binding.capability.connection.enabled) continue
     seen.add(binding.capabilityId)
     candidates.push({
@@ -98,6 +102,8 @@ export async function resolveSlotCandidates(
       model: binding.capability.model,
       displayName: binding.capability.displayName,
       modality: binding.capability.modality,
+      acceptsReferenceImages: binding.capability.acceptsReferenceImages,
+      spec: binding.capability.spec,
     })
   }
   return candidates

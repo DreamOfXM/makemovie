@@ -66,11 +66,21 @@ export function buildSubmitRequest(
   // Qwen-Image answers synchronously on the multimodal endpoint (verified live), so it
   // must not carry the async header the wanx task models below need.
   if (capability.modality === 'image' && isQwenImage(capability.model)) {
+    // qwen-image-edit 需要请求里至少 1 个 image 项(纯文本会被百炼以
+    // "must contain 1~3 image content items" 拒绝):定妆照参考图以 data URL
+    // 走 {image: url} 项,放在指令前面。参考图解析在 worker 侧——模型行未声明
+    // 接受参考图时不会带 media,届时这个校验会在发送前给出明确错误。
+    validateReferenceRequest(capability, request.input)
+    const references = readMediaReferences(request.input.media)
+    const content: Array<{ image: string } | { text: string }> = [
+      ...references.map(reference => ({ image: reference.url })),
+      { text: prompt },
+    ]
     return {
       url: `${base}${VLM_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { messages: [{ role: 'user', content: [{ text: prompt }] }] }, parameters: request.parameters },
+      body: { model: request.model, input: { messages: [{ role: 'user', content }] }, parameters: request.parameters },
     }
   }
 
@@ -233,26 +243,41 @@ export function usesMediaVideoApi(model: string): boolean {
 }
 
 /**
- * A delivered master must not carry a vendor watermark, and it must not be the answer to
- * a prompt nobody wrote: `prompt_extend` lets the service rewrite the request, which would
- * turn the stored `requestSnapshot` into a description of something that was never sent and
- * leave a re-run unable to reproduce the clip. Both are defaults a caller can still undo.
+ * The one parameter never left to the vendor's default is `prompt_extend`: it lets the
+ * service rewrite the request, which would turn the stored `requestSnapshot` into a
+ * description of something that was never sent and leave a re-run unable to reproduce
+ * the clip. `watermark` is deliberately NOT defaulted any more: GB 45438-2025 requires
+ * AI-generated content to carry a label, so opting a paid clip out of the vendor's own
+ * label has to be a decision written into the task's snapshot — not a quiet choice made
+ * once inside this adapter.
  */
 function videoParameters(parameters: Record<string, unknown>): Record<string, unknown> {
-  return { watermark: false, prompt_extend: false, ...parameters }
+  return { prompt_extend: false, ...parameters }
 }
 
-/** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image. */
-function extractSyncImageUrl(output: Record<string, unknown>): string | undefined {
-  const choices = output.choices
+/** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image.
+ *  The compatible-mode endpoint (qwen-image-edit) answers with the same message shape, but its content
+ *  items speak the OpenAI dialect — image_url objects, sometimes plain strings. Both are read here. */
+function extractSyncImageUrl(container: Record<string, unknown>): string | undefined {
+  const choices = container.choices
   if (!Array.isArray(choices) || choices.length === 0) return undefined
   const message = (choices[0] as { message?: unknown } | null)?.message
   if (typeof message !== 'object' || message === null) return undefined
   const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') {
+    const match = /data:image\/[^\s"']+|https?:\/\/[^\s"']+/.exec(content)
+    return match?.[0]
+  }
   if (!Array.isArray(content)) return undefined
   for (const part of content) {
-    if (typeof part === 'object' && part !== null && typeof (part as { image?: unknown }).image === 'string') {
-      return (part as { image: string }).image
+    if (typeof part === 'object' && part !== null) {
+      const record = part as Record<string, unknown>
+      if (typeof record.image === 'string') return record.image
+      const imageUrl = record.image_url
+      if (typeof imageUrl === 'string') return imageUrl
+      if (typeof imageUrl === 'object' && imageUrl !== null && typeof (imageUrl as { url?: unknown }).url === 'string') {
+        return (imageUrl as { url: string }).url
+      }
     }
   }
   return undefined
@@ -358,7 +383,7 @@ export class DashScopeAdapter implements ProviderAdapter {
 
     if (capability.modality === 'image' && isQwenImage(capability.model)) {
       const output = (body?.output ?? {}) as Record<string, unknown>
-      const artifactUrl = extractSyncImageUrl(output)
+      const artifactUrl = (body ? extractSyncImageUrl(body) : undefined) ?? extractSyncImageUrl(output)
       if (!artifactUrl) throw new Error(sanitizeError(body ?? 'dashscope qwen-image response missing an image url'))
       const taskId = `ds-sync-${++syncCounter}`
       syncResults.set(taskId, { artifactUrl })

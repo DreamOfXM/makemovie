@@ -20,6 +20,28 @@ export function isModelModality(value: unknown): value is ModelModality {
 export const contentLocales = ['zh', 'en'] as const
 export type ContentLocale = typeof contentLocales[number]
 
+/**
+ * The three shapes a project can take. One axis: series and short drama run the
+ * same pipeline and differ only in per-episode target duration; film is a
+ * one-episode project. The pipeline reads Episode.targetDurationMs (seeded from
+ * these defaults), never the format itself.
+ */
+export const projectFormats = ['short_drama', 'series', 'film'] as const
+export type ProjectFormat = typeof projectFormats[number]
+
+export function isProjectFormat(value: unknown): value is ProjectFormat {
+  return (projectFormats as readonly string[]).includes(value as string)
+}
+
+export const formatDefaults: Record<ProjectFormat, { targetDurationMs: number; maxEpisodes: number | null }> = {
+  short_drama: { targetDurationMs: 8 * 60_000, maxEpisodes: null },
+  series: { targetDurationMs: 45 * 60_000, maxEpisodes: null },
+  film: { targetDurationMs: 120 * 60_000, maxEpisodes: 1 },
+}
+
+/** Whole-book uploads get their own ceiling; the 200k per-version limit stays episode-level. */
+export const PROJECT_SOURCE_CHAR_LIMIT = 1_000_000
+
 export function isContentLocale(value: unknown): value is ContentLocale {
   return (contentLocales as readonly string[]).includes(value as string)
 }
