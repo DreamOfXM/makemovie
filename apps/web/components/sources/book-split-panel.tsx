@@ -78,7 +78,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   const [pasting, setPasting] = useState(false)
   // Identifies the mutation in flight: 'apply', 'new-episode', `alloc-<segmentId>`.
   const [busy, setBusy] = useState<string | null>(null)
-  const [applyResult, setApplyResult] = useState<ApplyProjectSourceResultItem[] | null>(null)
+  const [applyResult, setApplyResult] = useState<{ items: ApplyProjectSourceResultItem[]; pendingSegments: number } | null>(null)
   const [actionError, setActionError] = useState<{ message: string; retry?(): void } | null>(null)
 
   const loadMatrix = useCallback(
@@ -128,9 +128,20 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           return t('bookSplit.errorSegmentStale')
         case 'projectSources:nothingAllocated':
           return t('bookSplit.errorNothingAllocated')
+        case 'projectSources:tooLarge':
+          return t('bookSplit.errorTooLarge')
+        case 'projectSources:empty':
+          return t('bookSplit.errorEmpty')
+        case 'projectSources:badEncoding':
+          return t('bookSplit.errorBadEncoding')
+        case 'projectSources:duplicateSegment':
+          return t('bookSplit.errorDuplicateSegment')
         case 'episodes:filmLockedToOne':
           return t('bookSplit.errorFilmLocked')
       }
+      // Transport-level rejections never carry a projectSources code: the 413 a
+      // multipart file hits (4 MB wire cap) would otherwise show as raw English.
+      if (error.status === 413) return t('bookSplit.errorTransportTooLarge')
     }
     return error instanceof Error ? error.message : t('error.generic')
   }
@@ -221,8 +232,8 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
     setBusy('apply')
     setActionError(null)
     try {
-      const { results } = await applyProjectSource(api, projectId)
-      setApplyResult(results)
+      const { results, pendingSegments } = await applyProjectSource(api, projectId)
+      setApplyResult({ items: results, pendingSegments })
       toast.success(
         t('bookSplit.applyDoneTitle', {
           created: results.filter(item => !item.skipped).length,
@@ -536,18 +547,23 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
             <div className="space-y-1 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm">
               <p className="font-medium">
                 {t('bookSplit.applyDoneTitle', {
-                  created: applyResult.filter(item => !item.skipped).length,
-                  skipped: applyResult.filter(item => item.skipped).length,
+                  created: applyResult.items.filter(item => !item.skipped).length,
+                  skipped: applyResult.items.filter(item => item.skipped).length,
                 })}
               </p>
               <p className="text-muted-foreground">
-                {applyResult
+                {applyResult.items
                   .map(item =>
                     t('bookSplit.applyResultItem', { number: item.number, version: item.version ?? '—' }) +
                     (item.skipped ? t('bookSplit.applyResultSkipped') : ''),
                   )
                   .join(' · ')}
               </p>
+              {applyResult.pendingSegments > 0 && (
+                <p className="text-warning">
+                  {t('bookSplit.applyPending', { count: applyResult.pendingSegments })}
+                </p>
+              )}
               <p className="text-muted-foreground">{t('bookSplit.applyNext')}</p>
             </div>
           )}

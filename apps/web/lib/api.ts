@@ -382,7 +382,7 @@ export function updateSourceAllocations(
 export function applyProjectSource(
   api: ApiClient,
   projectId: string,
-): Promise<{ results: ApplyProjectSourceResultItem[] }> {
+): Promise<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }> {
   return api<{ results: ApplyProjectSourceResultItem[] }>(`/projects/${projectId}/source/apply`, { method: 'POST' })
 }
 

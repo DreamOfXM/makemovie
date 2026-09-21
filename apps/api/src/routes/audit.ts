@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { requirePermission } from '../plugins/auth.js'
+import { recordAudit } from '../lib/audit.js'
 
 export async function auditRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: { limit?: string; before?: string; action?: string } }>(
@@ -33,8 +34,20 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
-  app.delete('/sessions/expired', { preHandler: requirePermission('audit:read') }, async (_request, reply) => {
+  app.delete('/sessions/expired', { preHandler: requirePermission('audit:read') }, async (request, reply) => {
     const result = await app.db.session.deleteMany({ where: { expiresAt: { lt: new Date() } } })
+    // A bulk delete is exactly the kind of write the audit trail exists for.
+    if (result.count > 0) {
+      const auth = request.auth!
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'session.purge',
+        entityType: 'Session',
+        entityId: 'expired',
+        payload: { pruned: result.count },
+      })
+    }
     return reply.send({ pruned: result.count })
   })
 }

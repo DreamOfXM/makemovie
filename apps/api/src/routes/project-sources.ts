@@ -34,20 +34,19 @@ function checksumOf(content: string): string {
 /**
  * Uploaded books arrive as opaque bytes: try strict UTF-8 first, then GB18030 —
  * which covers GBK and GB2312 — because a UTF-8 failure on a Chinese novel is
- * almost always a legacy encoding, not corruption.
+ * almost always a legacy encoding, not corruption. Anything that still cannot
+ * decode cleanly (or decodes only through replacement characters) is rejected:
+ * silently storing mojibake is worse than asking the author to re-save as UTF-8.
  */
-function decodeBook(buffer: Buffer): string {
+function decodeBook(buffer: Buffer): string | null {
   if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
     return buffer.subarray(3).toString('utf8')
   }
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
   } catch {
-    try {
-      return new TextDecoder('gb18030').decode(buffer)
-    } catch {
-      return buffer.toString('utf8')
-    }
+    const decoded = new TextDecoder('gb18030').decode(buffer)
+    return decoded.includes('\uFFFD') ? null : decoded
   }
 }
 
@@ -56,14 +55,15 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
   // the ceiling, refuse a byte-identical re-intake, split mechanically, and version.
   async function ingestBook(request: FastifyRequest, project: { id: string; organizationId: string }, content: string, filename: string, reply: FastifyReply) {
     const auth = request.auth!
-    if (!content.trim()) return reply.code(400).send({ error: 'the book is empty' })
-    if (content.length > PROJECT_SOURCE_CHAR_LIMIT) {
-      return reply.code(400).send({ error: `book must not exceed ${PROJECT_SOURCE_CHAR_LIMIT} characters` })
-    }
+    if (!content.trim()) return reply.code(400).send({ error: 'projectSources:empty' })
+    if (content.length > PROJECT_SOURCE_CHAR_LIMIT) return reply.code(400).send({ error: 'projectSources:tooLarge' })
 
     const checksum = checksumOf(content)
+    // Against every prior version, not just the latest: a re-intake after an
+    // unrelated version in between must not slip past as "new".
+    const duplicate = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id, checksum } })
+    if (duplicate) return reply.code(409).send({ error: 'projectSources:duplicate' })
     const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
-    if (latest?.checksum === checksum) return reply.code(409).send({ error: 'projectSources:duplicate' })
 
     const segments = splitChapters(content)
     const created = await app.db.$transaction(async tx => {
@@ -134,15 +134,19 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       if (ext !== '.txt' && ext !== '.md') {
         return reply.code(400).send({ error: 'only .txt and .md files are supported (.docx is planned)' })
       }
-      return ingestBook(request, project, decodeBook(await file.toBuffer()), file.filename, reply)
+      const content = decodeBook(await file.toBuffer())
+      if (content === null) return reply.code(400).send({ error: 'projectSources:badEncoding' })
+      return ingestBook(request, project, content, file.filename, reply)
     },
   )
 
   // The paste door: same intake for browsers and environments where a file picker
   // is unavailable (embedded webviews), or simply for text already on the clipboard.
+  // Fastify's default 1 MB JSON cap would silently break the promised 1M-character
+  // ceiling, so this route carries the byte budget the ceiling implies.
   app.post<{ Params: { projectId: string }; Body: { content?: string; filename?: string } }>(
     '/projects/:projectId/source',
-    { preHandler: requirePermission('project:update') },
+    { preHandler: requirePermission('project:update'), bodyLimit: PROJECT_SOURCE_CHAR_LIMIT * 4 },
     async (request, reply) => {
       const project = await findProjectInOrg(app.db, request.params.projectId, request.auth!.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
@@ -229,6 +233,12 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       const changes = request.body?.allocations
       if (!Array.isArray(changes) || changes.length === 0) return reply.code(400).send({ error: 'allocations is required' })
+      // One row per segment is the table's invariant; a repeated segmentId in one
+      // payload is a client bug and would trip the unique constraint as a raw 500
+      // with a stack trace, so it is refused here with something readable.
+      if (new Set(changes.map(change => change.segmentId)).size !== changes.length) {
+        return reply.code(400).send({ error: 'projectSources:duplicateSegment' })
+      }
 
       const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
       if (!latest) return reply.code(404).send({ error: 'projectSources:notUploaded' })
@@ -333,8 +343,14 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         })
         results.push({ episodeId: episode.id, number: episode.number, version: created.version, skipped: false })
       }
-      await app.db.projectSourceVersion.update({ where: { id: latest.id }, data: { status: 'APPROVED' } })
-      return { results }
+      // "Approved" must mean the whole book is placed. Chapters left unallocated
+      // keep the version in draft so the panel keeps nagging about them instead
+      // of the book silently ending at whatever was mapped last.
+      const pendingSegments = segments.length - [...byEpisode.values()].reduce((sum, group) => sum + group.length, 0)
+      if (pendingSegments === 0) {
+        await app.db.projectSourceVersion.update({ where: { id: latest.id }, data: { status: 'APPROVED' } })
+      }
+      return { results, pendingSegments }
     },
   )
 }

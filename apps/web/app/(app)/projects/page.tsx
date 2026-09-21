@@ -266,8 +266,9 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
   const statuses = episodes.map(episode => toWorkflowStatus(episode.status))
   const completed = statuses.filter(status => status === 'completed').length
   const waiting = statuses.filter(status => decisionStatuses.includes(status)).length
-  // Where the season stands is its last episode that has not shipped.
-  const head = statuses.filter(status => status !== 'completed').at(-1) ?? 'completed'
+  // Where the season stands is its last episode that has not shipped. A project
+  // with no episodes yet has shipped nothing, so it reads as draft — not done.
+  const head = statuses.filter(status => status !== 'completed').at(-1) ?? (statuses.length === 0 ? 'draft' : 'completed')
   const projectStatus = toWorkflowStatus(project.status)
 
   return (

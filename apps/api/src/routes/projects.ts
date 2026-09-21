@@ -64,13 +64,18 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(project)
   })
 
-  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string } }>(
+  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number } }>(
     '/projects/:projectId',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'Project not found' })
+      // The format is fixed at creation by design; silently ignoring it here made
+      // third-party callers believe a rename also re-shaped the project.
+      if (request.body?.format !== undefined || request.body?.targetDurationMs !== undefined) {
+        return reply.code(400).send({ error: 'format and targetDurationMs are set at project creation and cannot be changed here' })
+      }
       const { name, contentLocale } = request.body ?? {}
       if (name === undefined && contentLocale === undefined) {
         return reply.code(400).send({ error: 'name or contentLocale is required' })

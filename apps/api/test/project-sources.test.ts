@@ -139,6 +139,98 @@ describe('whole-book upload', () => {
     expect(((matrix.json() as { segments: unknown[] }).segments)).toHaveLength(3)
   })
 
+  it('keeps the promised 1M ceiling reachable through the paste door', async () => {
+    const projectId = await createProject('series')
+    // Just past the ceiling: the business check must answer with a readable 400
+    // — not a transport 413 from Fastify's default 1 MB JSON cap.
+    const over = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(1_000_001) } })
+    expect(over.statusCode).toBe(400)
+    expect(over.json()).toMatchObject({ error: 'projectSources:tooLarge' })
+    // Inside the ceiling (~2.5 MB of UTF-8) the door holds.
+    const within = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(900_000) } })
+    expect(within.statusCode).toBe(201)
+  })
+
+  it('refuses bytes no supported encoding can decode instead of storing mojibake', async () => {
+    const projectId = await createProject('series')
+    // 0xFF is undefined in both UTF-8 and GB18030: decodes only via replacement.
+    const upload = await uploadBook(projectId, 'broken.bin.txt', Buffer.from([0xff, 0xff, 0x41]))
+    expect(upload.statusCode).toBe(400)
+    expect(upload.json()).toMatchObject({ error: 'projectSources:badEncoding' })
+  })
+
+  it('rejects a repeated segment in one allocation payload instead of a raw 500', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第 1 集' } })
+    const episodeId = (ep.json() as { id: string }).id
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const segmentId = (matrix.json() as { segments: Array<{ id: string }> }).segments[0].id
+
+    const dup = await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/allocations`,
+      headers: authHeaders(),
+      payload: { allocations: [
+        { segmentId, episodeId },
+        { segmentId, episodeId },
+      ] },
+    })
+    expect(dup.statusCode).toBe(400)
+    expect(dup.json()).toMatchObject({ error: 'projectSources:duplicateSegment' })
+  })
+
+  it('flags a re-intake of an older version hidden behind a newer one', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'a.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    expect((await uploadBook(projectId, 'b.txt', Buffer.from(`${BOOK}\n\n第四章 后记\n有人回来点灯。`, 'utf8'))).statusCode).toBe(201)
+    // The first book is no longer the latest version — it must still be a duplicate.
+    const again = await uploadBook(projectId, 'a-again.txt', Buffer.from(BOOK, 'utf8'))
+    expect(again.statusCode).toBe(409)
+    expect(again.json()).toMatchObject({ error: 'projectSources:duplicate' })
+  })
+
+  it('keeps the whole book in draft while chapters remain unallocated', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string }> }
+    // Only the first marked chapter goes in this round.
+    expect((await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/allocations`,
+      headers: authHeaders(),
+      payload: { allocations: [{ segmentId: segments[1].id, episodeId: episodes[0].id }] },
+    })).statusCode).toBe(200)
+
+    const partial = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    expect(partial.statusCode).toBe(200)
+    expect(partial.json()).toMatchObject({ pendingSegments: 2 })
+    const stillDraft = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    expect((stillDraft.json() as { version: { status: string } }).version.status).toBe('DRAFT')
+
+    // Place every remaining segment (unmarked lead included) and apply again.
+    const rest = segments.filter(segment => segment.id !== segments[1].id).map(segment => ({ segmentId: segment.id, episodeId: episodes[0].id }))
+    expect((await env.app.inject({ method: 'PATCH', url: `/projects/${projectId}/source/allocations`, headers: authHeaders(), payload: { allocations: rest } })).statusCode).toBe(200)
+    const complete = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    expect(complete.json()).toMatchObject({ pendingSegments: 0 })
+    const approved = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    expect((approved.json() as { version: { status: string } }).version.status).toBe('APPROVED')
+  })
+
+  it('rejects a rename that tries to smuggle format fields', async () => {
+    const projectId = await createProject('series')
+    const res = await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}`,
+      headers: authHeaders(),
+      payload: { name: '改名', format: 'film' },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
   it('decodes a GBK-encoded book without mojibake', async () => {
     const projectId = await createProject('series')
     // 纸巷 in GBK: invalid as UTF-8, decodable as GB18030.
