@@ -383,7 +383,7 @@ export function applyProjectSource(
   api: ApiClient,
   projectId: string,
 ): Promise<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }> {
-  return api<{ results: ApplyProjectSourceResultItem[] }>(`/projects/${projectId}/source/apply`, { method: 'POST' })
+  return api<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }>(`/projects/${projectId}/source/apply`, { method: 'POST' })
 }
 
 export interface AuditEvent {
