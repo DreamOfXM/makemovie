@@ -26,8 +26,11 @@ Stage: FIRST_FRAME
 Generation prompt: a rainy night market, neon reflections
 The image is the generated artifact itself.
 
-Judge only what is visible: does it depict the generation prompt, and is it free of obvious defects
-(blur, warped anatomy, garbled text, missing or duplicated subjects, compression artefacts)?
+硬属性核对(最高优先级):先从生成指令中提取每个出场主体的硬属性——性别、年龄段(如"十六岁少女"不是男孩)、大致人数、关键道具,再逐项与画面比对。
+生成指令中"图N＝角色定妆照｜..."的对应关系同样必须成立:画面人物必须与指令声称的定妆照主体一致。
+任何一项硬属性不符(性别画错、年龄明显偏差、多了或少了人物、关键道具缺失或张冠李戴)都直接判不合格,在 reasons 里写明是哪一项不符,即使画面本身很干净。
+
+在此之上再判断通用缺陷:是否呈现了生成指令描述的场景,有无明显瑕疵(模糊、肢体扭曲、乱码文字、主体缺失或重复、压缩噪点)。
 Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}
 A score of ${QC_THRESHOLD} or above means the artifact is usable.`
 
@@ -36,8 +39,11 @@ Stage: VIDEO
 Generation prompt: a rainy night market, neon reflections
 The image is a single frame taken from the middle of the generated clip. You cannot judge motion, continuity between shots, or audio.
 
-Judge only what is visible: does it depict the generation prompt, and is it free of obvious defects
-(blur, warped anatomy, garbled text, missing or duplicated subjects, compression artefacts)?
+硬属性核对(最高优先级):先从生成指令中提取每个出场主体的硬属性——性别、年龄段(如"十六岁少女"不是男孩)、大致人数、关键道具,再逐项与画面比对。
+生成指令中"图N＝角色定妆照｜..."的对应关系同样必须成立:画面人物必须与指令声称的定妆照主体一致。
+任何一项硬属性不符(性别画错、年龄明显偏差、多了或少了人物、关键道具缺失或张冠李戴)都直接判不合格,在 reasons 里写明是哪一项不符,即使画面本身很干净。
+
+在此之上再判断通用缺陷:是否呈现了生成指令描述的场景,有无明显瑕疵(模糊、肢体扭曲、乱码文字、主体缺失或重复、压缩噪点)。
 Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}
 A score of ${QC_THRESHOLD} or above means the artifact is usable.`
 
@@ -209,15 +215,18 @@ describe('buildAuditPrompt', () => {
     expect(buildAuditPrompt(subject({ stage: 'VIDEO', modality: 't2v' }), 'frame')).toBe(UNCONDITIONED_FRAME_PROMPT)
   })
 
-  it('asks whether the artifact shows the same subject only when a frame conditioned it', () => {
+  it('asks whether the artifact shows the same subject only when a frame conditioned it, and scopes the clip to the frame', () => {
     const conditioned = buildAuditPrompt(subject({ referenceDataUrl: REFERENCE_DATA_URL }), 'image')
     expect(conditioned).toContain('A second image is attached')
     expect(conditioned).toContain('the same character, the same prop, the same scene subject')
     expect(conditioned).toContain('score it below the threshold')
+    // 图生视频是从首帧延续:后续剧情超出片段时长不算缺陷,与首帧一致才是硬标准。
+    expect(conditioned).toContain('图生视频是从首帧出发的延续')
+    expect(buildAuditPrompt(subject(), 'image')).not.toContain('图生视频是从首帧出发的延续')
     // The added clause sits beside the existing judgment; it never replaces it, and it
     // never moves what "the image" refers to.
     expect(conditioned).toContain('The image is the generated artifact itself.')
-    expect(conditioned).toContain('is it free of obvious defects')
+    expect(conditioned).toContain('在此之上再判断通用缺陷')
 
     const clip = buildAuditPrompt(subject({ stage: 'VIDEO', modality: 'i2v', referenceDataUrl: REFERENCE_DATA_URL }), 'frame')
     expect(clip).toContain('A second image is attached')
@@ -378,9 +387,11 @@ describe('worker qc mode', () => {
     expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: 'pass' }).qcMode).toBe('pass')
   })
 
-  it('defaults to pass when unset or empty, so the placeholder never rejects on its own', () => {
-    expect(loadWorkerConfig(env).qcMode).toBe('pass')
-    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: '' }).qcMode).toBe('pass')
+  it('defaults to model when unset or empty: the cheap auditor is the gatekeeper by default', () => {
+    expect(loadWorkerConfig(env).qcMode).toBe('model')
+    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: '' }).qcMode).toBe('model')
+    // 显式 pass 仍然可选:无人值守大批量、自担质检缺位时使用。
+    expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: 'pass' }).qcMode).toBe('pass')
     expect(loadWorkerConfig({ ...env, STUDIO_QC_MODE: 'random' }).qcMode).toBe('random')
   })
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { PrismaClient } from '@studio/db'
+import { parseStoryboardJson, type ExtractedAsset } from '@studio/pipeline'
 
 interface ContentTask {
   id: string
@@ -39,28 +40,6 @@ async function recordScriptVersion(db: PrismaClient, task: ContentTask, text: st
   })
 }
 
-interface StoryboardShot {
-  title?: unknown
-  description?: unknown
-  dialogue?: unknown
-  speaker?: unknown
-  sourceExcerpt?: unknown
-  durationMs?: unknown
-  continuityIn?: unknown
-  continuityOut?: unknown
-}
-
-interface ExtractedAsset {
-  kind?: unknown
-  name?: unknown
-  description?: unknown
-}
-
-export interface ParsedStoryboard {
-  shots: StoryboardShot[]
-  assets: ExtractedAsset[]
-}
-
 // The authoring vocabulary the assets panel offers as presets; anything else the
 // model invents would show up as an untranslatable kind in the console.
 const ASSET_KINDS = ['character', 'prop', 'scene'] as const
@@ -76,70 +55,6 @@ function asDuration(value: unknown): number {
 function asAssetKind(value: unknown): string | null {
   const kind = asString(value).trim().toLowerCase()
   return (ASSET_KINDS as readonly string[]).includes(kind) ? kind : null
-}
-
-// Models wrap the payload in prose or code fences, so scan for the balanced JSON
-// values in the reply instead of requiring it to be bare JSON. `{shots, assets}` is
-// the current contract; a bare array is the shots-only shape the earlier prompt
-// produced, and is still accepted.
-export function parseStoryboardJson(text: string): ParsedStoryboard | null {
-  for (const block of jsonBlocks(text)) {
-    // A document that names `shots` is the reply even when the shot list came back
-    // empty — falling through to the assets array would write the cast as shots.
-    if (isRecord(block) && 'shots' in block) return asStoryboardDocument(block)
-    if (Array.isArray(block) && block.length > 0) return { shots: block as StoryboardShot[], assets: [] }
-  }
-  return null
-}
-
-function asStoryboardDocument(document: Record<string, unknown>): ParsedStoryboard | null {
-  const shots = document.shots
-  if (!Array.isArray(shots) || shots.length === 0) return null
-  const assets = document.assets
-  return { shots: shots as StoryboardShot[], assets: Array.isArray(assets) ? (assets as ExtractedAsset[]) : [] }
-}
-
-function* jsonBlocks(text: string): Generator<unknown> {
-  for (let start = 0; start < text.length; start += 1) {
-    const open = text[start]
-    if (open !== '{' && open !== '[') continue
-    const end = balancedEnd(text, start)
-    if (end === -1) continue
-    try {
-      yield JSON.parse(text.slice(start, end + 1)) as unknown
-      start = end
-    } catch {
-      // A brace in the surrounding prose, or a truncated payload: keep looking.
-    }
-  }
-}
-
-function balancedEnd(text: string, start: number): number {
-  const open = text[start]
-  const close = open === '{' ? '}' : ']'
-  let depth = 0
-  let inString = false
-  let escaped = false
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index]
-    if (inString) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === '"') inString = false
-      continue
-    }
-    if (char === '"') inString = true
-    else if (char === open) depth += 1
-    else if (char === close) {
-      depth -= 1
-      if (depth === 0) return index
-    }
-  }
-  return -1
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function recordStoryboards(db: PrismaClient, task: ContentTask, text: string): Promise<void> {
@@ -192,16 +107,57 @@ async function recordStoryboards(db: PrismaClient, task: ContentTask, text: stri
   })
 
   await recordExtractedAssets(db, task, parsed.assets)
+  // 分镜 AI 的输出里没有镜头级素材关联,而零绑定会让首帧既没有素材描述也没有
+  // 定妆照参考——一致性的源头断在这里。按"镜头文本提到素材名"建立绑定:
+  // 提到「小满」就绑小满的定妆照。专名匹配,误绑远好过全空。
+  await bindShotsToAssets(db, episodeId, revision)
+}
+
+/**
+ * 按镜头描述中的素材名匹配建立镜头-素材绑定。名字先做括号注记剥离与去重,
+ * 两字以下的短名不做匹配(误绑率高于价值);绑定冲突静默跳过——重复拆解
+ * 重建素材行时,同一对 (shot, asset) 可能已被上一轮建过。
+ */
+async function bindShotsToAssets(db: PrismaClient, episodeId: string, revision: number): Promise<void> {
+  const shots = await db.storyboard.findMany({
+    where: { episodeId, revision, supersededAt: null },
+    select: { id: true, title: true, description: true, dialogue: true, speaker: true },
+  })
+  const assets = await db.asset.findMany({ where: { episodeId }, select: { id: true, name: true, kind: true } })
+  const names = assets
+    .map(asset => ({ ...asset, normalizedName: normalizeAssetName(asset.name).trim() }))
+    .filter(asset => asset.normalizedName.length >= 2)
+  for (const shot of shots) {
+    // 台词与说话人都算镜头文本:说话的人就是出场的人,[小满] 的台词该绑上小满的定妆照。
+    const text = `${shot.title} ${shot.description} ${shot.dialogue} ${shot.speaker ?? ''}`
+    for (const asset of names) {
+      if (!text.includes(asset.normalizedName)) continue
+      try {
+        await db.storyboardAsset.create({
+          data: { storyboardId: shot.id, assetId: asset.id, role: asset.kind },
+        })
+      } catch (error) {
+        if (!isPrismaUniqueViolation(error)) throw error
+      }
+    }
+  }
 }
 
 // The storyboard call also reports the episode's cast, props and scenes, which is
 // what lets the ASSET stage run without a human authoring the first asset.
 async function recordExtractedAssets(db: PrismaClient, task: ContentTask, assets: ExtractedAsset[]): Promise<void> {
   const episodeId = task.batch.episodeId
+  // 素材身份归属项目,不归属单集:同一角色跨集复用全局库里的同一份档案,
+  // 拆解时按归一化名称匹配——命中即链接复用,未命中才新建库条目。
+  const episode = await db.episode.findUnique({ where: { id: episodeId }, select: { projectId: true } })
+  const projectId = episode?.projectId
   for (const asset of assets) {
     const kind = asAssetKind(asset.kind)
     const name = asString(asset.name).trim()
     if (!kind || !name) continue
+    const projectAssetId = projectId
+      ? await matchOrCreateProjectAsset(db, projectId, kind, name, asString(asset.description).trim(), task.id)
+      : null
     try {
       await db.asset.create({
         data: {
@@ -211,6 +167,7 @@ async function recordExtractedAssets(db: PrismaClient, task: ContentTask, assets
           description: asString(asset.description).trim(),
           status: 'DRAFT',
           generationTaskId: task.id,
+          projectAssetId,
         },
       })
     } catch (error) {
@@ -220,6 +177,32 @@ async function recordExtractedAssets(db: PrismaClient, task: ContentTask, assets
       if (!isPrismaUniqueViolation(error)) throw error
     }
   }
+}
+
+// 「林小雨(主角)」→「林小雨」:括号注记是修辞不是身份,不参与匹配。
+function normalizeAssetName(name: string): string {
+  return name.replace(/（[^）]*）|\([^)]*\)/g, '').trim()
+}
+
+async function matchOrCreateProjectAsset(
+  db: PrismaClient,
+  projectId: string,
+  kind: string,
+  name: string,
+  description: string,
+  generationTaskId: string,
+): Promise<string | null> {
+  const normalized = normalizeAssetName(name)
+  const candidates = await db.projectAsset.findMany({ where: { projectId, kind } })
+  const match =
+    candidates.find(candidate => candidate.name === name) ??
+    (normalized !== '' ? candidates.find(candidate => normalizeAssetName(candidate.name) === normalized) : undefined) ??
+    null
+  if (match) return match.id
+  const created = await db.projectAsset.create({
+    data: { projectId, kind, name, description, status: 'DRAFT', generationTaskId },
+  })
+  return created.id
 }
 
 function isPrismaUniqueViolation(error: unknown): boolean {

@@ -18,14 +18,36 @@ export async function recordAssetVersion(db: PrismaClient, task: { stage: string
   if (!asset) return
 
   const latest = await db.assetVersion.findFirst({ where: { assetId }, orderBy: { version: 'desc' } })
+  // The version card shows this text to the user, so it carries the readable description;
+  // the exact prompt stays in promptSnapshot.
+  const readable = asset.description || prompt
   await db.assetVersion.create({
     data: {
       assetId,
       version: (latest?.version ?? 0) + 1,
-      description: prompt,
+      description: readable,
       promptSnapshot: prompt,
       artifactId,
       status: 'DRAFT',
     },
   })
+
+  // Mirror into the project library: a generated reference image belongs to the global
+  // asset identity, so its history accumulates there for reuse across episodes.
+  if (asset.projectAssetId) {
+    const libLatest = await db.projectAssetVersion.findFirst({
+      where: { projectAssetId: asset.projectAssetId },
+      orderBy: { version: 'desc' },
+    })
+    await db.projectAssetVersion.create({
+      data: {
+        projectAssetId: asset.projectAssetId,
+        version: (libLatest?.version ?? 0) + 1,
+        description: readable,
+        promptSnapshot: prompt,
+        artifactId,
+        status: 'DRAFT',
+      },
+    })
+  }
 }

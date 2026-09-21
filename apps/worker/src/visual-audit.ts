@@ -125,7 +125,10 @@ export function auditImages(subject: QcSubject, image: AuditImage): string[] {
 }
 
 export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'none'>): string {
-  return [
+  // 带首帧参考的审核(图生视频)与无条件审核(纯文生)的基准不同:
+  // 前者的画面基准是首帧本身——指令里文学化的中途状态描述不构成核对项;
+  // 后者没有画面基准,才需要拿指令全文做硬属性核对。
+  const header = [
     'You are auditing one artifact produced by an automated film & video production pipeline.',
     `Stage: ${subject.stage}`,
     `Generation prompt: ${subject.prompt || '(none recorded)'}`,
@@ -133,18 +136,31 @@ export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'n
       ? 'The image is a single frame taken from the middle of the generated clip. You cannot judge motion, continuity between shots, or audio.'
       : 'The image is the generated artifact itself.',
     '',
-    'Judge only what is visible: does it depict the generation prompt, and is it free of obvious defects',
-    '(blur, warped anatomy, garbled text, missing or duplicated subjects, compression artefacts)?',
-    // Nothing to have drifted from until a shot is actually generated from a frame, so
-    // an unconditioned audit gets this clause absent rather than weakened.
-    ...(subject.referenceDataUrl
-      ? [
-          'A second image is attached, and it comes after the one described above: the approved first frame this clip was generated from, the exact image the video model was conditioned on.',
-          'Judge the artifact against that reference as well. It must depict the same character, the same prop, the same scene subject: the same face, the same build, the same clothing and the same object, allowing only for the angle, framing and lighting the clip changes.',
-          'A plausible but different person, or an object quietly redesigned between the frame and the clip, is a defect worth flagging. Name it in reasons and score it below the threshold: a cut the audience reads as two different characters is not usable however clean the single frame looks.',
-          '',
-        ]
-      : []),
+  ]
+  if (subject.referenceDataUrl) {
+    return [
+      ...header,
+      '这是图生视频:第二张图(首帧)是这段视频的画面基准。',
+      '硬属性核对以首帧为基准:出场人物的身份、性别、人数、服装与场景必须和首帧一致——任何与首帧不符的主体替换、凭空增减人物都是缺陷,在 reasons 里写明。',
+      '生成指令中的文学化状态描述(如剧情中途的异变"皮肤青灰""手透明"、特殊光照、姿态)如果与首帧已呈现的画面不同,以首帧为准,不算缺陷;指令只用于确认延续的动作方向是否合理。',
+      '图生视频是从首帧出发的延续:片段只需延续首帧中的场景与动作。指令可能描述了超出本片段时长的后续剧情——五秒的延续没有覆盖那些后续情节不是缺陷。',
+      '',
+      '在此之上再判断通用缺陷(模糊、肢体扭曲、乱码文字、压缩噪点)。',
+      '',
+      'A second image is attached, and it comes after the one described above: the approved first frame this clip was generated from, the exact image the video model was conditioned on.',
+      'Judge the artifact against that reference. It must depict the same character, the same prop, the same scene subject: the same face, the same build, the same clothing and the same object, allowing only for the angle, framing and lighting the clip changes.',
+      'A plausible but different person, or an object quietly redesigned between the frame and the clip, is a defect worth flagging. Name it in reasons and score it below the threshold: a cut the audience reads as two different characters is not usable however clean the clip looks.',
+      'Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}',
+      `A score of ${QC_THRESHOLD} or above means the artifact is usable.`,
+    ].join('\n')
+  }
+  return [
+    ...header,
+    '硬属性核对(最高优先级):先从生成指令中提取每个出场主体的硬属性——性别、年龄段(如"十六岁少女"不是男孩)、大致人数、关键道具,再逐项与画面比对。',
+    '生成指令中"图N＝角色定妆照｜..."的对应关系同样必须成立:画面人物必须与指令声称的定妆照主体一致。',
+    '任何一项硬属性不符(性别画错、年龄明显偏差、多了或少了人物、关键道具缺失或张冠李戴)都直接判不合格,在 reasons 里写明是哪一项不符,即使画面本身很干净。',
+    '',
+    '在此之上再判断通用缺陷:是否呈现了生成指令描述的场景,有无明显瑕疵(模糊、肢体扭曲、乱码文字、主体缺失或重复、压缩噪点)。',
     'Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}',
     `A score of ${QC_THRESHOLD} or above means the artifact is usable.`,
   ].join('\n')
