@@ -10,3 +10,10 @@ out
 *.tsbuildinfo
 coverage
 var
+.finesse/
+.impeccable/
+dump.rdb
+docs/PLAN.md
+docs/.plan-archive/
+p4-preview/
+spark-output/
