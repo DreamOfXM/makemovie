@@ -32,6 +32,13 @@ export default function AuditPage() {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
 
+  // Audit codes are stable identifiers; users get a label, unknown codes fall back to the raw value.
+  const actionLabel = (action: string) => {
+    const key = `audit.action.${action}`
+    const label = t(key)
+    return label === key ? action : label
+  }
+
   const [events, setEvents] = useState<AuditEvent[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -106,7 +113,7 @@ export default function AuditPage() {
 
       <Card>
         <CardHeader className="border-b">
-          <CardTitle className="text-sm">{t('audit.title')}</CardTitle>
+          <CardTitle>{t('audit.title')}</CardTitle>
           <CardDescription>{t('common.count', { count: events.length })}</CardDescription>
           <CardAction>
             <Select value={actionFilter} onValueChange={setActionFilter}>
@@ -117,7 +124,7 @@ export default function AuditPage() {
                 <SelectItem value={ALL}>{t('audit.allActions')}</SelectItem>
                 {knownActions.map(action => (
                   <SelectItem key={action} value={action}>
-                    {action}
+                    {actionLabel(action)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -160,11 +167,11 @@ export default function AuditPage() {
                     >
                       <TableCell className="whitespace-nowrap">
                         <p>{formatDateTime(event.createdAt, locale)}</p>
-                        <p className="text-muted-foreground text-xs">{relativeTime(event.createdAt, locale)}</p>
+                        <p className="text-subtle-foreground text-xs">{relativeTime(event.createdAt, locale)}</p>
                       </TableCell>
                       <TableCell>
-                        <Badge variant={actionVariant(event.action)} className="font-mono">
-                          {event.action}
+                        <Badge variant={actionVariant(event.action)}>
+                          {actionLabel(event.action)}
                         </Badge>
                       </TableCell>
                       <TableCell>
@@ -195,6 +202,7 @@ export default function AuditPage() {
                     {expanded === event.id && (
                       <TableRow className="hover:bg-muted/50">
                         <TableCell colSpan={5} className="bg-muted/30 py-4">
+                          <p className="text-muted-foreground mb-2 font-mono text-xs">{event.action}</p>
                           <pre className="text-foreground overflow-x-auto font-mono text-xs leading-relaxed">
                             {JSON.stringify(event.payload, null, 2)}
                           </pre>

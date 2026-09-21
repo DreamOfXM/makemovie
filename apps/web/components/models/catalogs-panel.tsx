@@ -70,7 +70,9 @@ export function CatalogsPanel({ catalogs }: { catalogs: AsyncState<Catalog[]> })
                     </TableHeader>
                     <TableBody>
                       {catalog.models.map(model => (
-                        <CatalogModelRow key={model.model} model={model} />
+                        // One model name can serve several modalities (wan3.0-video is both
+                        // t2v and i2v), so the key must include the modality to stay unique.
+                        <CatalogModelRow key={`${model.model}:${model.modality}`} model={model} />
                       ))}
                     </TableBody>
                   </Table>

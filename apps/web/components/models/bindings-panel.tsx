@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useMemo, useState, type FormEvent } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { CircleAlertIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { CircleAlertIcon, CircleHelpIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { capabilitySlots, slotModality, type CapabilitySlot } from '@studio/domain'
 import type { Binding, Connection, Project, ResolveResponse } from '@/lib/api'
 import { bindableCapabilities, candidatesForSlot, type BindableCapability } from '@/lib/models/readiness'
@@ -37,6 +37,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 
@@ -46,9 +47,11 @@ const ORG_SCOPE = '__org__'
 interface BindingsPanelProps {
   connections: AsyncState<Connection[]>
   bindings: AsyncState<Binding[]>
+  // Deep link from the project-scope sidebar: /models?tab=bindings&project=<id>.
+  projectScope?: string | null
 }
 
-export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
+export function BindingsPanel({ connections, bindings, projectScope }: BindingsPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -57,8 +60,13 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
   const [projectFilter, setProjectFilter] = useState<string>(ALL)
   const [bindOpen, setBindOpen] = useState(false)
   const [bindKey, setBindKey] = useState(0)
+  const [bindPreset, setBindPreset] = useState<{ slot: CapabilitySlot; scope: string } | null>(null)
   const [unbindTarget, setUnbindTarget] = useState<Binding | null>(null)
   const [unbinding, setUnbinding] = useState(false)
+
+  useEffect(() => {
+    if (projectScope) setProjectFilter(projectScope)
+  }, [projectScope])
 
   const loadProjects = useCallback(() => api<Project[]>('/projects'), [api, organizationId])
   const projects = useAsync<Project[]>(loadProjects, [])
@@ -76,8 +84,92 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
     [bindings.data, slotFilter, projectFilter],
   )
 
+  // Relative fallback order within the same slot + scope (higher priority runs
+  // first). The UI shows this rank, never the raw number, so users don't have
+  // to reverse-engineer ordering from arbitrary integers.
+  const ranks = useMemo(() => {
+    const groups = new Map<string, Binding[]>()
+    for (const binding of bindings.data) {
+      const key = `${binding.slot}:${binding.projectId ?? ''}`
+      const group = groups.get(key)
+      if (group) group.push(binding)
+      else groups.set(key, [binding])
+    }
+    const result = new Map<string, number>()
+    for (const group of groups.values()) {
+      group
+        .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+        .forEach((binding, index) => result.set(binding.id, index + 1))
+    }
+    return result
+  }, [bindings.data])
+
   const resolveSlot = slotFilter === ALL ? null : (slotFilter as CapabilitySlot)
   const resolveProject = projectFilter === ALL || projectFilter === ORG_SCOPE ? null : projectFilter
+
+  // Project-scope coverage (opened from a project's sidebar): one row per slot,
+  // showing which model actually runs here and whether it is inherited or overridden.
+  const coverage = useMemo(() => {
+    if (!projectScope) return []
+    return capabilitySlots.map(slot => {
+      const usable = bindings.data.filter(binding => binding.slot === slot && binding.enabled && binding.capability)
+      const overrides = usable
+        .filter(binding => binding.projectId === projectScope)
+        .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+      const defaults = usable
+        .filter(binding => binding.projectId === null)
+        .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+      return { slot, overrides, effective: overrides[0] ?? defaults[0] ?? null }
+    })
+  }, [bindings.data, projectScope])
+  const [restoreTarget, setRestoreTarget] = useState<(typeof coverage)[number] | null>(null)
+  const [restoring, setRestoring] = useState(false)
+
+  async function restoreInherit(entry: (typeof coverage)[number]) {
+    if (!entry) return
+    setRestoring(true)
+    try {
+      for (const binding of entry.overrides) {
+        await api(`/bindings/${binding.id}`, { method: 'DELETE' })
+      }
+      toast.success(t('models.inheritRestored', { slot: translateEnum(t, 'slots', entry.slot) }))
+      setRestoreTarget(null)
+      bindings.reload()
+      resolved.reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  // "槽位:全部" overview — a client-side mirror of resolveSlotCandidates' ordering
+  // (project scope first, then priority desc), so every chain is visible without
+  // picking a slot one at a time. The server resolve stays authoritative for detail.
+  const overview = useMemo(
+    () =>
+      slotFilter !== ALL
+        ? []
+        : capabilitySlots
+            .map(slot => {
+              const chain = bindings.data
+                .filter(binding => {
+                  if (binding.slot !== slot || !binding.enabled || !binding.capability) return false
+                  if (projectFilter === ORG_SCOPE) return binding.projectId === null
+                  if (projectFilter !== ALL) return binding.projectId === projectFilter
+                  return true
+                })
+                .sort((a, b) => (a.projectId === b.projectId ? b.priority - a.priority : a.projectId ? 1 : -1))
+                .map(binding => ({
+                  model: binding.capability?.model ?? binding.capabilityId,
+                  priority: binding.priority,
+                  projectScoped: binding.projectId !== null,
+                }))
+              return { slot, label: translateEnum(t, 'slots', slot), chain }
+            })
+            .filter(entry => entry.chain.length > 0),
+    [bindings.data, slotFilter, projectFilter, t],
+  )
 
   const loadResolve = useCallback(() => {
     const query = new URLSearchParams({ slot: resolveSlot ?? capabilitySlots[0] })
@@ -117,27 +209,119 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
   }
 
   return (
-    <div className="space-y-4">
+    <div id="bindings-panel" className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">{t('models.bindings')}</h2>
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-base font-semibold">{t('models.bindings')}</h2>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0} className="text-muted-foreground inline-flex cursor-help">
+                  <CircleHelpIcon className="size-3.5" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs">{t('models.slotsHelp')}</TooltipContent>
+            </Tooltip>
+          </div>
           <p className="text-muted-foreground text-sm">{t('models.bindingsHint')}</p>
         </div>
-        <GuardedButton
-          action="bindings:manage"
-          onClick={() => {
-            setBindKey(key => key + 1)
-            setBindOpen(true)
-          }}
-        >
-          <PlusIcon />
-          {t('models.bind')}
-        </GuardedButton>
+        <span id="bind-btn" className="inline-flex">
+          <GuardedButton
+            action="bindings:manage"
+            onClick={() => {
+              setBindPreset(null)
+              setBindKey(key => key + 1)
+              setBindOpen(true)
+            }}
+          >
+            <PlusIcon />
+            {t('models.bind')}
+          </GuardedButton>
+        </span>
       </div>
+
+      {projectScope && coverage.length > 0 && (
+        <Card>
+          <CardHeader className="border-b">
+            <div className="space-y-1.5">
+              <CardTitle>{t('models.coverageTitle')}</CardTitle>
+              <CardDescription>{t('models.coverageHint')}</CardDescription>
+            </div>
+          </CardHeader>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>{t('models.slot')}</TableHead>
+                <TableHead>{t('common.model')}</TableHead>
+                <TableHead>{t('models.coverageSource')}</TableHead>
+                <TableHead className="text-right">{t('common.actions')}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {coverage.map(entry => (
+                <TableRow key={entry.slot}>
+                  <TableCell className="font-medium">{translateEnum(t, 'slots', entry.slot)}</TableCell>
+                  <TableCell>
+                    {entry.effective ? (
+                      <div>
+                        <p>{entry.effective.capability?.model ?? entry.effective.capabilityId}</p>
+                        {entry.effective.capability?.connection && (
+                          <p className="text-muted-foreground text-xs">
+                            {entry.effective.capability.connection.name} · {entry.effective.capability.connection.provider}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">{t('models.unboundSlot')}</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {entry.overrides.length > 0 ? (
+                      <Badge variant="info">{t('models.projectOverrides')}</Badge>
+                    ) : entry.effective ? (
+                      <Badge variant="muted">{t('models.inheritsDefault')}</Badge>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <GuardedButton
+                        action="bindings:manage"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => {
+                          setBindPreset({ slot: entry.slot as CapabilitySlot, scope: projectScope })
+                          setBindKey(key => key + 1)
+                          setBindOpen(true)
+                        }}
+                      >
+                        {t('models.overrideSlot')}
+                      </GuardedButton>
+                      {entry.overrides.length > 0 && (
+                        <GuardedButton
+                          action="bindings:manage"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={() => setRestoreTarget(entry)}
+                        >
+                          {t('models.restoreInherit')}
+                        </GuardedButton>
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="border-b">
-          <CardTitle className="text-sm">{t('models.currentBindings')}</CardTitle>
+          <CardTitle>{t('models.currentBindings')}</CardTitle>
           <CardDescription>{t('common.count', { count: visible.length })}</CardDescription>
           <CardAction>
             <div className="flex flex-wrap items-center gap-2">
@@ -213,7 +397,18 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
                   <TableCell>
                     <Badge variant={binding.projectId ? 'info' : 'muted'}>{projectLabel(binding.projectId)}</Badge>
                   </TableCell>
-                  <TableCell className="tabular-nums">{binding.priority}</TableCell>
+                  <TableCell>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span tabIndex={0} className="inline-flex cursor-help">
+                          <Badge variant={(ranks.get(binding.id) ?? 1) === 1 ? 'tinted' : 'muted'} className="tabular-nums">
+                            {t('models.candidateRank', { rank: ranks.get(binding.id) ?? 1 })}
+                          </Badge>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>{t('models.priorityRaw', { priority: binding.priority })}</TooltipContent>
+                    </Tooltip>
+                  </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <Switch
@@ -246,14 +441,17 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
         )}
       </Card>
 
-      <ResolveCard resolved={resolved} slot={resolveSlot} />
+      <div id="resolve-card" className="scroll-mt-6">
+        <ResolveCard resolved={resolved} slot={resolveSlot} overview={overview} />
+      </div>
 
       <BindDialog
-        key={bindKey}
+        key={`${bindKey}-${bindPreset?.slot ?? 'free'}`}
         open={bindOpen}
         pool={pool}
         projects={projects.data}
-        defaultSlot={resolveSlot}
+        defaultSlot={bindPreset?.slot ?? resolveSlot}
+        defaultScope={bindPreset?.scope ?? ORG_SCOPE}
         onOpenChange={setBindOpen}
         onDone={() => {
           setBindOpen(false)
@@ -261,6 +459,34 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
           resolved.reload()
         }}
       />
+
+      <AlertDialog open={restoreTarget !== null} onOpenChange={open => !restoring && !open && setRestoreTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('models.restoreInheritTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {restoreTarget &&
+                t('models.restoreInheritBody', {
+                  slot: translateEnum(t, 'slots', restoreTarget.slot),
+                  count: restoreTarget.overrides.length,
+                })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoring}>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={restoring}
+              onClick={event => {
+                event.preventDefault()
+                if (restoreTarget) void restoreInherit(restoreTarget)
+              }}
+            >
+              {restoring ? t('common.loading') : t('models.restoreInherit')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={unbindTarget !== null} onOpenChange={open => !unbinding && !open && setUnbindTarget(null)}>
         <AlertDialogContent>
@@ -293,7 +519,22 @@ export function BindingsPanel({ connections, bindings }: BindingsPanelProps) {
   )
 }
 
-function ResolveCard({ resolved, slot }: { resolved: AsyncState<ResolveResponse | null>; slot: CapabilitySlot | null }) {
+/** One slot's fallback chain, mirrored client-side so "槽位:全部" can show every chain at once. */
+interface SlotChainOverview {
+  slot: string
+  label: string
+  chain: Array<{ model: string; priority: number; projectScoped: boolean }>
+}
+
+function ResolveCard({
+  resolved,
+  slot,
+  overview,
+}: {
+  resolved: AsyncState<ResolveResponse | null>
+  slot: CapabilitySlot | null
+  overview: SlotChainOverview[]
+}) {
   const { t } = useI18n()
   const candidates = resolved.data?.candidates ?? []
 
@@ -321,10 +562,28 @@ function ResolveCard({ resolved, slot }: { resolved: AsyncState<ResolveResponse 
       </CardHeader>
       <CardContent>
         {!slot ? (
-          <p className="text-muted-foreground flex items-center gap-2 text-sm">
-            <CircleAlertIcon className="size-4" />
-            {t('models.resolveSelectSlot')}
-          </p>
+          overview.length === 0 ? (
+            <p className="text-muted-foreground flex items-center gap-2 text-sm">
+              <CircleAlertIcon className="size-4" />
+              {t('models.resolveSelectSlot')}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {overview.map(entry => (
+                <div key={entry.slot} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2">
+                  <span className="w-40 shrink-0 text-sm font-medium">{entry.label}</span>
+                  <span className="flex flex-wrap items-center gap-1">
+                    {entry.chain.map((candidate, index) => (
+                      <Fragment key={`${entry.slot}-${candidate.model}-${index}`}>
+                        {index > 0 && <span className="text-muted-foreground text-xs">→</span>}
+                        <Badge variant={index === 0 ? 'tinted' : 'muted'}>{candidate.model}</Badge>
+                      </Fragment>
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
         ) : resolved.error ? (
           <ErrorState message={resolved.error} onRetry={resolved.reload} />
         ) : resolved.loading && !resolved.data ? (
@@ -338,7 +597,7 @@ function ResolveCard({ resolved, slot }: { resolved: AsyncState<ResolveResponse 
                 key={candidate.bindingId}
                 className="bg-muted/40 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2"
               >
-                <Badge variant={index === 0 ? 'default' : 'muted'} className="tabular-nums">
+                <Badge variant={index === 0 ? 'tinted' : 'muted'} className="tabular-nums">
                   {t('models.candidateRank', { rank: index + 1 })}
                 </Badge>
                 <span className="text-sm font-medium">{candidate.model}</span>
@@ -351,7 +610,14 @@ function ResolveCard({ resolved, slot }: { resolved: AsyncState<ResolveResponse 
                   <Badge variant={candidate.scope === 'project' ? 'info' : 'muted'}>
                     {candidate.scope === 'project' ? t('models.scopeProject') : t('models.scopeOrg')}
                   </Badge>
-                  <span className="text-muted-foreground text-xs tabular-nums">p{candidate.priority}</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span tabIndex={0} className="text-muted-foreground cursor-help text-xs tabular-nums underline decoration-dotted underline-offset-2">
+                        p{candidate.priority}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{t('models.priorityRaw', { priority: candidate.priority })}</TooltipContent>
+                  </Tooltip>
                 </span>
               </li>
             ))}
@@ -367,16 +633,17 @@ interface BindDialogProps {
   pool: BindableCapability[]
   projects: Project[]
   defaultSlot: CapabilitySlot | null
+  defaultScope: string
   onOpenChange(open: boolean): void
   onDone(): void
 }
 
-function BindDialog({ open, pool, projects, defaultSlot, onOpenChange, onDone }: BindDialogProps) {
+function BindDialog({ open, pool, projects, defaultSlot, defaultScope, onOpenChange, onDone }: BindDialogProps) {
   const { t } = useI18n()
   const { api } = useSession()
   const [slot, setSlot] = useState<CapabilitySlot>(defaultSlot ?? capabilitySlots[0])
   const [capabilityId, setCapabilityId] = useState('')
-  const [scope, setScope] = useState(ORG_SCOPE)
+  const [scope, setScope] = useState(defaultScope)
   const [priority, setPriority] = useState('0')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -416,7 +683,7 @@ function BindDialog({ open, pool, projects, defaultSlot, onOpenChange, onDone }:
           <DialogDescription>{t('models.bindHint')}</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
-          <Field label={t('models.slot')} htmlFor="bindingSlot" required>
+          <Field label={t('models.slot')} htmlFor="bindingSlot" required hint={t('models.slotConcept')}>
             <Select
               value={slot}
               onValueChange={value => {
@@ -480,7 +747,7 @@ function BindDialog({ open, pool, projects, defaultSlot, onOpenChange, onDone }:
                 </SelectContent>
               </Select>
             </Field>
-            <Field label={t('common.priority')} htmlFor="bindingPriority">
+            <Field label={t('common.priority')} htmlFor="bindingPriority" hint={t('models.priorityInputHint')}>
               <Input
                 id="bindingPriority"
                 type="number"

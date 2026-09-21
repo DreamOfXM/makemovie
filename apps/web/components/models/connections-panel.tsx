@@ -1,20 +1,22 @@
 'use client'
 
-import { useState, type FormEvent } from 'react'
+import { Fragment, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { modelModalities } from '@studio/domain'
+import { capabilitySlots, modelModalities } from '@studio/domain'
 import {
   CircleAlertIcon,
   KeyRoundIcon,
+  ListOrderedIcon,
   LoaderCircleIcon,
   PencilIcon,
   PlugIcon,
   PlusIcon,
   RadioTowerIcon,
+  Settings2Icon,
   ShieldCheckIcon,
   Trash2Icon,
 } from 'lucide-react'
-import type { Capability, Catalog, Connection, ProbeResponse, ProbeResult } from '@/lib/api'
+import type { Binding, Capability, Catalog, Connection, ProbeResponse, ProbeResult } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import type { AsyncState } from '@/lib/use-async'
@@ -62,9 +64,11 @@ const PROBEABLE_MODALITIES = new Set(['text', 'vlm'])
 interface ConnectionsPanelProps {
   connections: AsyncState<Connection[]>
   catalogs: Catalog[]
+  bindings: AsyncState<Binding[]>
+  onManageDefaults(): void
 }
 
-export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProps) {
+export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefaults }: ConnectionsPanelProps) {
   const { t } = useI18n()
   const { api } = useSession()
   const [dialog, setDialog] = useState<DialogState>(null)
@@ -73,6 +77,22 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
   const [probingId, setProbingId] = useState<string | null>(null)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // The space's production line: which model answers each slot for every project
+  // that never overrode it. Read-only here; the binding itself is managed in 模型绑定.
+  const defaultChains = useMemo(
+    () =>
+      capabilitySlots
+        .map(slot => ({
+          slot,
+          chain: bindings.data
+            .filter(binding => binding.slot === slot && binding.projectId === null && binding.enabled && binding.capability)
+            .sort((a, b) => b.priority - a.priority)
+            .map(binding => ({ id: binding.id, model: binding.capability?.model ?? binding.capabilityId })),
+        }))
+        .filter(entry => entry.chain.length > 0),
+    [bindings.data],
+  )
 
   async function probe(connection: Connection) {
     setProbingId(connection.id)
@@ -136,7 +156,7 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div id="connections-panel" className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
           <h2 className="text-base font-semibold">{t('models.connections')}</h2>
           <p className="text-muted-foreground text-sm">{t('models.connectionsHint')}</p>
@@ -147,6 +167,50 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
         </GuardedButton>
       </div>
 
+      <Card>
+        <CardHeader className="border-b">
+          <div className="flex items-start gap-3">
+            <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
+              <ListOrderedIcon className="size-4.5" />
+            </span>
+            <div className="space-y-1.5">
+              <CardTitle>{t('models.defaultChainTitle')}</CardTitle>
+              <CardDescription>{t('models.defaultChainHint')}</CardDescription>
+            </div>
+          </div>
+          <CardAction>
+            <Button variant="outline" size="sm" onClick={onManageDefaults}>
+              <Settings2Icon />
+              {t('models.manageDefaults')}
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          {defaultChains.length === 0 ? (
+            <p className="text-muted-foreground flex items-center gap-2 text-sm">
+              <CircleAlertIcon className="size-4" />
+              {t('models.defaultChainEmpty')}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {defaultChains.map(entry => (
+                <div key={entry.slot} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2">
+                  <span className="w-40 shrink-0 text-sm font-medium">{translateEnum(t, 'slots', entry.slot)}</span>
+                  <span className="flex flex-wrap items-center gap-1">
+                    {entry.chain.map((candidate, index) => (
+                      <Fragment key={candidate.id}>
+                        {index > 0 && <span className="text-muted-foreground text-xs">→</span>}
+                        <Badge variant={index === 0 ? 'tinted' : 'muted'}>{candidate.model}</Badge>
+                      </Fragment>
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {connections.loading && connections.data.length === 0 ? (
         <Card>
           <TableSkeleton rows={3} columns={5} />
@@ -155,12 +219,13 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
         <EmptyState icon={<PlugIcon />} title={t('models.noConnections')} description={t('models.noConnectionsHint')} />
       ) : (
         <div className="space-y-4">
-          {connections.data.map(connection => (
+          {connections.data.map((connection, index) => (
             <ConnectionCard
               key={connection.id}
               connection={connection}
               probing={probingId === connection.id}
               verifyingId={verifyingId}
+              probeAnchor={index === 0 ? 'probe-first' : undefined}
               onProbe={() => probe(connection)}
               onVerify={capability => void verifyModel(capability)}
               onAddModel={() => setModelDialog(connection)}
@@ -192,7 +257,17 @@ export function ConnectionsPanel({ connections, catalogs }: ConnectionsPanelProp
         onAdded={name => {
           setModelDialog(null)
           toast.success(t('models.modelAdded', { model: name }))
-          connections.reload()
+          // 手动添加的模型天生未验证,而视频/图片类无法单模型验证——自动补一轮
+          // 连接探测(密钥级,极小开销),让新模型立即可绑定,否则它是死锁状态。
+          void (async () => {
+            try {
+              await api<ProbeResponse>(`/providers/connections/${modelDialog?.id ?? ''}/probe`, { method: 'POST' })
+              toast.success(t('models.autoProbed'))
+            } catch {
+              // 自动探测失败不打断:用户仍可手动点探测。
+            }
+            connections.reload()
+          })()
         }}
       />
 
@@ -235,6 +310,8 @@ interface ConnectionCardProps {
   connection: Connection
   probing: boolean
   verifyingId: string | null
+  /** Flow-guide step 2 lands here: the first connection's probe control. */
+  probeAnchor?: string
   onProbe(): void
   onVerify(capability: Capability): void
   onAddModel(): void
@@ -248,6 +325,7 @@ function ConnectionCard({
   connection,
   probing,
   verifyingId,
+  probeAnchor,
   onProbe,
   onVerify,
   onAddModel,
@@ -270,7 +348,7 @@ function ConnectionCard({
   )
 
   return (
-    <Card>
+    <Card className="gap-4 py-4">
       <CardHeader>
         <div className="flex items-start gap-3">
           <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
@@ -312,16 +390,25 @@ function ConnectionCard({
               </span>
             </div>
             <div className="flex items-center gap-1">
-              <GuardedButton
-                action="providers:manage"
-                variant="outline"
-                size="sm"
-                disabled={probing || !connection.enabled}
-                onClick={onProbe}
-              >
-                {probing ? <LoaderCircleIcon className="animate-spin" /> : <RadioTowerIcon />}
-                {probing ? t('models.probing') : t('models.probe')}
-              </GuardedButton>
+              <span id={probeAnchor} className="inline-flex">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex" tabIndex={0}>
+                      <GuardedButton
+                        action="providers:manage"
+                        variant="outline"
+                        size="sm"
+                        disabled={probing || !connection.enabled}
+                        onClick={onProbe}
+                      >
+                        {probing ? <LoaderCircleIcon className="animate-spin" /> : <RadioTowerIcon />}
+                        {probing ? t('models.probing') : t('models.probe')}
+                      </GuardedButton>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">{t('models.probeHelp')}</TooltipContent>
+                </Tooltip>
+              </span>
               <GuardedButton
                 action="providers:manage"
                 variant="ghost"
@@ -453,19 +540,41 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onDelete }: Ca
           <VerifyButton capability={capability} verifying={verifying} onVerify={onVerify} />
         </div>
       </TableCell>
-      <TableCell className="text-muted-foreground whitespace-nowrap">
-        {capability.entitlementVerifiedAt
-          ? relativeTime(capability.entitlementVerifiedAt, locale)
-          : t('models.neverProbed')}
+      <TableCell className="whitespace-nowrap">
+        {capability.entitlementVerifiedAt ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-success">
+                {t('models.entitlementVerified')} · {relativeTime(capability.entitlementVerifiedAt, locale)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{t('models.entitlementHint')}</TooltipContent>
+          </Tooltip>
+        ) : capability.credentialVerifiedAt ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-muted-foreground">
+                {t('models.credentialOnly')} · {relativeTime(capability.credentialVerifiedAt, locale)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{t('models.credentialHint')}</TooltipContent>
+          </Tooltip>
+        ) : (
+          <span className="text-muted-foreground">{t('models.neverProbed')}</span>
+        )}
       </TableCell>
       <TableCell>
         {capability.probeMessage ? (
-          <span
-            className="text-muted-foreground block max-w-[14rem] truncate text-xs"
-            title={capability.probeMessage}
-          >
-            {capability.probeMessage}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-muted-foreground block max-w-[14rem] truncate text-xs">
+                {capability.probeStatus === 'verified' && /^probe ok/i.test(capability.probeMessage)
+                  ? t('models.probeOkDetail')
+                  : capability.probeMessage}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs break-all">{capability.probeMessage}</TooltipContent>
+          </Tooltip>
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
@@ -487,40 +596,35 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onDelete }: Ca
 }
 
 /**
- * Asking a chat model one question is free enough to do on a click. An image, video or
- * audio endpoint has no such request, so those rows stay grey with the reason on them —
- * they are proven by the first real generation, and a check mark we did not earn is
- * worse than no check mark.
+ * Every row can be probed: text/vlm rows get a model-addressed entitlement check;
+ * generation rows (image/video/tts/music) get a credential ping that stamps only the
+ * key tier — their entitlement is proven by the first real generation.
  */
 function VerifyButton({ capability, verifying, onVerify }: { capability: Capability; verifying: boolean; onVerify(): void }) {
   const { t } = useI18n()
   const label = t('models.verifyModel')
-  if (!PROBEABLE_MODALITIES.has(capability.modality)) {
-    return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="inline-flex" tabIndex={0}>
-            <Button type="button" variant="ghost" size="icon-sm" aria-label={label} disabled>
-              <ShieldCheckIcon />
-            </Button>
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{t('models.probeModelCosts')}</TooltipContent>
-      </Tooltip>
-    )
-  }
+  const generationModality = !PROBEABLE_MODALITIES.has(capability.modality)
   return (
-    <GuardedButton
-      action="providers:manage"
-      variant="ghost"
-      size="icon-sm"
-      aria-label={label}
-      title={label}
-      disabled={verifying}
-      onClick={onVerify}
-    >
-      {verifying ? <LoaderCircleIcon className="animate-spin" /> : <ShieldCheckIcon />}
-    </GuardedButton>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex" tabIndex={0}>
+          <GuardedButton
+            action="providers:manage"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={label}
+            title={generationModality ? t('models.verifyCredentialHint') : label}
+            disabled={verifying}
+            onClick={onVerify}
+          >
+            {verifying ? <LoaderCircleIcon className="animate-spin" /> : <ShieldCheckIcon />}
+          </GuardedButton>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        {generationModality ? t('models.verifyCredentialHint') : t('models.probeModelCosts')}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 

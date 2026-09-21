@@ -66,48 +66,48 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            {requiredGaps.length === 0 ? (
-              <CheckCircle2Icon className="text-success size-4" />
-            ) : (
+      {requiredGaps.length === 0 ? (
+        // Ready state says one thing — collapse it to a single row instead of a full card
+        // with a title, a coverage note and whitespace. Plain div, not <Card>: Card's base
+        // flex-col + gap-6 would stack this row back into a tall block.
+        <div className="bg-card text-card-foreground flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border px-5 py-4 shadow-card">
+          <CheckCircle2Icon className="text-success size-4 shrink-0" />
+          <Button size="sm" asChild>
+            <Link href="/projects">
+              <ArrowRightIcon />
+              {t('models.readiness.goProjects')}
+            </Link>
+          </Button>
+          <p className="text-muted-foreground text-sm">{t('models.readiness.allReady', { total: requiredTotal })}</p>
+          <Badge variant="success" className="ml-auto">
+            {t('models.readiness.score', { ready, total: requiredTotal })}
+          </Badge>
+        </div>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
               <CircleAlertIcon className="text-warning size-4" />
+              {t('models.readiness.title')}
+            </CardTitle>
+            <CardDescription>{t('models.readiness.gaps', { ready, total: requiredTotal })}</CardDescription>
+            <CardAction>
+              <Badge variant="outline">{t('models.readiness.score', { ready, total: requiredTotal })}</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {coverage && (
+              <p className="text-muted-foreground text-sm leading-relaxed">
+                {coverage.missing.length === 0
+                  ? t('models.readiness.coverAll', { label: coverage.label, total: requiredTotal })
+                  : t('models.readiness.coverSome', {
+                      label: coverage.label,
+                      covered: coverage.covered.length,
+                      total: requiredTotal,
+                      slots: coverage.missing.map(slot => translateEnum(t, 'slots', slot)).join(t('common.listJoin')),
+                    })}
+              </p>
             )}
-            {t('models.readiness.title')}
-          </CardTitle>
-          <CardDescription>
-            {requiredGaps.length === 0
-              ? t('models.readiness.allReady', { total: requiredTotal })
-              : t('models.readiness.gaps', { ready, total: requiredTotal })}
-          </CardDescription>
-          <CardAction>
-            <Badge variant={requiredGaps.length === 0 ? 'success' : 'outline'}>
-              {t('models.readiness.score', { ready, total: requiredTotal })}
-            </Badge>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {coverage && (
-            <p className="text-muted-foreground text-sm leading-relaxed">
-              {coverage.missing.length === 0
-                ? t('models.readiness.coverAll', { label: coverage.label, total: requiredTotal })
-                : t('models.readiness.coverSome', {
-                    label: coverage.label,
-                    covered: coverage.covered.length,
-                    total: requiredTotal,
-                    slots: coverage.missing.map(slot => translateEnum(t, 'slots', slot)).join(t('common.listJoin')),
-                  })}
-            </p>
-          )}
-          {requiredGaps.length === 0 ? (
-            <Button size="sm" asChild>
-              <Link href="/projects">
-                <ArrowRightIcon />
-                {t('models.readiness.goProjects')}
-              </Link>
-            </Button>
-          ) : (
             <div className="flex flex-wrap gap-2">
               {requiredGaps.some(gap => gap.state === 'missing') && (
                 <Button size="sm" variant="outline" onClick={() => onGoto('connections')}>
@@ -121,9 +121,9 @@ export function ReadinessPanel({ connections, bindings, catalogs, onGoto }: Read
                 </Button>
               )}
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <Table>

@@ -1,27 +1,32 @@
 'use client'
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 import {
+  ArrowLeftIcon,
   Building2Icon,
   CheckIcon,
   ChevronDownIcon,
   ClapperboardIcon,
   CpuIcon,
+  FilmIcon,
   LogOutIcon,
   MenuIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
+  ReceiptTextIcon,
   ScrollTextIcon,
   UsersIcon,
   XIcon,
 } from 'lucide-react'
 import type { Action } from '@studio/domain'
+import type { Project } from '@/lib/api'
 import { cn, initials } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
+import { useAsync } from '@/lib/use-async'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -45,22 +50,53 @@ interface NavItem {
   labelKey: string
   icon: ReactNode
   action?: Action
+  // Query-scoped links (/models?tab=…) must still light up on their page,
+  // so active-ness matches on the path part unless an override says otherwise.
+  isActive?(pathname: string): boolean
 }
 
-const navGroups: { labelKey: string; items: NavItem[] }[] = [
-  {
-    labelKey: 'nav.group.production',
-    items: [{ href: '/projects', labelKey: 'nav.projects', icon: <ClapperboardIcon /> }],
-  },
-  {
-    labelKey: 'nav.group.platform',
-    items: [
-      { href: '/models', labelKey: 'nav.models', icon: <CpuIcon /> },
-      { href: '/members', labelKey: 'nav.members', icon: <UsersIcon /> },
-      { href: '/audit', labelKey: 'nav.audit', icon: <ScrollTextIcon />, action: 'audit:read' },
-    ],
-  },
+/** Space-level rail: everything that belongs to the organization, not one project. */
+const spaceItems: NavItem[] = [
+  { href: '/projects', labelKey: 'nav.projects', icon: <ClapperboardIcon /> },
+  { href: '/models?tab=connections', labelKey: 'nav.connections', icon: <CpuIcon />, isActive: p => p === '/models' },
+  { href: '/members', labelKey: 'nav.members', icon: <UsersIcon /> },
+  { href: '/usage', labelKey: 'nav.usage', icon: <ReceiptTextIcon /> },
+  { href: '/audit', labelKey: 'nav.audit', icon: <ScrollTextIcon />, action: 'audit:read' },
 ]
+
+function projectItems(projectId: string): NavItem[] {
+  return [
+    { href: `/projects/${projectId}`, labelKey: 'nav.episodes', icon: <FilmIcon /> },
+    { href: `/models?tab=bindings&project=${projectId}`, labelKey: 'nav.bindings', icon: <CpuIcon />, isActive: p => p === '/models' },
+    { href: `/usage?project=${projectId}`, labelKey: 'nav.usage', icon: <ReceiptTextIcon />, isActive: p => p === '/usage' },
+  ]
+}
+
+function navBase(href: string): string {
+  return href.split('?')[0]
+}
+
+function defaultActive(item: NavItem, pathname: string): boolean {
+  if (item.isActive) return item.isActive(pathname)
+  const base = navBase(item.href)
+  return pathname === base || pathname.startsWith(`${base}/`)
+}
+
+/** The project in scope comes from the route itself, never from local state. */
+function projectIdFromPath(pathname: string): string | null {
+  const match = /^\/projects\/([^/]+)/.exec(pathname)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+/** Space surfaces that can also be pulled into one project's scope by the `project` query. */
+const QUERY_SCOPED_PATHS = new Set(['/models', '/usage'])
+
+function scopedProjectId(pathname: string, searchParams: URLSearchParams): string | null {
+  const fromPath = projectIdFromPath(pathname)
+  if (fromPath) return fromPath
+  if (!QUERY_SCOPED_PATHS.has(pathname)) return null
+  return searchParams.get('project')
+}
 
 function OrgSwitcher() {
   const { t } = useI18n()
@@ -175,8 +211,40 @@ interface SidebarContentProps {
 
 function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: SidebarContentProps) {
   const { t } = useI18n()
-  const { role, can: canPerform } = useSession()
+  const { api, me, organizationId, role, can: canPerform } = useSession()
   const pathname = usePathname()
+  const searchParams = useSearchParams()
+
+  const projectId = scopedProjectId(pathname, searchParams)
+  const organizationName = me?.memberships.find(item => item.organizationId === organizationId)?.organizationName ?? null
+
+  // The project name is only worth a request once a project is actually in scope.
+  const loadProjects = useCallback(
+    () => (projectId ? api<Project[]>('/projects') : Promise.resolve<Project[]>([])),
+    [api, projectId],
+  )
+  const projects = useAsync<Project[]>(loadProjects, [])
+  const projectName = projectId ? projects.data.find(item => item.id === projectId)?.name ?? null : null
+
+  const items = (projectId ? projectItems(projectId) : spaceItems).filter(item => !item.action || canPerform(item.action))
+  const returnLink = (
+    <Link
+      href="/projects"
+      onClick={onNavigate}
+      aria-label={t('nav.backToSpace')}
+      className={cn(
+        'group flex items-center gap-3 rounded-md py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-primary',
+        collapsed ? 'justify-center px-2' : 'px-3',
+      )}
+    >
+      {/* The space name *is* the back control: the glyph swaps in place, so nothing shifts. */}
+      <span className="relative size-4.5 shrink-0">
+        <Building2Icon className="absolute inset-0 transition-opacity group-hover:opacity-0" />
+        <ArrowLeftIcon className="text-primary absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+      </span>
+      {!collapsed && <span className="truncate">{organizationName ?? t('app.title')}</span>}
+    </Link>
+  )
 
   return (
     <div className={cn('flex h-full flex-col gap-6 p-4', collapsed && 'items-center gap-4 px-2')}>
@@ -209,52 +277,59 @@ function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: Si
         </Tooltip>
       )}
 
-      <nav className={cn('flex-1 space-y-6', collapsed && 'space-y-4')}>
-        {navGroups.map(group => {
-          const items = group.items.filter(item => !item.action || canPerform(item.action))
-          if (items.length === 0) return null
-          return (
-            <div key={group.labelKey} className="space-y-1">
-              {!collapsed && (
-                <p className="text-muted-foreground px-3 pb-1 text-xs font-medium tracking-wide uppercase">
-                  {t(group.labelKey)}
-                </p>
-              )}
-              {items.map(item => {
-                const active = pathname === item.href || pathname.startsWith(`${item.href}/`)
-                const link = (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={onNavigate}
-                    aria-current={active ? 'page' : undefined}
-                    aria-label={collapsed ? t(item.labelKey) : undefined}
-                    className={cn(
-                      'group flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
-                      collapsed ? 'justify-center px-2' : 'px-3',
-                      active
-                        ? 'bg-primary/10 text-primary'
-                        : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                    )}
-                  >
-                    <span className={cn('[&_svg]:size-4.5', active ? 'text-primary' : 'text-muted-foreground')}>
-                      {item.icon}
-                    </span>
-                    {!collapsed && t(item.labelKey)}
-                  </Link>
-                )
-                // An icon with nothing to read is only navigable if it says what it is.
-                if (!collapsed) return link
-                return (
-                  <Tooltip key={item.href}>
-                    <TooltipTrigger asChild>{link}</TooltipTrigger>
-                    <TooltipContent side="right">{t(item.labelKey)}</TooltipContent>
-                  </Tooltip>
-                )
-              })}
-            </div>
+      <nav className={cn('flex-1 space-y-1', collapsed && 'space-y-4')}>
+        {projectId && (
+          collapsed ? (
+            <Tooltip>
+              <TooltipTrigger asChild>{returnLink}</TooltipTrigger>
+              <TooltipContent side="right">{t('nav.backToSpace')}</TooltipContent>
+            </Tooltip>
+          ) : (
+            returnLink
           )
-        })}
+        )}
+        <div>
+          {!collapsed && (
+            <p className="text-muted-foreground px-3 pb-1 text-xs font-medium tracking-wide uppercase">
+              {t(projectId ? 'nav.group.project' : 'nav.group.space')}
+            </p>
+          )}
+          {!collapsed && projectId && projectName && (
+            <p className="min-w-0 px-3 pb-1"><span className="block truncate text-sm font-semibold">{projectName}</span></p>
+          )}
+          {items.map(item => {
+            const active = defaultActive(item, pathname)
+            const link = (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={onNavigate}
+                aria-current={active ? 'page' : undefined}
+                aria-label={collapsed ? t(item.labelKey) : undefined}
+                className={cn(
+                  'group flex items-center gap-3 rounded-md py-2 text-sm font-medium transition-colors',
+                  collapsed ? 'justify-center px-2' : 'px-3',
+                  active
+                    ? 'bg-primary/10 text-primary'
+                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                )}
+              >
+                <span className={cn('[&_svg]:size-4.5', active ? 'text-primary' : 'text-muted-foreground')}>
+                  {item.icon}
+                </span>
+                {!collapsed && t(item.labelKey)}
+              </Link>
+            )
+            // An icon with nothing to read is only navigable if it says what it is.
+            if (!collapsed) return link
+            return (
+              <Tooltip key={item.href}>
+                <TooltipTrigger asChild>{link}</TooltipTrigger>
+                <TooltipContent side="right">{t(item.labelKey)}</TooltipContent>
+              </Tooltip>
+            )
+          })}
+        </div>
       </nav>
 
       {!collapsed && (
@@ -297,7 +372,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           navCollapsed ? 'w-16' : 'w-64',
         )}
       >
-        <SidebarContent collapsed={navCollapsed} onToggleCollapsed={toggleNavCollapsed} />
+        {/* SidebarContent reads the `project` query, so it needs a Suspense boundary. */}
+        <Suspense fallback={null}>
+          <SidebarContent collapsed={navCollapsed} onToggleCollapsed={toggleNavCollapsed} />
+        </Suspense>
       </aside>
 
       {navOpen && (
@@ -317,7 +395,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               <XIcon />
             </Button>
-            <SidebarContent onNavigate={() => setNavOpen(false)} />
+            <Suspense fallback={null}>
+              <SidebarContent onNavigate={() => setNavOpen(false)} />
+            </Suspense>
           </div>
         </div>
       )}

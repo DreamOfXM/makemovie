@@ -6,12 +6,14 @@ import {
   CheckIcon,
   DownloadIcon,
   FileJsonIcon,
+  LoaderCircleIcon,
   PackageIcon,
   RefreshCwIcon,
+  ScissorsIcon,
   TriangleAlertIcon,
   XCircleIcon,
 } from 'lucide-react'
-import { ApiError } from '@/lib/api'
+import { ApiError, API_BASE, getToken } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -30,10 +32,12 @@ import {
 } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
+import { HelpHint } from '@/components/ui/help-hint'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
 
@@ -61,12 +65,34 @@ interface ManifestStoryboard {
   artifacts: ManifestArtifact[]
 }
 
+interface ManifestLabeling {
+  standard: string
+  badgeText: string
+  explicit: 'burned' | 'skipped' | 'unrecorded'
+  implicit: 'written' | 'unrecorded'
+  reason?: string
+}
+
+interface ManifestPostProcess {
+  status: 'applied' | 'fallback'
+  steps: Array<{ step: 'loudnorm' | 'upscale' | 'interpolate' | 'grade'; outcome: 'applied' | 'skipped'; reason?: string }>
+  loudness?: { before: { i: number; tp: number }; after?: { i: number; tp: number } }
+  target?: { i: number; tp: number }
+  reason?: string
+}
+
 interface DeliveryManifest {
   schemaVersion: number
   packagedAt: string
   episode: { id: string; number: number; title: string }
   source: ManifestVersionRef | null
   script: ManifestVersionRef | null
+  // Optional because a manifest packaged before labeling existed still loads; the UI
+  // reads an absent record as "this master was composed before labeling shipped".
+  labeling?: ManifestLabeling | null
+  // Same absent-record reading as labeling: a pre-quality-floor master says so, it is
+  // never rendered as if it had been normalized.
+  postProcess?: ManifestPostProcess | null
   storyboards: ManifestStoryboard[]
   // Optional because a manifest packaged before tracks existed still loads; the UI reads
   // an absent list as "not recorded" and an empty one as "the master is silent".
@@ -78,6 +104,8 @@ interface DeliveryManifest {
 interface Delivery {
   id: string
   status: string
+  /** The composed master clip this delivery ships. */
+  artifactId: string | null
   manifest: DeliveryManifest
 }
 
@@ -165,6 +193,35 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
    * The manifest is fetched through the session api (bearer auth) and handed to
    * the browser as a revocable blob URL — never as a raw API URL in the DOM.
    */
+  /** 「下载」交付的是成片 mp4 本体;清单(JSON)走旁边的「清单」按钮。 */
+  async function downloadVideo(delivery: Delivery) {
+    if (!delivery.artifactId) {
+      toast.error(t('delivery.noVideo'))
+      return
+    }
+    setDownloadingId(delivery.id)
+    try {
+      const response = await fetch(`${API_BASE}/artifacts/${delivery.artifactId}/content`, {
+        headers: { authorization: `Bearer ${getToken()}` },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${delivery.manifest.episode.title}.mp4`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success(t('delivery.videoDownloaded'))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
   async function downloadManifest(delivery: Delivery) {
     setDownloadingId(delivery.id)
     try {
@@ -179,6 +236,32 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       anchor.remove()
       URL.revokeObjectURL(url)
       toast.success(t('delivery.manifestDownloaded'))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  /** 剪辑交接:同一份交付清单导出 EDL/FCPXML，精剪在 NLE 里做而不是重烧。 */
+  async function downloadEditList(delivery: Delivery, format: 'edl' | 'fcpxml') {
+    setDownloadingId(delivery.id)
+    try {
+      const response = await fetch(`${API_BASE}/deliveries/${delivery.id}/edit-list?format=${format}`, {
+        headers: { authorization: `Bearer ${getToken()}` },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const text = await response.text()
+      const blob = new Blob([text], { type: format === 'edl' ? 'text/plain' : 'application/xml' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `episode-${delivery.manifest.episode.number}-edit.${format === 'edl' ? 'edl' : 'fcpxml'}`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success(t('delivery.editListDownloaded'))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('error.generic'))
     } finally {
@@ -210,6 +293,8 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                 <RefreshCwIcon className={cn(deliveries.loading && 'animate-spin')} />
                 {t('common.refresh')}
               </Button>
+              {/* EDL/XML 是行内小按钮，问号常驻头部解释这对外交接入口，触屏用户也有地方看。 */}
+              <HelpHint text={t('delivery.editListHint')} />
             </div>
           </CardAction>
         )}
@@ -268,7 +353,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           label={translateEnum(t, 'delivery.status', delivery.status)}
                         />
                       </TableCell>
-                      <TableCell className="text-muted-foreground">
+                      <TableCell className="text-subtle-foreground">
                         {formatDateTime(delivery.manifest.packagedAt, locale)}
                       </TableCell>
                       <TableCell className="text-muted-foreground text-xs">
@@ -276,7 +361,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           checks: delivery.manifest.quality.checks,
                           approved: delivery.manifest.quality.approved,
                           rejected: delivery.manifest.quality.rejected,
-                          threshold: delivery.manifest.quality.threshold,
+                          threshold: Math.round(delivery.manifest.quality.threshold * 100),
                         })}
                       </TableCell>
                       <TableCell>
@@ -292,12 +377,46 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           <Button
                             variant="ghost"
                             size="sm"
-                            disabled={downloadingId === delivery.id}
-                            onClick={() => void downloadManifest(delivery)}
+                            disabled={downloadingId === delivery.id || !delivery.artifactId}
+                            onClick={() => void downloadVideo(delivery)}
                           >
-                            <DownloadIcon className={cn(downloadingId === delivery.id && 'animate-pulse')} />
-                            {t('delivery.downloadManifest')}
+                            {downloadingId === delivery.id
+                              ? <LoaderCircleIcon className="animate-spin" />
+                              : <DownloadIcon />}
+                            {t('delivery.downloadVideo')}
                           </Button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={downloadingId === delivery.id}
+                                onClick={() => void downloadEditList(delivery, 'edl')}
+                              >
+                                {downloadingId === delivery.id
+                                  ? <LoaderCircleIcon className="animate-spin" />
+                                  : <ScissorsIcon />}
+                                EDL
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{t('delivery.editListHint')}</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={downloadingId === delivery.id}
+                                onClick={() => void downloadEditList(delivery, 'fcpxml')}
+                              >
+                                {downloadingId === delivery.id
+                                  ? <LoaderCircleIcon className="animate-spin" />
+                                  : <ScissorsIcon />}
+                                XML
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{t('delivery.editListHint')}</TooltipContent>
+                          </Tooltip>
                           <GuardedButton
                             action="episode:write"
                             variant="ghost"
@@ -406,13 +525,55 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                   )
                 )}
               </DetailRow>
+              <DetailRow label={t('delivery.labeling')}>
+                {manifest.labeling ? (
+                  <span className="block space-y-1">
+                    <span className="block text-xs">
+                      <span className={manifest.labeling.explicit === 'burned' ? 'text-success-ink' : 'text-warning-ink'}>
+                        {t(`delivery.labelingExplicit.${manifest.labeling.explicit}`)}
+                      </span>
+                      {' · '}
+                      <span className={manifest.labeling.implicit === 'written' ? 'text-success-ink' : 'text-warning-ink'}>
+                        {t(`delivery.labelingImplicit.${manifest.labeling.implicit}`)}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground block text-xs">
+                      {manifest.labeling.standard} · {manifest.labeling.badgeText}
+                    </span>
+                    {manifest.labeling.reason && (
+                      <span className="text-warning-ink block text-xs">{manifest.labeling.reason}</span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground text-xs">{t('delivery.labelingMissing')}</span>
+                )}
+              </DetailRow>
+              <DetailRow label={t('delivery.postProcess')}>
+                {manifest.postProcess ? (
+                  <span className="block space-y-1">
+                    <span className={`block text-xs ${manifest.postProcess.status === 'applied' ? 'text-success-ink' : 'text-warning-ink'}`}>
+                      {t(manifest.postProcess.status === 'applied' ? 'delivery.postApplied' : 'delivery.postFallback')}
+                    </span>
+                    {manifest.postProcess.loudness?.after && (
+                      <span className="text-muted-foreground block text-xs">
+                        {manifest.postProcess.loudness.before.i} → {manifest.postProcess.loudness.after.i} LUFS · {t('delivery.postTarget')} {manifest.postProcess.target?.i} LUFS
+                      </span>
+                    )}
+                    {manifest.postProcess.reason && (
+                      <span className="text-warning-ink block text-xs">{manifest.postProcess.reason}</span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground text-xs">{t('delivery.postMissing')}</span>
+                )}
+              </DetailRow>
               <DetailRow label={t('delivery.quality')}>
                 <span className="text-sm">
                   {t('delivery.qualitySummary', {
                     checks: manifest.quality.checks,
                     approved: manifest.quality.approved,
                     rejected: manifest.quality.rejected,
-                    threshold: manifest.quality.threshold,
+                    threshold: Math.round(manifest.quality.threshold * 100),
                   })}
                 </span>
               </DetailRow>

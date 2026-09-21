@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { ChevronDownIcon, ChevronRightIcon, HistoryIcon } from 'lucide-react'
-import type { Asset, Storyboard } from '@/lib/api'
+import type { Asset, GenerationTask, Storyboard } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { formatDateTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -14,6 +14,8 @@ interface StoryboardHistoryProps {
   canWrite: boolean
   episodeAssets: Asset[]
   onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
+  /** 与镜头卡同源:最新一次任务决定折叠行的状态点颜色。 */
+  shotTasks?: Map<string, GenerationTask>
   onEdit(storyboard: Storyboard): void
   onChangeStatus(storyboard: Storyboard): void
 }
@@ -28,6 +30,7 @@ export function StoryboardHistory({
   canWrite,
   episodeAssets,
   onBindAssets,
+  shotTasks,
   onEdit,
   onChangeStatus,
 }: StoryboardHistoryProps) {
@@ -98,6 +101,7 @@ export function StoryboardHistory({
                   canWrite={canWrite}
                   episodeAssets={episodeAssets}
                   onBindAssets={onBindAssets}
+                  shotTasks={shotTasks}
                   onEdit={() => onEdit(shot)}
                   onChangeStatus={() => onChangeStatus(shot)}
                 />

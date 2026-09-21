@@ -1,18 +1,22 @@
 'use client'
 
-import { Fragment, useCallback, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
-import { BookTextIcon, FileTextIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, UploadIcon } from 'lucide-react'
+import { ArchiveIcon, BookTextIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, CircleHelpIcon, FileTextIcon, LoaderCircleIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, SparklesIcon, Trash2Icon, UploadIcon } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
 import { TableSkeleton } from '@/components/ui/skeleton'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
@@ -27,8 +31,22 @@ export interface VersionSummary {
   checksum: string
   status: string
   contentLength: number
+  /** Set when the user archived the version — hidden from the active list, restorable. */
+  archivedAt?: string | null
   /** Only scripts carry lineage: the task that wrote the version, null when a human did. */
   generationTaskId?: string | null
+}
+
+/** The latest failed AI derivation for this episode, surfaced so silence never reads as success. */
+export interface ScriptAiError {
+  model: string | null
+  error: string
+  at: string
+}
+
+interface ScriptVersionsResponse {
+  versions: VersionSummary[]
+  lastAiError: ScriptAiError | null
 }
 
 /** Single-version endpoints include the text the list summaries omit. */
@@ -42,6 +60,20 @@ interface ScriptApproveResponse {
 }
 
 const EMPTY_VERSIONS: VersionSummary[] = []
+
+/** A small question mark that explains jargon on hover — terms users can't be expected to know. */
+function HelpHint({ text }: { text: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} className="text-muted-foreground inline-flex cursor-help">
+          <CircleHelpIcon className="size-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{text}</TooltipContent>
+    </Tooltip>
+  )
+}
 
 /** Version rows carry the SCREAMING workflow enum; StatusBadge speaks lowercase tones. */
 function toneFor(status: string): string {
@@ -57,12 +89,19 @@ interface SourcesPanelProps {
 export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
+  const { can } = usePermission()
 
   const [content, setContent] = useState('')
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   // Identifies the single row mutation in flight, e.g. `approve-source-3`.
   const [busy, setBusy] = useState<string | null>(null)
+  // The at-timestamp of the AI failure the user dismissed, so a retry that fails again re-shows it.
+  const [aiErrorDismissedAt, setAiErrorDismissedAt] = useState<string | null>(null)
+  // Deletes are destructive and always confirmed; archive/unarchive is reversible and never confirmed.
+  const [deleteConfirm, setDeleteConfirm] = useState<{ kind: 'script' | 'source'; version: VersionSummary } | null>(null)
+  const [showArchivedScripts, setShowArchivedScripts] = useState(false)
+  const [showArchivedSources, setShowArchivedSources] = useState(false)
 
   const loadSourceVersions = useCallback(
     () =>
@@ -75,13 +114,54 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
   const loadScriptVersions = useCallback(
     () =>
       episodeId
-        ? api<{ versions: VersionSummary[] }>(`/episodes/${episodeId}/script-versions`).then(result => result.versions)
-        : Promise.resolve<VersionSummary[]>(EMPTY_VERSIONS),
+        ? api<ScriptVersionsResponse>(`/episodes/${episodeId}/script-versions`)
+        : Promise.resolve<ScriptVersionsResponse>({ versions: EMPTY_VERSIONS, lastAiError: null }),
     [api, episodeId, organizationId],
   )
 
   const sourceVersions = useAsync<VersionSummary[]>(loadSourceVersions, EMPTY_VERSIONS)
-  const scriptVersions = useAsync<VersionSummary[]>(loadScriptVersions, EMPTY_VERSIONS)
+  const scriptVersions = useAsync<ScriptVersionsResponse>(
+    loadScriptVersions,
+    { versions: EMPTY_VERSIONS, lastAiError: null },
+  )
+  // 剧本生成进行中:SCRIPT 任务从排队到写完要 10~30s,只靠按钮的请求态转圈
+  // 用户根本看不见。派生自批次的任务状态,有任务在飞时 3s 轮询到任务结束。
+  const loadBatches = useCallback(
+    () =>
+      episodeId
+        ? api<{ batches: Array<{ stage: string; tasks: Array<{ status: string }> }> }>(`/episodes/${episodeId}/generations`).then(result => result.batches)
+        : Promise.resolve<Array<{ stage: string; tasks: Array<{ status: string }> }>>([]),
+    [api, episodeId, organizationId],
+  )
+  const batches = useAsync<Array<{ stage: string; tasks: Array<{ status: string }> }>>(loadBatches, [])
+  const scriptGenerating = useMemo(
+    () =>
+      batches.data.some(
+        batch => batch.stage === 'SCRIPT' && batch.tasks.some(task => task.status === 'QUEUED' || task.status === 'RUNNING'),
+      ),
+    [batches.data],
+  )
+  useEffect(() => {
+    if (!scriptGenerating) return
+    const timer = setInterval(() => {
+      batches.reload()
+      scriptVersions.reload()
+    }, 3000)
+    return () => {
+      clearInterval(timer)
+      // 收尾的最后一次刷新:任务刚落地的版本/错误不靠用户手动刷新才出现。
+      batches.reload()
+      scriptVersions.reload()
+    }
+  }, [scriptGenerating, batches.reload, scriptVersions.reload])
+  const scriptArchived = useMemo(
+    () => scriptVersions.data.versions.filter(version => version.archivedAt),
+    [scriptVersions.data],
+  )
+  const sourceArchived = useMemo(
+    () => sourceVersions.data.filter(version => version.archivedAt),
+    [sourceVersions.data],
+  )
 
   const reloadSources = sourceVersions.reload
   const reloadScripts = scriptVersions.reload
@@ -168,6 +248,68 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
     }
   }
 
+  /** One function for both entry points: the AI-generate button and the failure banner's retry. */
+  async function aiGenerateScript() {
+    if (!episodeId) return
+    setBusy('ai-script')
+    try {
+      await api(`/episodes/${episodeId}/generations`, {
+        method: 'POST',
+        body: JSON.stringify({ stage: 'SCRIPT', regenerate: true }),
+      })
+      toast.success(t('sources.aiRetryStarted'))
+      setAiErrorDismissedAt(null)
+      reloadAll()
+      // 立即刷批次,让 scriptGenerating 接棒请求态——按钮的"生成中"要一直
+      // 亮到任务落定,而不是只在请求的几百毫秒里转一下。
+      batches.reload()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function setArchived(kind: 'script' | 'source', version: VersionSummary, archived: boolean) {
+    if (!episodeId) return
+    setBusy(`archive-${kind}-${version.version}`)
+    try {
+      const path = kind === 'script' ? 'script-versions' : 'source-versions'
+      await api(`/episodes/${episodeId}/${path}/${version.version}/archive`, {
+        method: 'POST',
+        body: JSON.stringify({ archived }),
+      })
+      toast.success(archived ? t('sources.archivedToast') : t('sources.unarchivedToast'))
+      reloadAll()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function removeVersion(kind: 'script' | 'source', version: VersionSummary) {
+    if (!episodeId) return
+    setBusy(`delete-${kind}-${version.version}`)
+    try {
+      const path = kind === 'script' ? 'script-versions' : 'source-versions'
+      await api(`/episodes/${episodeId}/${path}/${version.version}`, { method: 'DELETE' })
+      toast.success(t('sources.deleted'))
+      reloadAll()
+    } catch (error) {
+      if (error instanceof ApiError && error.message === 'sources:deleteApproved') {
+        toast.error(t('sources.deleteApprovedError'))
+      } else if (error instanceof ApiError && error.message === 'sources:scriptInUse') {
+        toast.error(t('sources.scriptInUseError'))
+      } else {
+        toast.error(error instanceof Error ? error.message : t('error.generic'))
+      }
+    } finally {
+      setBusy(null)
+      setDeleteConfirm(null)
+    }
+  }
+
   function friendlyError(error: unknown, mapped: string, code: string): string {
     if (error instanceof ApiError && error.message === code) return mapped
     return error instanceof Error ? error.message : t('error.generic')
@@ -232,7 +374,7 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
             title={t('sources.sourceVersions')}
             icon={<FileTextIcon className="text-muted-foreground size-4" />}
             hint={t('sources.sourceVersionsHint')}
-            versions={sourceVersions.data}
+            versions={sourceVersions.data.filter(version => !version.archivedAt)}
             loading={sourceVersions.loading}
             emptyTitle={t('sources.noSources')}
             emptyHint={t('sources.noSourcesHint')}
@@ -245,7 +387,7 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
                 {version.status !== 'APPROVED' && (
                   <GuardedButton
                     action="episode:write"
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
                     disabled={busy === `approve-source-${version.version}`}
                     onClick={() => void approveSource(version)}
@@ -253,27 +395,117 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
                     {busy === `approve-source-${version.version}` ? t('sources.approving') : t('sources.approve')}
                   </GuardedButton>
                 )}
-                {version.status === 'APPROVED' && (
-                  <GuardedButton
-                    action="episode:write"
-                    variant="outline"
+                {version.status === 'APPROVED' && !version.archivedAt && (
+                  <>
+                    <GuardedButton
+                      action="episode:write"
+                      variant="outline"
+                      size="sm"
+                      disabled={busy === `derive-${version.version}`}
+                      onClick={() => void deriveScript(version)}
+                    >
+                      <ScrollTextIcon />
+                      {busy === `derive-${version.version}` ? t('sources.deriving') : t('sources.derive')}
+                    </GuardedButton>
+                    <HelpHint text={t('sources.deriveHint')} />
+                    <Button variant="ghost" size="sm" onClick={() => void setArchived('source', version, true)} title={t('sources.archive')}>
+                      <ArchiveIcon />
+                    </Button>
+                  </>
+                )}
+                {version.archivedAt && (
+                  <Button variant="ghost" size="sm" onClick={() => void setArchived('source', version, false)}>
+                    {t('sources.unarchive')}
+                  </Button>
+                )}
+                {version.status === 'DRAFT' && (
+                  <Button
+                    variant="ghost"
                     size="sm"
-                    disabled={busy === `derive-${version.version}`}
-                    onClick={() => void deriveScript(version)}
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setDeleteConfirm({ kind: 'source', version })}
+                    title={t('sources.delete')}
                   >
-                    <ScrollTextIcon />
-                    {busy === `derive-${version.version}` ? t('sources.deriving') : t('sources.derive')}
-                  </GuardedButton>
+                    <Trash2Icon />
+                  </Button>
                 )}
               </>
             )}
           />
 
+          {sourceArchived.length > 0 && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                className="text-muted-foreground flex items-center gap-1 text-xs"
+                onClick={() => setShowArchivedSources(value => !value)}
+              >
+                {showArchivedSources ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+                {t('sources.archivedSection', { count: sourceArchived.length })}
+              </button>
+              {showArchivedSources && sourceArchived.map(version => (
+                <div key={version.id} className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2">
+                  <span className="text-sm font-medium">v{version.version}</span>
+                  <Badge variant="muted">{t('sources.archivedBadge')}</Badge>
+                  <span className="text-muted-foreground font-mono text-xs">{t('sources.chars', { count: version.contentLength })}</span>
+                  <span className="ml-auto flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => void setArchived('source', version, false)}>
+                      {t('sources.unarchive')}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setDeleteConfirm({ kind: 'source', version })}
+                      title={t('sources.delete')}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {scriptVersions.data.lastAiError && aiErrorDismissedAt !== scriptVersions.data.lastAiError.at && (
+            <Alert variant="destructive">
+              <CircleAlertIcon />
+              <AlertTitle>{t('sources.aiFailed')}</AlertTitle>
+              <AlertDescription className="justify-items-start">
+                <p className="font-mono text-xs break-all">
+                  {scriptVersions.data.lastAiError.model ? `[${scriptVersions.data.lastAiError.model}] ` : ''}
+                  {scriptVersions.data.lastAiError.error}
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Button size="sm" variant="outline" disabled={busy === 'ai-script'} onClick={() => void aiGenerateScript()}>
+                    {busy === 'ai-script' ? t('common.loading') : t('sources.aiRetry')}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setAiErrorDismissedAt(scriptVersions.data.lastAiError!.at)}>
+                    {t('sources.aiDismiss')}
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <div className="flex items-center justify-end gap-1.5">
+            <GuardedButton
+              action="episode:write"
+              size="sm"
+              disabled={busy === 'ai-script' || scriptGenerating}
+              onClick={() => void aiGenerateScript()}
+            >
+              {busy === 'ai-script' || scriptGenerating ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
+              {busy === 'ai-script' || scriptGenerating ? t('sources.aiGenerating') : t('sources.aiGenerate')}
+            </GuardedButton>
+            <HelpHint text={t('sources.aiGenerateHint')} />
+          </div>
+
           <VersionTable
             title={t('sources.scriptVersions')}
             icon={<ScrollTextIcon className="text-muted-foreground size-4" />}
             hint={t('sources.scriptVersionsHint')}
-            versions={scriptVersions.data}
+            versions={scriptVersions.data.versions.filter(version => !version.archivedAt)}
             loading={scriptVersions.loading}
             emptyTitle={t('sources.noScripts')}
             emptyHint={t('sources.noScriptsHint')}
@@ -281,22 +513,101 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
             kind="script"
             episodeId={episodeId}
             onSaved={reloadAll}
-            renderActions={version =>
-              version.status !== 'APPROVED' ? (
-                <GuardedButton
-                  action="episode:write"
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy === `approve-script-${version.version}`}
-                  onClick={() => void approveScript(version)}
-                >
-                  {busy === `approve-script-${version.version}` ? t('sources.approving') : t('sources.approve')}
-                </GuardedButton>
-              ) : null
-            }
+            renderActions={version => (
+              <>
+                {version.status !== 'APPROVED' && (
+                  <GuardedButton
+                    action="episode:write"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy === `approve-script-${version.version}`}
+                    onClick={() => void approveScript(version)}
+                  >
+                    {busy === `approve-script-${version.version}` ? t('sources.approving') : t('sources.approve')}
+                  </GuardedButton>
+                )}
+                {version.status === 'APPROVED' && !version.archivedAt && (
+                  <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, true)} title={t('sources.archive')}>
+                    <ArchiveIcon />
+                  </Button>
+                )}
+                {version.archivedAt && (
+                  <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, false)}>
+                    {t('sources.unarchive')}
+                  </Button>
+                )}
+                {version.status === 'DRAFT' && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setDeleteConfirm({ kind: 'script', version })}
+                    title={t('sources.delete')}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                )}
+              </>
+            )}
           />
+
+          {scriptArchived.length > 0 && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                className="text-muted-foreground flex items-center gap-1 text-xs"
+                onClick={() => setShowArchivedScripts(value => !value)}
+              >
+                {showArchivedScripts ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+                {t('sources.archivedSection', { count: scriptArchived.length })}
+              </button>
+              {showArchivedScripts && scriptArchived.map(version => (
+                <div key={version.id} className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2">
+                  <span className="text-sm font-medium">v{version.version}</span>
+                  <Badge variant="muted">{t('sources.archivedBadge')}</Badge>
+                  <LineageBadge taskId={version.generationTaskId ?? null} />
+                  <span className="text-muted-foreground font-mono text-xs">{t('sources.chars', { count: version.contentLength })}</span>
+                  <span className="ml-auto flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, false)}>
+                      {t('sources.unarchive')}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setDeleteConfirm({ kind: 'script', version })}
+                      title={t('sources.delete')}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       )}
+
+      <AlertDialog open={deleteConfirm !== null} onOpenChange={open => !open && setDeleteConfirm(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('sources.deleteConfirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('sources.deleteConfirmBody')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={event => {
+                event.preventDefault()
+                if (deleteConfirm) void removeVersion(deleteConfirm.kind, deleteConfirm.version)
+              }}
+            >
+              {busy === `delete-${deleteConfirm?.kind}-${deleteConfirm?.version.version}` ? t('common.loading') : t('sources.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   )
 }
@@ -393,7 +704,7 @@ function VersionTable({
   return (
     <Card className="gap-4 py-4">
       <CardHeader className="px-4">
-        <CardTitle className="flex items-center gap-2 text-sm">
+        <CardTitle className="flex items-center gap-2">
           {icon}
           {title}
         </CardTitle>
@@ -436,6 +747,7 @@ function VersionTable({
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => void toggleView(version)} disabled={detailLoading && openVersion === version.version}>
+                        <ChevronDownIcon className={cn('size-3.5 transition-transform', openVersion === version.version && 'rotate-180')} />
                         {openVersion === version.version ? t('sources.hide') : t('sources.view')}
                       </Button>
                       {renderActions(version)}

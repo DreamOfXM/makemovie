@@ -30,7 +30,9 @@ export function LineageBadge({ taskId, className }: LineageBadgeProps) {
   if (taskId === undefined) return <span className={cn('text-muted-foreground text-xs', className)}>—</span>
 
   const badge = taskId ? (
-    <Badge variant="tinted" className={cn('gap-1', className)}>
+    // Source badges are labels, not actions: muted styling on purpose. A purple tinted
+    // pill here reads as a CTA button and users try to click it as one.
+    <Badge variant="muted" className={cn('gap-1', className)}>
       <SparklesIcon />
       {t('lineage.ai')}
     </Badge>

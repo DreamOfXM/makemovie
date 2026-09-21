@@ -22,7 +22,7 @@ export function bindableCapabilities(connections: Connection[]): BindableCapabil
   return connections.flatMap(connection =>
     connection.enabled
       ? connection.capabilities
-          .filter(capability => capability.entitlementVerifiedAt)
+          .filter(capability => capability.entitlementVerifiedAt || capability.credentialVerifiedAt)
           .map(capability => ({
             capabilityId: capability.id,
             model: capability.model,
@@ -124,7 +124,11 @@ export function slotReadiness(connections: Connection[], bindings: Binding[]): S
 function isUsable(binding: Binding, slot: CapabilitySlot): boolean {
   if (binding.slot !== slot || !binding.enabled) return false
   const capability = binding.capability
-  return !!capability?.entitlementVerifiedAt && !!capability.connection?.enabled
+  return (
+    !!capability &&
+    !!(capability.entitlementVerifiedAt || capability.credentialVerifiedAt) &&
+    !!capability.connection?.enabled
+  )
 }
 
 /** Required slots the pipeline resolves today; anything unwired is excluded by construction. */

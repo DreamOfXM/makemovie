@@ -121,7 +121,7 @@ export default function MembersPage() {
 
       <Card>
         <CardHeader className="border-b">
-          <CardTitle className="text-sm">{t('members.title')}</CardTitle>
+          <CardTitle>{t('members.title')}</CardTitle>
           <CardDescription>{t('members.count', { count: members.data.length })}</CardDescription>
         </CardHeader>
 

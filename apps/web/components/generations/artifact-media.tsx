@@ -51,13 +51,15 @@ interface ArtifactMediaProps {
   label?: string
   /** Size belongs to the caller: a table cell and a shot card want different heights. */
   className?: string
+  /** False for previews that live inside a clickable card: no controls, no zoom, no pointer capture. */
+  interactive?: boolean
 }
 
 /**
  * One renderer for every artifact the console can show: picture, clip, voice, or a
  * download link for anything a browser will not play inline (the cue sheet).
  */
-export function ArtifactMedia({ artifact, label, className }: ArtifactMediaProps) {
+export function ArtifactMedia({ artifact, label, className, interactive = true }: ArtifactMediaProps) {
   const { t } = useI18n()
   const href = useArtifactUrl(artifact.downloadUrl)
   const [zoomed, setZoomed] = useState(false)
@@ -73,15 +75,15 @@ export function ArtifactMedia({ artifact, label, className }: ArtifactMediaProps
           src={href}
           alt={alt}
           loading="lazy"
-          onClick={() => setZoomed(true)}
-          className={cn('max-h-24 cursor-zoom-in rounded border object-cover', className)}
+          onClick={interactive ? () => setZoomed(true) : undefined}
+          className={cn('max-h-24 rounded border object-cover', interactive ? 'cursor-zoom-in' : 'pointer-events-none', className)}
         />
         {zoomed && <ArtifactLightbox src={href} alt={alt} onClose={() => setZoomed(false)} />}
       </>
     )
   }
   if (artifact.mimeType.startsWith('video/')) {
-    return <video src={href} controls preload="metadata" aria-label={alt} className={cn('max-h-24 rounded border', className)} />
+    return <video src={href} controls={interactive} preload="metadata" aria-label={alt} className={cn('max-h-24 rounded border', !interactive && 'pointer-events-none', className)} />
   }
   if (artifact.mimeType.startsWith('audio/')) {
     return <audio src={href} controls preload="metadata" aria-label={alt} className={cn('h-10 max-w-56', className)} />
