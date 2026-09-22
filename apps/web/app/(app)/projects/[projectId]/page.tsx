@@ -68,6 +68,7 @@ export default function ProjectPage() {
   // 轮不到这些动作，靠这个令牌通知它重读。
   const [splitRefreshToken, setSplitRefreshToken] = useState(0)
   const [episodeDeleteTarget, setEpisodeDeleteTarget] = useState<Episode | null>(null)
+  const [episodeDeleteAllOpen, setEpisodeDeleteAllOpen] = useState(false)
   const [episodeDeleting, setEpisodeDeleting] = useState(false)
 
   async function removeEpisode(target: Episode) {
@@ -84,6 +85,32 @@ export default function ProjectPage() {
       } else {
         toast.error(error instanceof Error ? error.message : t('error.generic'))
       }
+    } finally {
+      setEpisodeDeleting(false)
+    }
+  }
+
+  /** 批量清理空壳集:有分镜/生成产物/交付的集会被服务端拒绝——逐集尝试,
+   *  结束后如实报「删了几集、几集因有产物保留」。 */
+  async function removeAllEpisodes() {
+    setEpisodeDeleting(true)
+    let deleted = 0
+    let kept = 0
+    try {
+      for (const episode of episodes.data) {
+        try {
+          await deleteEpisode(api, projectId, episode.id)
+          deleted += 1
+        } catch {
+          kept += 1
+        }
+      }
+      toast.success(kept > 0
+        ? t('projects.deleteAllEpisodesKept', { deleted, kept })
+        : t('projects.deleteAllEpisodesDone', { deleted }))
+      setEpisodeDeleteAllOpen(false)
+      episodes.reload()
+      setSplitRefreshToken(token => token + 1)
     } finally {
       setEpisodeDeleting(false)
     }
@@ -167,14 +194,27 @@ export default function ProjectPage() {
             {episodes.loading ? t('common.loading') : t('projects.episodeProgress', { done: completed, total: episodes.data.length })}
           </CardDescription>
           {/* Creating episodes lives where episodes live: the split panel creates
-              its own via auto-split, this module owns the manual door. Films are
+              its own via grouping, this module owns the manual door. Films are
               locked to their single born episode. */}
           {!isFilm && (
             <CardAction>
-              <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setEpisodeDialogOpen(true)}>
-                <PlusIcon />
-                {t('projects.newEpisode')}
-              </GuardedButton>
+              <div className="flex items-center gap-1">
+                {episodes.data.length > 1 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground hover:text-destructive"
+                    disabled={episodeDeleting}
+                    onClick={() => setEpisodeDeleteAllOpen(true)}
+                  >
+                    {t('projects.deleteAllEpisodesAction')}
+                  </Button>
+                )}
+                <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setEpisodeDialogOpen(true)}>
+                  <PlusIcon />
+                  {t('projects.newEpisode')}
+                </GuardedButton>
+              </div>
             </CardAction>
           )}
         </CardHeader>
@@ -297,6 +337,28 @@ export default function ProjectPage() {
           toast.success(t('projects.episodeCreated', { number }))
         }}
       />
+
+      <AlertDialog open={episodeDeleteAllOpen} onOpenChange={open => !open && setEpisodeDeleteAllOpen(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('projects.deleteAllEpisodesTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('projects.deleteAllEpisodesBody')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={episodeDeleting}>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={episodeDeleting}
+              onClick={event => {
+                event.preventDefault()
+                void removeAllEpisodes()
+              }}
+            >
+              {episodeDeleting ? t('common.loading') : t('common.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={episodeDeleteTarget !== null} onOpenChange={open => !open && setEpisodeDeleteTarget(null)}>
         <AlertDialogContent>

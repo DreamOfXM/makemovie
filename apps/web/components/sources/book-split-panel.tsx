@@ -7,6 +7,7 @@ import {
   BookCheckIcon,
   BookTextIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
   FileUpIcon,
@@ -510,7 +511,6 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
     }
     return counts
   }, [matrix.data.segments])
-  const maxChars = matrix.data.segments.reduce((highest, segment) => Math.max(highest, segment.charCount), 0)
 
   return (
     <Card>
@@ -717,15 +717,25 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   {splitMode ? t('bookSplit.splitExit') : t('bookSplit.splitEnter')}
                 </Button>
               )}
-              <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null || unassignedCount === 0} onClick={() => void preset('budget')}>
-                {busy === 'preset-budget' ? <LoaderCircleIcon className="animate-spin" /> : <SplitIcon />}
-                {t('bookSplit.presetBudget', { minutes: defaultMinutes })}
-              </GuardedButton>
-              <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null || unassignedCount === 0} onClick={() => void preset('per_chapter')}>
-                {busy === 'preset-per_chapter' ? <LoaderCircleIcon className="animate-spin" /> : null}
-                {t('bookSplit.presetPerChapter')}
-              </GuardedButton>
-              <HelpHint text={t('bookSplit.presetHint')} />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null || unassignedCount === 0}>
+                    {busy === 'preset-budget' || busy === 'preset-per_chapter' ? <LoaderCircleIcon className="animate-spin" /> : <SplitIcon />}
+                    {t('bookSplit.presetBtn')}
+                    <ChevronDownIcon className="text-muted-foreground size-3.5" />
+                  </GuardedButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-80">
+                  <DropdownMenuItem className="flex-col items-start gap-0.5 py-2" onClick={() => void preset('budget')}>
+                    <span className="text-sm font-medium">{t('bookSplit.presetBudget', { minutes: defaultMinutes })}</span>
+                    <span className="text-muted-foreground text-xs">{t('bookSplit.presetBudgetHint', { chars: fmt(defaultMinutes * SCRIPT_CHARS_PER_MINUTE) })}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="flex-col items-start gap-0.5 py-2" onClick={() => void preset('per_chapter')}>
+                    <span className="text-sm font-medium">{t('bookSplit.presetPerChapter')}</span>
+                    <span className="text-muted-foreground text-xs">{t('bookSplit.presetPerChapterHint')}</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <span className="flex-1" />
               <span className="text-muted-foreground text-xs">
                 {unassignedCount > 0 ? t('bookSplit.unassignedCount', { count: unassignedCount }) : t('bookSplit.allGrouped')}
@@ -750,9 +760,8 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                 <TableRow className="hover:bg-transparent">
                   {splitMode && <TableHead className="w-8" />}
                   <TableHead>{t('bookSplit.colChapter')}</TableHead>
-                  <TableHead className="w-20 text-right">{t('bookSplit.colChars')}</TableHead>
-                  <TableHead className="w-24">{t('bookSplit.colShare')}</TableHead>
-                  <TableHead className="w-40">{t('bookSplit.colGroup')}</TableHead>
+                  <TableHead className="w-16 text-right">{t('bookSplit.colChars')}</TableHead>
+                  <TableHead className="w-36">{t('bookSplit.colGroup')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -766,7 +775,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                     const over = minutesNum > defaultMinutes + 2
                     return (
                       <TableRow key={`head-${row.episodeId}`} className="hover:bg-transparent">
-                        <TableCell colSpan={splitMode ? 5 : 4} className="bg-muted/40 py-1.5">
+                        <TableCell colSpan={splitMode ? 4 : 3} className="bg-muted/40 py-1.5">
                           <div className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
                             <span className="text-foreground font-medium">
                               {t('bookSplit.episodePlain', { number: episode.number })}
@@ -815,7 +824,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                           </span>
                         </TableCell>
                       )}
-                      <TableCell className="max-w-0">
+                      <TableCell className="max-w-0 py-2.5">
                         {/* 浏览态:整块标题+摘要可点开全文;拆集态:任何点击都是勾选,
                             详情不被选择劫持——两态分流是关键。 */}
                         <button
@@ -835,7 +844,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                             </span>
                           </span>
                           {segment.preview && (
-                            <span className="text-muted-foreground line-clamp-1 max-w-md pl-4.5 text-xs font-normal">
+                            <span className="text-muted-foreground line-clamp-2 max-w-lg pl-4.5 text-xs font-normal">
                               {segment.preview}
                             </span>
                           )}
@@ -843,14 +852,6 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                       </TableCell>
                       <TableCell className="text-muted-foreground text-right font-mono text-xs">
                         {rowBusy ? <LoaderCircleIcon className="inline size-3.5 animate-spin" /> : fmt(segment.charCount)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="bg-muted h-1.5 w-full max-w-20 overflow-hidden rounded-full">
-                          <div
-                            className="bg-primary/60 h-full rounded-full"
-                            style={{ width: `${maxChars > 0 ? Math.max(2, (segment.charCount / maxChars) * 100) : 0}%` }}
-                          />
-                        </div>
                       </TableCell>
                       <TableCell>
                         {episode ? (
@@ -870,7 +871,8 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
 
           {/* 拆集浮层:选中即出,带实时估算;命名建集/并入/移出/批量删除。 */}
           {splitMode && selected.size > 0 && (
-            <div className="bg-muted/50 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border px-3 py-2 text-xs">
+            /* 固定在可视区底部:44 章的表格里,卡片内底部的浮层永远在屏幕外。 */
+            <div className="bg-card fixed bottom-6 left-1/2 z-40 flex w-[min(920px,calc(100vw-2rem))] -translate-x-1/2 flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border px-4 py-3 text-xs shadow-lg">
               <span className="tabular-nums">
                 {t('bookSplit.splitSelected', {
                   count: selected.size,
