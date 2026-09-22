@@ -109,12 +109,8 @@ export default function ProjectPage() {
               <PencilIcon />
               {t('projects.renameTitle')}
             </GuardedButton>
-            {!isFilm && (
-              <GuardedButton action="episode:write" onClick={() => setEpisodeDialogOpen(true)}>
-                <PlusIcon />
-                {t('projects.newEpisode')}
-              </GuardedButton>
-            )}
+            {/* 新建剧集只住在剧集卡上:动作按钮归属其结果所在的模块,页头再放一份
+                只会和它抢注意(用户实测两次提出)。 */}
             {project && (
               <GuardedButton
                 action="project:delete"

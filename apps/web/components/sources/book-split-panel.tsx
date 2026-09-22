@@ -1,12 +1,12 @@
 'use client'
 
-import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
 import {
   BookCheckIcon,
   BookTextIcon,
-  ChevronDownIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   FileUpIcon,
   LoaderCircleIcon,
@@ -22,6 +22,7 @@ import {
   pasteProjectSource,
   toProjectFormat,
   updateSourceAllocations,
+  updateProjectSourceSegment,
   uploadProjectSource,
   type ApplyProjectSourceResultItem,
   type ProjectSourceResponse,
@@ -36,6 +37,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -47,6 +49,13 @@ import { GuardedButton, usePermission } from '@/components/permission'
 
 /** Radix Select forbids an empty-string item value, so unassigned gets a sentinel. */
 const UNASSIGNED = '__unassigned__'
+
+/** Auto-split names episodes 「第 N 集」; repeating that after a number label adds nothing. */
+const AUTO_EPISODE_TITLE = /^第\s*\d+\s*集$/
+
+function episodeDisplayTitle(episode: { number: number; title: string }): string {
+  return AUTO_EPISODE_TITLE.test(episode.title.trim()) ? '' : episode.title
+}
 
 const EMPTY_MATRIX: ProjectSourceResponse = {
   version: null,
@@ -75,11 +84,10 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
 
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  // Paste door: file pickers do not exist in every embedding (webviews), and
-  // text already on the clipboard should not require a round-trip through a file.
-  // Open by default — the file button being dead in those webviews must never
-  // hide the working door behind a second click.
-  const [pasteOpen, setPasteOpen] = useState(true)
+  // Paste door: the secondary intake. The empty state's primary action is the
+  // file upload (the common path); pasting is one outline click away for
+  // environments whose file picker cannot open.
+  const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const [pasting, setPasting] = useState(false)
   // Drop-target highlight: the dashed box must not merely look droppable.
@@ -88,30 +96,8 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   const [busy, setBusy] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<{ items: ApplyProjectSourceResultItem[]; pendingSegments: number } | null>(null)
   const [actionError, setActionError] = useState<{ message: string; retry?(): void } | null>(null)
-  // Chapter inspection: which segment row is expanded and the full text it fetched.
-  // The matrix deliberately carries no content — it is fetched per expanded row.
-  const [openSegment, setOpenSegment] = useState<string | null>(null)
-  const [segmentDetail, setSegmentDetail] = useState<ProjectSourceSegmentDetail | null>(null)
-  const [segmentLoading, setSegmentLoading] = useState(false)
-
-  async function toggleSegment(segment: ProjectSourceSegment) {
-    setSegmentDetail(null)
-    if (openSegment === segment.id) {
-      setOpenSegment(null)
-      return
-    }
-    setOpenSegment(segment.id)
-    setSegmentLoading(true)
-    try {
-      const result = await getProjectSourceSegment(api, projectId, segment.id)
-      setSegmentDetail(result.segment)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
-      setOpenSegment(null)
-    } finally {
-      setSegmentLoading(false)
-    }
-  }
+  // 章节弹窗:整章原文的审阅与编辑。几千字的章节塞不进表格行,也不该塞。
+  const [chapterTarget, setChapterTarget] = useState<ProjectSourceSegment | null>(null)
 
   const loadMatrix = useCallback(
     () => getProjectSource(api, projectId),
@@ -348,11 +334,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
               </span>
             }
             action={
-              pasteOpen ? (
-                <Button size="sm" variant="outline" disabled={pasting} onClick={() => { setPasteOpen(false); setUploadError(null) }}>
-                  {t('bookSplit.pasteCancel')}
-                </Button>
-              ) : uploading ? (
+              uploading ? (
                 <Button size="sm" disabled>
                   <LoaderCircleIcon className="animate-spin" />
                   {t('bookSplit.uploading')}
@@ -390,20 +372,25 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                 rows={8}
                 className="font-mono text-xs"
               />
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <span className="text-muted-foreground text-xs">
                   {t('bookSplit.pasteCount', { count: pasteText.length, limit: 1_000_000 })}
                 </span>
-                {pasting ? (
-                  <Button size="sm" disabled>
-                    <LoaderCircleIcon className="animate-spin" />
-                    {t('bookSplit.uploading')}
+                <div className="flex items-center gap-1.5">
+                  <Button size="sm" variant="ghost" disabled={pasting} onClick={() => { setPasteOpen(false); setUploadError(null) }}>
+                    {t('bookSplit.pasteCancel')}
                   </Button>
-                ) : (
-                  <Button size="sm" disabled={!pasteText.trim()} onClick={() => void uploadPasted()}>
-                    {t('bookSplit.pasteSubmit')}
-                  </Button>
-                )}
+                  {pasting ? (
+                    <Button size="sm" disabled>
+                      <LoaderCircleIcon className="animate-spin" />
+                      {t('bookSplit.uploading')}
+                    </Button>
+                  ) : (
+                    <Button size="sm" disabled={!pasteText.trim()} onClick={() => void uploadPasted()}>
+                      {t('bookSplit.pasteSubmit')}
+                    </Button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -484,31 +471,22 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                 {matrix.data.segments.map(segment => {
                   const rowBusy = busy === `alloc-${segment.id}`
                   return (
-                    <Fragment key={segment.id}>
-                      <TableRow>
-                        <TableCell className="max-w-0">
-                          <div className="flex items-center gap-1">
-                            {/* 展开核对章节内容:切分对不对要看原文,不能只看字数。 */}
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={openSegment === segment.id ? t('bookSplit.hideChapter') : t('bookSplit.viewChapter')}
-                              onClick={() => void toggleSegment(segment)}
-                            >
-                              <ChevronDownIcon
-                                className={cn(
-                                  'text-muted-foreground size-3.5 transition-transform',
-                                  openSegment === segment.id && 'rotate-180',
-                                )}
-                              />
-                            </Button>
-                            <p className="truncate font-medium">
-                              {segment.title ?? (
-                                <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>
-                              )}
-                            </p>
-                          </div>
-                        </TableCell>
+                    <TableRow key={segment.id}>
+                      <TableCell className="max-w-0">
+                        {/* 点章节名开整章弹窗。向右的箭头=「里面还有内容」,内容在弹窗里展开——
+                            之前收起态用向下箭头、展开态转向上,方向和内容出现的位置对不上。 */}
+                        <button
+                          type="button"
+                          className="hover:text-primary flex min-w-0 items-center gap-1 text-left transition-colors"
+                          aria-label={`${segment.title ?? t('bookSplit.unmarked')} · ${t('bookSplit.viewChapter')}`}
+                          onClick={() => setChapterTarget(segment)}
+                        >
+                          <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
+                          <span className="truncate font-medium">
+                            {segment.title ?? <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>}
+                          </span>
+                        </button>
+                      </TableCell>
                       <TableCell className="text-muted-foreground text-right font-mono text-xs">
                         {fmt(segment.charCount)}
                       </TableCell>
@@ -535,7 +513,9 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                               <SelectItem value={UNASSIGNED}>{t('bookSplit.unassigned')}</SelectItem>
                               {matrix.data.episodes.map(episode => (
                                 <SelectItem key={episode.id} value={episode.id}>
-                                  {t('bookSplit.episodeOption', { number: episode.number, title: episode.title })}
+                                  {episodeDisplayTitle(episode)
+                                    ? t('bookSplit.episodeOption', { number: episode.number, title: episodeDisplayTitle(episode) })
+                                    : t('bookSplit.episodePlain', { number: episode.number })}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -543,25 +523,6 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                         </div>
                       </TableCell>
                     </TableRow>
-                    {openSegment === segment.id && (
-                      <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={4} className="bg-muted/40 py-3">
-                          {segmentLoading ? (
-                            <p className="text-muted-foreground text-xs">{t('common.loading')}</p>
-                          ) : segmentDetail === null ? null : (
-                            <div className="space-y-1.5">
-                              <p className="text-muted-foreground text-xs font-medium">
-                                {segmentDetail.title ?? t('bookSplit.unmarked')} · {t('bookSplit.chapterChars', { count: fmt(segmentDetail.charCount) })}
-                              </p>
-                              <pre className="bg-background max-h-72 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">
-                                {segmentDetail.content}
-                              </pre>
-                            </div>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    )}
-                    </Fragment>
                   )
                 })}
               </TableBody>
@@ -581,7 +542,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                   return (
                     <Badge key={episode.id} variant={chars > 0 ? 'tinted' : 'muted'} className="font-normal">
                       {t('bookSplit.footerChip', { number: episode.number, chars: fmt(chars) })}
-                      {episode.title && <span className="text-muted-foreground"> · {episode.title}</span>}
+                      {episodeDisplayTitle(episode) && <span className="text-muted-foreground"> · {episodeDisplayTitle(episode)}</span>}
                     </Badge>
                   )
                 })}
@@ -669,6 +630,128 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           )}
         </CardContent>
       )}
+      <ChapterDialog
+        projectId={projectId}
+        segment={chapterTarget}
+        onClose={() => setChapterTarget(null)}
+        onSaved={() => matrix.reload()}
+      />
     </Card>
+  )
+}
+
+interface ChapterDialogProps {
+  projectId: string
+  segment: ProjectSourceSegment | null
+  onClose(): void
+  /** A saved edit changes charCount, so the matrix re-reads. */
+  onSaved(): void
+}
+
+/**
+ * 整章原文的审阅与编辑。表格行塞不下几千字,行内小窗也看不全——按规范走
+ * max-h-[92vh] 弹层:中部滚动、底部操作常驻可达。
+ */
+function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogProps) {
+  const { t, locale } = useI18n()
+  const { api } = useSession()
+  const { can } = usePermission()
+  const [detail, setDetail] = useState<ProjectSourceSegmentDetail | null>(null)
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!segment) return
+    let cancelled = false
+    setLoading(true)
+    setDetail(null)
+    setError(null)
+    getProjectSourceSegment(api, projectId, segment.id)
+      .then(result => {
+        if (cancelled) return
+        setDetail(result.segment)
+        setDraft(result.segment.content)
+      })
+      .catch(err => {
+        if (!cancelled) setError(err instanceof Error ? err.message : t('error.generic'))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, projectId, segment, t])
+
+  async function save() {
+    if (!segment) return
+    setSaving(true)
+    setError(null)
+    try {
+      await updateProjectSourceSegment(api, projectId, segment.id, draft)
+      toast.success(t('bookSplit.chapterSaved'))
+      onSaved()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('error.generic'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const numberFormat = useMemo(() => new Intl.NumberFormat(locale), [locale])
+  const editable = can('project:update')
+
+  return (
+    <Dialog open={segment !== null} onOpenChange={open => !open && !saving && onClose()}>
+      <DialogContent className="flex max-h-[92vh] flex-col sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="truncate">
+            {segment?.title ?? t('bookSplit.unmarked')}
+          </DialogTitle>
+          <DialogDescription>{t('bookSplit.chapterDialogHint')}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1">
+          {loading ? (
+            <p className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
+              <LoaderCircleIcon className="size-4 animate-spin" />
+              {t('common.loading')}
+            </p>
+          ) : (
+            <Textarea
+              aria-label={segment?.title ?? t('bookSplit.viewChapter')}
+              value={draft}
+              onChange={event => setDraft(event.target.value)}
+              disabled={!editable || saving}
+              className="min-h-[55vh] font-mono text-xs"
+            />
+          )}
+        </div>
+        {error && (
+          <p className="text-destructive text-xs">{error}</p>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-muted-foreground text-xs tabular-nums">
+            {t('bookSplit.chapterChars', { count: numberFormat.format(draft.length) })}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
+              {t('common.cancel')}
+            </Button>
+            <GuardedButton
+              action="project:update"
+              size="sm"
+              disabled={loading || saving || detail === null || !draft.trim() || draft === detail?.content}
+              onClick={() => void save()}
+            >
+              {saving ? <LoaderCircleIcon className="animate-spin" /> : null}
+              {saving ? t('common.saving') : t('common.save')}
+            </GuardedButton>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

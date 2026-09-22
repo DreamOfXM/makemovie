@@ -383,6 +383,19 @@ export function getProjectSourceSegment(
   return api<{ segment: ProjectSourceSegmentDetail }>(`/projects/${projectId}/source/segments/${segmentId}`)
 }
 
+/** PATCH /projects/:id/source/segments/:segmentId — fix a chapter's text in place. */
+export function updateProjectSourceSegment(
+  api: ApiClient,
+  projectId: string,
+  segmentId: string,
+  content: string,
+): Promise<{ segment: ProjectSourceSegmentDetail }> {
+  return api<{ segment: ProjectSourceSegmentDetail }>(`/projects/${projectId}/source/segments/${segmentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ content }),
+  })
+}
+
 /** Multipart upload; `request` leaves the content type to the browser so the boundary is set. */
 export function uploadProjectSource(api: ApiClient, projectId: string, file: File): Promise<UploadProjectSourceResult> {
   const body = new FormData()

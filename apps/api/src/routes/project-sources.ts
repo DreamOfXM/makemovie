@@ -248,6 +248,50 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // Chapter text fixes happen here — the matrix row expands into a full-screen
+  // editor, and what it saves must flow into every later apply (a new episode
+  // source version), not mutate versions already materialized.
+  app.patch<{ Params: { projectId: string; segmentId: string }; Body: { content?: string } }>(
+    '/projects/:projectId/source/segments/:segmentId',
+    { preHandler: requirePermission('project:update') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const segment = await app.db.sourceSegment.findFirst({
+        where: { id: request.params.segmentId, version: { projectId: project.id } },
+      })
+      if (!segment) return reply.code(404).send({ error: 'Segment not found' })
+      const content = request.body?.content
+      if (typeof content !== 'string') return reply.code(400).send({ error: 'content is required' })
+      if (!content.trim()) return reply.code(400).send({ error: 'projectSources:empty' })
+      if (content.length > PROJECT_SOURCE_CHAR_LIMIT) return reply.code(400).send({ error: 'projectSources:tooLarge' })
+
+      const updated = await app.db.sourceSegment.update({
+        where: { id: segment.id },
+        data: { content, charCount: content.length },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'projectSource.segmentUpdate',
+        entityType: 'SourceSegment',
+        entityId: segment.id,
+        payload: { projectId: project.id, charCount: updated.charCount },
+      })
+      return {
+        segment: {
+          id: updated.id,
+          index: updated.index,
+          title: updated.title,
+          marked: updated.marked,
+          charCount: updated.charCount,
+          content: updated.content,
+        },
+      }
+    },
+  )
+
   // Move chapters between episodes: one row per segment, the whole map in one
   // request, because "当场改一格" must survive a reload as a single consistent
   // state rather than a stream of per-row patches.
@@ -361,9 +405,11 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         if (project.format === 'FILM' && existing.length > 0) {
           episodeId = existing[0].id
         } else {
-          const title = group[0].title?.trim() || `第 ${nextNumber} 集`
+          // Episodes are numbered artifacts, not chapter digests: a chapter title
+          // on the episode row reads as "EP1 is chapter 1", which it is not —
+          // the chapters it packs are visible one click away in the matrix.
           const created = await app.db.episode.create({
-            data: { projectId: project.id, number: nextNumber, title, targetDurationMs: project.targetDurationMs ?? formatDefaults[fmt].targetDurationMs },
+            data: { projectId: project.id, number: nextNumber, title: `第 ${nextNumber} 集`, targetDurationMs: project.targetDurationMs ?? formatDefaults[fmt].targetDurationMs },
           })
           episodeId = created.id
           nextNumber += 1

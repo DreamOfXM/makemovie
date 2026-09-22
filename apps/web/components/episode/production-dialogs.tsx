@@ -50,14 +50,19 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const [name, setName] = useState('')
   const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [format, setFormat] = useState<ProjectFormat>('short_drama')
-  // Minutes in the box, ms on the wire. Switching formats re-seeds the box with
-  // that format's default; typing over it is the fine-tune the ranges exist for.
-  const [durationMin, setDurationMin] = useState(formatDefaults.short_drama.targetDurationMs / 60_000)
+  // Minutes in the box, ms on the wire — kept as text so the field can be emptied
+  // while typing; the verdict happens on save, not on every keystroke. Switching
+  // formats re-seeds the box with that format's default.
+  const [durationText, setDurationText] = useState(String(formatDefaults.short_drama.targetDurationMs / 60_000))
+  const [durationError, setDurationError] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const durationRange = formatDurationRange[format]
+  const durationMinutes = Number(durationText)
+  const durationEmpty = durationText.trim() === ''
   const durationValid =
-    Number.isFinite(durationMin) && durationMin >= durationRange.minMs / 60_000 && durationMin <= durationRange.maxMs / 60_000
+    !durationEmpty && Number.isFinite(durationMinutes) &&
+    durationMinutes >= durationRange.minMs / 60_000 && durationMinutes <= durationRange.maxMs / 60_000
 
   useEffect(() => {
     if (!state) return
@@ -66,18 +71,28 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     // is a hint the field below can overrule — never a decision made for the user.
     setContentLocale(state.mode === 'rename' ? state.project.contentLocale : locale)
     setFormat('short_drama')
-    setDurationMin(formatDefaults.short_drama.targetDurationMs / 60_000)
+    setDurationText(String(formatDefaults.short_drama.targetDurationMs / 60_000))
+    setDurationError('')
     setError('')
   }, [state, locale])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!state) return
+    // 空值/越界在保存这一刻裁决并落到字段下,而不是悄悄禁用按钮或边打字边抢焦点。
+    if (state.mode === 'create' && !durationValid) {
+      setDurationError(
+        durationEmpty
+          ? t('projects.durationRequired')
+          : t('projects.durationOutOfRange', { min: durationRange.minMs / 60_000, max: durationRange.maxMs / 60_000 }),
+      )
+      return
+    }
     setBusy(true)
     setError('')
     try {
       if (state.mode === 'create') {
-        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMin * 60_000) })
+        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMinutes * 60_000) })
         onDone('create', created.name)
       } else {
         await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
@@ -149,7 +164,8 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
                           checked={selected}
                           onChange={() => {
                             setFormat(item)
-                            setDurationMin(formatDefaults[item].targetDurationMs / 60_000)
+                            setDurationText(String(formatDefaults[item].targetDurationMs / 60_000))
+                            setDurationError('')
                           }}
                           disabled={busy}
                         />
@@ -176,21 +192,27 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
                     id="projectDuration"
                     type="number"
                     inputMode="decimal"
-                    step="0.5"
-                    min={durationRange.minMs / 60_000}
-                    max={durationRange.maxMs / 60_000}
-                    value={durationMin}
-                    onChange={e => setDurationMin(Number(e.target.value))}
+                    /* No native min/max/step: they veto the submit with a browser
+                       bubble before our save-time verdict can name the range. The
+                       range lives in the hint text and in the save-time error. */
+                    step="any"
+                    value={durationText}
+                    onChange={e => {
+                      setDurationText(e.target.value)
+                      setDurationError('')
+                    }}
                     disabled={busy}
+                    aria-invalid={durationError !== ''}
                     className={cn(
                       'border-input bg-background w-28 rounded-md border px-2.5 py-1.5 text-sm',
-                      !durationValid && 'border-destructive focus-visible:ring-destructive',
+                      durationError !== '' && 'border-destructive focus-visible:ring-destructive',
                     )}
                   />
                   <span className="text-muted-foreground text-xs">
                     {t('projects.durationRange', { min: durationRange.minMs / 60_000, max: durationRange.maxMs / 60_000 })}
                   </span>
                 </div>
+                {durationError !== '' && <p className="text-destructive text-xs">{durationError}</p>}
               </div>
             </div>
           )}
@@ -198,7 +220,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !name.trim() || (state?.mode === 'create' && !durationValid)}>
+            <Button type="submit" disabled={busy || !name.trim()}>
               {busy ? t('common.saving') : state?.mode === 'rename' ? t('common.save') : t('common.create')}
             </Button>
           </DialogFooter>

@@ -235,8 +235,11 @@ describe('whole-book upload', () => {
     const splitAgain = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
     expect(splitAgain.statusCode).toBe(200)
     const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
-    const numbers = (episodes.json() as Array<{ number: number }>).map(e => e.number)
-    expect(numbers).toEqual([1, 2, 3, 4])
+    const list = episodes.json() as Array<{ number: number; title: string }>
+    expect(list.map(e => e.number)).toEqual([1, 2, 3, 4])
+    // Episodes are numbered artifacts, not chapter digests: the first chapter's
+    // title must not leak into the episode's own name.
+    expect(list.map(e => e.title)).toEqual(['第 1 集', '第 2 集', '第 3 集', '第 4 集'])
   })
 
   it('auto-split lands a film in its single born episode', async () => {
@@ -430,6 +433,38 @@ describe('allocation and apply', () => {
     expect(foreign.statusCode).toBe(404)
     const unknown = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/does-not-exist`, headers: authHeaders() })
     expect(unknown.statusCode).toBe(404)
+  })
+
+  it('edits one chapter\'s text in place, re-deriving its char count', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string; charCount: number }> }
+
+    const edit = await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/segments/${segments[1].id}`,
+      headers: authHeaders(),
+      payload: { content: '第一章 纸人开眼\n改写后的整章内容，只占一行。' },
+    })
+    expect(edit.statusCode).toBe(200)
+    const saved = (edit.json() as { segment: { content: string; charCount: number } }).segment
+    expect(saved.content).toContain('改写后的整章内容')
+    expect(saved.charCount).toBe(saved.content.length)
+
+    // The matrix reads the new shape without a re-upload.
+    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const row = ((reread.json() as { segments: Array<{ id: string; charCount: number }> }).segments).find(s => s.id === segments[1].id)
+    expect(row?.charCount).toBe(saved.charCount)
+
+    const empty = await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/segments/${segments[1].id}`,
+      headers: authHeaders(),
+      payload: { content: '   ' },
+    })
+    expect(empty.statusCode).toBe(400)
+    expect(empty.json()).toMatchObject({ error: 'projectSources:empty' })
   })
 
   it('rides source statuses on the episode list so rows can flag drafts awaiting review', async () => {
