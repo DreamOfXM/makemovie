@@ -1,6 +1,20 @@
 import type { ContentLocale, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
 
-const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4010'
+function resolveApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL
+  if (configured) return configured
+  // The API sits on the same host as the web app, one port over. Deriving it
+  // from window.location keeps LAN access working — a teammate opening
+  // http://192.168.x.x:3010 must not be sent to their own localhost:4010
+  // ("Failed to fetch" on register). An explicit NEXT_PUBLIC_API_URL still
+  // wins for custom deployments.
+  if (typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)) {
+    return `${window.location.protocol}//${window.location.hostname}:4010`
+  }
+  return 'http://localhost:4010'
+}
+
+const apiBase = resolveApiBase()
 export const API_BASE = apiBase
 
 export const TOKEN_KEY = 'studio-token'

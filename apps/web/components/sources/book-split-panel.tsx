@@ -822,14 +822,20 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                     >
                       {splitMode && (
                         <TableCell>
+                          {/* 已分组的锁定行是"勾选态置灰"(带勾的灰框=已有归属、
+                              不可再选),不是空态置灰(空灰读作坏掉的控件)。 */}
                           <span
                             className={cn(
                               'flex size-4 items-center justify-center rounded border',
-                              isSelected ? 'bg-primary border-primary text-primary-foreground' : lockedInSplit ? 'border-muted-foreground/30 bg-muted' : 'border-input',
+                              lockedInSplit
+                                ? 'border-muted-foreground/40 bg-muted-foreground/30 text-muted-foreground'
+                                : isSelected
+                                  ? 'bg-primary border-primary text-primary-foreground'
+                                  : 'border-input',
                             )}
                             aria-hidden
                           >
-                            {isSelected && <CheckIcon className="size-3" />}
+                            {(isSelected || lockedInSplit) && <CheckIcon className="size-3" />}
                           </span>
                         </TableCell>
                       )}
