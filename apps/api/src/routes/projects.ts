@@ -5,20 +5,41 @@ import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/projects', { preHandler: requirePermission('read') }, async request => {
+  app.get<{ Querystring: { limit?: string; before?: string } }>('/projects', { preHandler: requirePermission('read') }, async (request, reply) => {
     const auth = request.auth!
     // The project list is a lifecycle board, not a name table: each row carries the
     // episode status summary the lifecycle bar renders from, so the list needs no
     // per-project drill-down request to draw itself.
+    //
+    // Without query params the response stays the bare array every existing
+    // consumer reads. Passing limit opts into cursor pagination (id cursor over
+    // the createdAt+id ordering) and answers { projects, nextCursor } instead —
+    // a space with hundreds of projects must not ship as one endless page.
+    const include = {
+      episodes: {
+        orderBy: { number: 'asc' as const },
+        select: { id: true, number: true, title: true, status: true },
+      },
+    }
+    if (request.query?.limit !== undefined) {
+      const limit = Number(request.query.limit)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return reply.code(400).send({ error: 'limit must be an integer between 1 and 100' })
+      }
+      const rows = await app.db.project.findMany({
+        where: { organizationId: auth.organizationId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(request.query.before ? { cursor: { id: request.query.before }, skip: 1 } : {}),
+        take: limit + 1,
+        include,
+      })
+      const nextCursor = rows.length > limit ? rows[limit - 1].id : null
+      return { projects: rows.slice(0, limit), nextCursor }
+    }
     return app.db.project.findMany({
       where: { organizationId: auth.organizationId },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        episodes: {
-          orderBy: { number: 'asc' },
-          select: { id: true, number: true, title: true, status: true },
-        },
-      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include,
     })
   })
 

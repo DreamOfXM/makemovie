@@ -45,6 +45,30 @@ async function createProject(format: string): Promise<string> {
 }
 
 describe('project format', () => {
+  it('paginates the project list on demand without touching the default shape', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      const res = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: `分页测压-${i}`, format: 'series' } })
+      expect(res.statusCode).toBe(201)
+    }
+    const page1 = await env.app.inject({ method: 'GET', url: '/projects?limit=2', headers: authHeaders() })
+    expect(page1.statusCode).toBe(200)
+    const first = page1.json() as { projects: Array<{ id: string }>; nextCursor: string | null }
+    expect(first.projects).toHaveLength(2)
+    expect(first.nextCursor).toBe(first.projects[1].id)
+
+    const page2 = await env.app.inject({ method: 'GET', url: `/projects?limit=2&before=${first.nextCursor}`, headers: authHeaders() })
+    const second = page2.json() as { projects: Array<{ id: string }>; nextCursor: string | null }
+    expect(second.projects.length).toBeGreaterThanOrEqual(1)
+    expect(second.projects.map(p => p.id)).not.toContain(first.projects[0].id)
+
+    const bad = await env.app.inject({ method: 'GET', url: '/projects?limit=0', headers: authHeaders() })
+    expect(bad.statusCode).toBe(400)
+
+    // The no-parameter call keeps the bare array every existing consumer reads.
+    const legacy = await env.app.inject({ method: 'GET', url: '/projects', headers: authHeaders() })
+    expect(Array.isArray(legacy.json())).toBe(true)
+  })
+
   it('locks a film project to the single episode it is born with', async () => {
     const projectId = await createProject('film')
     const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })

@@ -1,15 +1,14 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { ArrowRightIcon, ClapperboardIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { ArrowRightIcon, ClapperboardIcon, LoaderCircleIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import type { WorkflowStatus } from '@studio/domain'
-import { toWorkflowStatus, type Project } from '@/lib/api'
+import { listProjectPage, toWorkflowStatus, type Project } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
-import { useAsync } from '@/lib/use-async'
 import { cn, relativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -69,8 +68,45 @@ export default function ProjectsPage() {
   const { api, organizationId } = useSession()
   const { can } = usePermission()
 
-  const loadProjects = useCallback(() => api<Project[]>('/projects'), [api, organizationId])
-  const projects = useAsync<Project[]>(loadProjects, [])
+  // The board pages through the workspace: a probe-heavy or production space can
+  // hold hundreds of projects, and one endless list stops being a board long
+  // before that. Reload resets to the first page; Load More appends.
+  const PAGE_SIZE = 20
+  const [projects, setProjects] = useState<Project[]>([])
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadFirstPage = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const page = await listProjectPage(api, PAGE_SIZE)
+      setProjects(page.projects)
+      setCursor(page.nextCursor)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : null)
+    } finally {
+      setLoading(false)
+    }
+  }, [api, organizationId])
+
+  const loadMore = useCallback(async () => {
+    if (cursor === null || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const page = await listProjectPage(api, PAGE_SIZE, cursor)
+      setProjects(current => [...current, ...page.projects])
+      setCursor(page.nextCursor)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [api, organizationId, cursor, loadingMore])
+
+  useEffect(() => {
+    void loadFirstPage()
+  }, [loadFirstPage])
 
   const [projectDialog, setProjectDialog] = useState<ProjectDialogState>(null)
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
@@ -80,7 +116,7 @@ export default function ProjectsPage() {
   // carries each episode's status, so this screen never drills into a project to draw itself.
   const queue = useMemo(() => {
     const waiting: { projectId: string; projectName: string; episodeId: string; label: string; status: WorkflowStatus }[] = []
-    for (const project of projects.data) {
+    for (const project of projects) {
       for (const episode of project.episodes ?? []) {
         const status = toWorkflowStatus(episode.status)
         if (!decisionStatuses.includes(status)) continue
@@ -95,7 +131,7 @@ export default function ProjectsPage() {
     }
     // A blocked episode has stopped the line; a review only waits on one click.
     return waiting.sort((a, b) => decisionStatuses.indexOf(b.status) - decisionStatuses.indexOf(a.status))
-  }, [projects.data])
+  }, [projects])
 
   async function removeProject(project: Project) {
     setDeleting(true)
@@ -103,7 +139,7 @@ export default function ProjectsPage() {
       await api(`/projects/${project.id}`, { method: 'DELETE' })
       toast.success(t('projects.deleted', { name: project.name }))
       setDeleteTarget(null)
-      projects.reload()
+      await loadFirstPage()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('error.generic'))
     } finally {
@@ -124,7 +160,7 @@ export default function ProjectsPage() {
         }
       />
 
-      {projects.error && <ErrorState message={projects.error} onRetry={projects.reload} />}
+      {error && <ErrorState message={error} onRetry={() => void loadFirstPage()} />}
 
       {queue.length > 0 && (
         <Card className="border-primary/30 bg-primary/5">
@@ -161,13 +197,13 @@ export default function ProjectsPage() {
           </CardAction>
         </CardHeader>
 
-        {projects.loading && projects.data.length === 0 ? (
+        {loading && projects.length === 0 ? (
           <CardContent className="space-y-4">
             <Skeleton className="h-16" />
             <Skeleton className="h-16" />
             <Skeleton className="h-16" />
           </CardContent>
-        ) : projects.data.length === 0 ? (
+        ) : !loading && projects.length === 0 ? (
           <CardContent>
             <EmptyState
               icon={<ClapperboardIcon />}
@@ -186,7 +222,7 @@ export default function ProjectsPage() {
         ) : (
           <CardContent className="p-0">
             <ul className="divide-border divide-y">
-              {projects.data.map(project => (
+              {projects.map(project => (
                 <ProjectRow
                   key={project.id}
                   project={project}
@@ -198,6 +234,15 @@ export default function ProjectsPage() {
                 />
               ))}
             </ul>
+            {cursor !== null && (
+              <div className="flex items-center justify-center gap-3 py-4">
+                <Button variant="outline" size="sm" disabled={loadingMore} onClick={() => void loadMore()}>
+                  {loadingMore && <LoaderCircleIcon className="animate-spin" />}
+                  {t('projects.loadMore')}
+                </Button>
+                <span className="text-muted-foreground text-xs">{t('projects.loadedCount', { count: projects.length })}</span>
+              </div>
+            )}
           </CardContent>
         )}
       </Card>
@@ -207,7 +252,7 @@ export default function ProjectsPage() {
         onOpenChange={open => !open && setProjectDialog(null)}
         onDone={(mode, name) => {
           setProjectDialog(null)
-          projects.reload()
+          void loadFirstPage()
           toast.success(mode === 'rename' ? t('projects.renamed') : t('projects.created', { name }))
         }}
       />

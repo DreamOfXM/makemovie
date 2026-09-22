@@ -73,7 +73,9 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   const [uploadError, setUploadError] = useState<string | null>(null)
   // Paste door: file pickers do not exist in every embedding (webviews), and
   // text already on the clipboard should not require a round-trip through a file.
-  const [pasteOpen, setPasteOpen] = useState(false)
+  // Open by default — the file button being dead in those webviews must never
+  // hide the working door behind a second click.
+  const [pasteOpen, setPasteOpen] = useState(true)
   const [pasteText, setPasteText] = useState('')
   const [pasting, setPasting] = useState(false)
   // Identifies the mutation in flight: 'apply', 'new-episode', `alloc-<segmentId>`.

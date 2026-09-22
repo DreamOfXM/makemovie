@@ -281,6 +281,19 @@ export function createProject(api: ApiClient, input: CreateProjectInput): Promis
   return api<Project>('/projects', { method: 'POST', body: JSON.stringify(input) })
 }
 
+export interface ProjectPage {
+  projects: Project[]
+  /** Id of the last row when more follow; null on the final page. */
+  nextCursor: string | null
+}
+
+/** Cursor-paginated project list; the bare array endpoint stays for callers that want everything. */
+export function listProjectPage(api: ApiClient, limit: number, before?: string): Promise<ProjectPage> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (before) query.set('before', before)
+  return api<ProjectPage>(`/projects?${query.toString()}`)
+}
+
 export interface CreateEpisodeInput {
   number: number
   title: string
