@@ -50,6 +50,9 @@ importers:
       fastify:
         specifier: ^5.2.1
         version: 5.12.4
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
     devDependencies:
       embedded-postgres:
         specifier: 18.4.0-beta.17
@@ -2059,6 +2062,9 @@ packages:
 
   fastq@1.20.3:
     resolution: {integrity: sha512-XKv5nnLs6nLF71NgiKJLIZFLkPyIEuOselLG7ujZnGrRfQK8HpvY+WqKhAJUAdLomwVHErVS4LfxFlPq0/FTAw==}
+
+  fflate@0.8.3:
+    resolution: {integrity: sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==}
 
   find-my-way@9.9.0:
     resolution: {integrity: sha512-sJsgZ1sQH2UDuowPuMKg8az7Qc8F0jnj+SKkFWU/+T0xcFlgV5skgXOGUqmQzOdmW6ALA7AhJINWx3qFBkbLHA==}
@@ -4245,6 +4251,8 @@ snapshots:
   fastq@1.20.3:
     dependencies:
       reusify: 1.1.0
+
+  fflate@0.8.3: {}
 
   find-my-way@9.9.0:
     dependencies:

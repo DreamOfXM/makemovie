@@ -57,7 +57,7 @@ function episodeDisplayTitle(episode: { number: number; title: string }): string
   return AUTO_EPISODE_TITLE.test(episode.title.trim()) ? '' : episode.title
 }
 
-const TEXT_FILE = /\.(txt|md)$/i
+const TEXT_FILE = /\.(txt|md|zip)$/i
 
 function isChapterFile(file: File): boolean {
   return TEXT_FILE.test(file.name) && !file.name.startsWith('.')
@@ -195,6 +195,10 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           return t('bookSplit.errorEmpty')
         case 'projectSources:badEncoding':
           return t('bookSplit.errorBadEncoding')
+        case 'projectSources:badZip':
+          return t('bookSplit.errorBadZip')
+        case 'projectSources:tooManyFiles':
+          return t('bookSplit.errorTooManyFiles')
         case 'projectSources:duplicateSegment':
           return t('bookSplit.errorDuplicateSegment')
         case 'episodes:filmLockedToOne':
@@ -328,7 +332,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
       <input
         ref={fileInput}
         type="file"
-        accept=".txt,.md"
+        accept=".txt,.md,.zip"
         multiple
         className="hidden"
         onChange={event => {
@@ -768,7 +772,9 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
           </DialogTitle>
           <DialogDescription>{t('bookSplit.chapterDialogHint')}</DialogDescription>
         </DialogHeader>
-        <div className="min-h-0 flex-1">
+        {/* 中部吃满剩余高度且自身可滚:textarea h-full 内部滚动,底部的
+            保存/取消永远在视口内——min-h 会把这块撑破 92vh,按钮被顶出屏幕。 */}
+        <div className="min-h-0 flex-1 overflow-hidden">
           {loading ? (
             <p className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
               <LoaderCircleIcon className="size-4 animate-spin" />
@@ -780,7 +786,7 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
               value={draft}
               onChange={event => setDraft(event.target.value)}
               disabled={!editable || saving}
-              className="min-h-[55vh] font-mono text-xs"
+              className="field-sizing-fixed h-full min-h-0 w-full resize-none font-mono text-xs"
             />
           )}
         </div>

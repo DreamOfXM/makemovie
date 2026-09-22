@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { zipSync } from 'fflate'
 import { startTestEnv, type TestEnv } from './env.js'
 
 let env: TestEnv
@@ -395,6 +396,45 @@ describe('whole-book upload', () => {
       { filename: '第1章 好文件.txt', bytes: Buffer.from('正文。', 'utf8') },
       { filename: '第2章 坏文件.txt', bytes: Buffer.from([0xff, 0xff, 0x41]) },
     ])
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toMatchObject({ error: 'projectSources:badEncoding' })
+  })
+
+  it('accepts a zip of the chapter folder: junk entries skipped, inner path orders the book', async () => {
+    const projectId = await createProject('series')
+    const zip = zipSync({
+      '__MACOSX/._第1章.txt': new Uint8Array([1, 2, 3]),
+      '书/第2章 契约.txt': new TextEncoder().encode('契约的正文。'),
+      '书/.DS_Store': new TextEncoder().encode('junk'),
+      '书/封面.docx': new Uint8Array([0x50, 0x4b]),
+      '书/第1章 开眼.txt': new TextEncoder().encode('第一章 开眼\n开眼的正文。'),
+      '书/第10章 灯下.txt': new TextEncoder().encode('灯下的正文。'),
+      // 子目录不打乱文件名序：番外按自己的章号排
+      '书/番外/第99章 尾声.txt': new TextEncoder().encode('尾声的正文。'),
+    })
+    const res = await uploadBook(projectId, '纸人巷全书.zip', Buffer.from(zip))
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ files: 4, segments: 4 })
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
+    // Filename order: 第2章 before 第10章 before 第99章, subfolder irrelevant.
+    expect(segments.map(segment => segment.title)).toEqual(['第1章 开眼', '第2章 契约', '第10章 灯下', '第99章 尾声'])
+
+    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const content = (detail.json() as { segment: { content: string } }).segment.content
+    expect(content).toContain('开眼的正文。')
+    expect(content).not.toContain('第一章 开眼')
+  })
+
+  it('refuses a corrupt zip and a zip whose entry cannot be decoded', async () => {
+    const projectId = await createProject('series')
+    const corrupt = await uploadBook(projectId, 'book.zip', Buffer.from('PK\x03\x04 not really a zip', 'utf8'))
+    expect(corrupt.statusCode).toBe(400)
+    expect(corrupt.json()).toMatchObject({ error: 'projectSources:badZip' })
+
+    const badEncoding = zipSync({ '第1章 坏编码.txt': new Uint8Array([0xff, 0xff, 0x41]) })
+    const res = await uploadBook(projectId, 'enc.zip', Buffer.from(badEncoding))
     expect(res.statusCode).toBe(400)
     expect(res.json()).toMatchObject({ error: 'projectSources:badEncoding' })
   })

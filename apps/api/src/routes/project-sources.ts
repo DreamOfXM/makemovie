@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { unzipSync } from 'fflate'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { type PrismaClient } from '@studio/db'
 import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT, SCRIPT_CHARS_PER_MINUTE } from '@studio/domain'
@@ -141,9 +142,9 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         const base = path.basename(part.filename)
         const ext = path.extname(base).toLowerCase()
         // OS droppings (`.DS_Store`) must not become chapters; anything that is
-        // not .txt/.md is skipped rather than failing the whole folder.
+        // not .txt/.md/.zip is skipped rather than failing the whole folder.
         if (base.startsWith('.')) continue
-        if (ext !== '.txt' && ext !== '.md') {
+        if (ext !== '.txt' && ext !== '.md' && ext !== '.zip') {
           sawUnsupported = true
           continue
         }
@@ -152,17 +153,58 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       if (collected.length === 0) {
         return reply.code(400).send({
           error: sawUnsupported
-            ? 'only .txt and .md files are supported (.docx is planned)'
+            ? 'only .txt, .md and .zip files are supported (.docx is planned)'
             : 'file is required',
         })
       }
 
+      // A zip is the universal door for a folder of chapter files: every host
+      // that can hand the app ONE file can hand it a zip. Entries are ordered
+      // by FILENAME (chapter files carry their numbers there) — folder names
+      // must not reorder the book; macOS packaging junk (__MACOSX/, .DS_Store)
+      // and non-text entries are skipped.
       const chapters: Array<{ filename: string; content: string }> = []
+      let unzippedBytes = 0
+      const pushChapter = (filename: string, buffer: Buffer) => {
+        const content = decodeBook(buffer)
+        if (content === null) return 'badEncoding' as const
+        if (content.trim().length === 0) return undefined
+        chapters.push({ filename, content })
+        return undefined
+      }
       for (const part of collected) {
-        const content = decodeBook(part.buffer)
-        if (content === null) return reply.code(400).send({ error: 'projectSources:badEncoding' })
-        if (content.trim().length === 0) continue
-        chapters.push({ filename: part.filename, content })
+        if (part.filename.toLowerCase().endsWith('.zip')) {
+          let entries: Record<string, Uint8Array>
+          try {
+            // unzipSync materializes every entry before we can cap the total —
+            // the request-size ceiling (multipart fileSize, 4 MB per part) is
+            // what bounds the compressed input; the byte cap below bounds the
+            // accumulated output as soon as entries are enumerable.
+            entries = unzipSync(new Uint8Array(part.buffer))
+          } catch {
+            return reply.code(400).send({ error: 'projectSources:badZip' })
+          }
+          for (const [rawPath, data] of Object.entries(entries)) {
+            const inner = rawPath.replace(/\\/g, '/')
+            if (inner.endsWith('/') || inner.split('/').includes('__MACOSX')) continue
+            const base = path.posix.basename(inner)
+            if (base.startsWith('.')) continue
+            const ext = path.posix.extname(base).toLowerCase()
+            if (ext !== '.txt' && ext !== '.md') continue
+            unzippedBytes += data.byteLength
+            if (unzippedBytes > PROJECT_SOURCE_CHAR_LIMIT * 4) {
+              return reply.code(400).send({ error: 'projectSources:tooLarge' })
+            }
+            const problem = pushChapter(base, Buffer.from(data))
+            if (problem) return reply.code(400).send({ error: `projectSources:${problem}` })
+          }
+          continue
+        }
+        const problem = pushChapter(part.filename, part.buffer)
+        if (problem) return reply.code(400).send({ error: `projectSources:${problem}` })
+      }
+      if (chapters.length > 500) {
+        return reply.code(400).send({ error: 'projectSources:tooManyFiles' })
       }
 
       if (chapters.length <= 1) {
