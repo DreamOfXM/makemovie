@@ -547,20 +547,27 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   return (
                     <TableRow key={segment.id}>
                       <TableCell className="max-w-0">
-                        {/* 点章节名开整章弹窗。向右的箭头=「里面还有内容」,内容在弹窗里展开——
-                            之前收起态用向下箭头、展开态转向上,方向和内容出现的位置对不上。 */}
+                        {/* 整块标题+摘要都可点开全文;标题下带一行正文摘要——
+                            只看标题和数字的表格读不了内容(用户实测原话)。 */}
                         <button
                           type="button"
-                          className="hover:text-primary flex min-w-0 items-center gap-1 text-left transition-colors"
+                          className="hover:bg-muted/40 -mx-1.5 flex min-w-0 flex-col items-start gap-0.5 rounded-md px-1.5 py-1 text-left transition-colors"
                           aria-label={`${segment.title ?? t('bookSplit.unmarked')} · ${t('bookSplit.viewChapter')}`}
                           onClick={() => setChapterTarget(segment)}
                         >
-                          <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
-                          {/* 标题上限必须显式给:表格自动布局里 max-w-0 的单元格压不住
-                              一整行超长章名,整张表会被撑出屏。 */}
-                          <span className="max-w-md truncate font-medium">
-                            {segment.title ?? <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>}
+                          <span className="flex min-w-0 items-center gap-1 self-stretch">
+                            <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
+                            {/* 标题上限必须显式给:表格自动布局里 max-w-0 的单元格压不住
+                                一整行超长章名,整张表会被撑出屏。 */}
+                            <span className="max-w-md truncate font-medium">
+                              {segment.title ?? <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>}
+                            </span>
                           </span>
+                          {segment.preview && (
+                            <span className="text-muted-foreground ml-4.5 line-clamp-1 max-w-md text-xs font-normal">
+                              {segment.preview}
+                            </span>
+                          )}
                         </button>
                       </TableCell>
                       <TableCell className="text-muted-foreground text-right font-mono text-xs">

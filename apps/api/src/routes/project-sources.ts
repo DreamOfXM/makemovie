@@ -15,6 +15,9 @@ interface SegmentDto {
   marked: boolean
   charCount: number
   episodeId: string | null
+  /** First ~120 content chars so the matrix can show what the chapter actually
+   *  says — a table of titles and numbers cannot be "read". */
+  preview: string
 }
 
 interface EpisodeLiteDto {
@@ -30,6 +33,15 @@ async function findProjectInOrg(db: PrismaClient, projectId: string, organizatio
 
 function checksumOf(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+/** The one-line excerpt the matrix shows under a chapter's title: the opening
+ *  marker line is dropped (the title already says it), blank lines collapse,
+ *  and 120 chars is enough to recognize the chapter at a glance. */
+function previewOf(content: string): string {
+  const lines = content.replace(/^\uFEFF/, '').split('\n').filter(line => line.trim() !== '')
+  const start = lines.length > 0 && isChapterMarkerLine(lines[0].trim()) ? 1 : 0
+  return lines.slice(start).join(' ').replace(/\s+/g, ' ').trim().slice(0, 120)
 }
 
 /**
@@ -297,6 +309,7 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         marked: segment.marked,
         charCount: segment.charCount,
         episodeId: segment.allocation?.episodeId ?? null,
+        preview: previewOf(segment.content),
       }))
       const episodeDtos: EpisodeLiteDto[] = episodes.map(episode => ({
         id: episode.id,

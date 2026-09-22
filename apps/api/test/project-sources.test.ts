@@ -572,7 +572,10 @@ describe('allocation and apply', () => {
     }
 
     const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
-    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string; number: number }> }
+    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string; title: string | null; preview: string }>; episodes: Array<{ id: string; number: number }> }
+    // The excerpt reads as content (no marker line), not just another number column.
+    expect(segments[1].preview).toContain('夜里有风')
+    expect(segments[1].preview.startsWith('第一章')).toBe(false)
     const ep1 = episodes.find(e => e.number === 1)!.id
     const ep2 = episodes.find(e => e.number === 2)!.id
 

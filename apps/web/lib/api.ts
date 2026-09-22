@@ -331,6 +331,8 @@ export interface ProjectSourceSegment {
   charCount: number
   /** The episode this segment feeds; null = unassigned. */
   episodeId: string | null
+  /** Opening ~120 chars so the matrix shows what the chapter says, not just a number. */
+  preview: string
 }
 
 /** Episodes the book can be distributed into, trimmed to what the matrix needs. */
