@@ -197,6 +197,8 @@ export interface Episode {
   createdAt: string
   updatedAt: string
   storyboards?: Storyboard[]
+  /** Statuses of this episode's source versions, so lists can flag drafts awaiting review. */
+  sourceVersions?: { status: string }[]
 }
 
 export interface StoryboardAssetLink {
@@ -361,6 +363,24 @@ export interface ApplyProjectSourceResultItem {
   version: number | null
   /** True when the episode's latest source already had this exact content (idempotent re-apply). */
   skipped: boolean
+}
+
+/** GET /projects/:id/source/segments/:segmentId — one chapter's full text. */
+export interface ProjectSourceSegmentDetail {
+  id: string
+  index: number
+  title: string | null
+  marked: boolean
+  charCount: number
+  content: string
+}
+
+export function getProjectSourceSegment(
+  api: ApiClient,
+  projectId: string,
+  segmentId: string,
+): Promise<{ segment: ProjectSourceSegmentDetail }> {
+  return api<{ segment: ProjectSourceSegmentDetail }>(`/projects/${projectId}/source/segments/${segmentId}`)
 }
 
 /** Multipart upload; `request` leaves the content type to the browser so the boundary is set. */

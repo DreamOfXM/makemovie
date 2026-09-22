@@ -241,8 +241,13 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       return app.db.episode.findMany({
         where: { projectId: project.id },
         // Superseded shots are history, so an episode's shot list — and the count the
-        // console shows next to it — describes the breakdown in use.
-        include: { storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] } },
+        // console shows next to it — describes the breakdown in use. Source statuses
+        // ride along so the project page can flag "draft source awaiting review"
+        // without a per-episode round trip.
+        include: {
+          storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] },
+          sourceVersions: { select: { status: true } },
+        },
         orderBy: { number: 'asc' },
       })
     },

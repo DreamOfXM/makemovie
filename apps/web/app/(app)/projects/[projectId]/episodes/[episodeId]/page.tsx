@@ -60,7 +60,10 @@ export default function EpisodePage() {
   const params = useParams<{ projectId: string; episodeId: string }>()
   const { projectId, episodeId } = params
 
-  const [view, setView] = useState<EpisodeTab>('board')
+  // 标签的默认值跟着剧集所处阶段走：还没有分镜时，总览页没有可看的东西，
+  // 要办的事（审批原文、生成剧本）都在流程页——整本书拆分后第一次进集必须
+  // 直接落在那里，否则「生成分集原文」的产物等于被藏了两层。
+  const [pickedView, setPickedView] = useState<EpisodeTab | null>(null)
   const [flowScrollTarget, setFlowScrollTarget] = useState<string | null>(null)
   const [storyboardDialog, setStoryboardDialog] = useState<StoryboardDialogState>(null)
   const [statusTarget, setStatusTarget] = useState<Storyboard | null>(null)
@@ -69,8 +72,10 @@ export default function EpisodePage() {
   const episodes = useAsync<Episode[]>(loadEpisodes, [])
   const episode = episodes.data.find(item => item.id === episodeId) ?? null
 
+  const view: EpisodeTab = pickedView ?? (episode && (episode.storyboards?.length ?? 0) === 0 ? 'flow' : 'board')
+
   useEffect(() => {
-    setView('board')
+    setPickedView(null)
     setFlowScrollTarget(null)
   }, [episodeId])
 
@@ -255,7 +260,7 @@ export default function EpisodePage() {
             </p>
           )}
         </div>
-        <EpisodeTabs value={view} onChange={setView} />
+        <EpisodeTabs value={view} onChange={setPickedView} />
       </div>
 
       {episodes.error && <ErrorState message={episodes.error} onRetry={episodes.reload} />}
@@ -264,11 +269,11 @@ export default function EpisodePage() {
         <ShotboardView
           episodeId={episodeId}
           onOpenShot={shotId => {
-            setView('flow')
+            setPickedView('flow')
             setFlowScrollTarget(`shot-${shotId}`)
           }}
           onReviewAssets={() => {
-            setView('flow')
+            setPickedView('flow')
             setFlowScrollTarget('step-assets')
           }}
         />
@@ -281,7 +286,7 @@ export default function EpisodePage() {
           </div>
           <div className="min-w-0 space-y-8">
             <div id="step-source" className="scroll-mt-20">
-              <SourcesPanel episodeId={episodeId} onScriptApproved={refreshAfterAdvance} />
+              <SourcesPanel episodeId={episodeId} projectId={projectId} onScriptApproved={refreshAfterAdvance} />
             </div>
             <div id="step-assets" className="scroll-mt-20">
               <AssetsPanel episodeId={episodeId} projectId={projectId} />

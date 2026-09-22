@@ -221,6 +221,33 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // One chapter's full text. The matrix reads shapes, not words — a whole book in
+  // the list payload would be megabytes — so the content the "did it split right?"
+  // check needs is fetched here, one segment at a time, when a row is expanded.
+  app.get<{ Params: { projectId: string; segmentId: string } }>(
+    '/projects/:projectId/source/segments/:segmentId',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const segment = await app.db.sourceSegment.findFirst({
+        where: { id: request.params.segmentId, version: { projectId: project.id } },
+      })
+      if (!segment) return reply.code(404).send({ error: 'Segment not found' })
+      return {
+        segment: {
+          id: segment.id,
+          index: segment.index,
+          title: segment.title,
+          marked: segment.marked,
+          charCount: segment.charCount,
+          content: segment.content,
+        },
+      }
+    },
+  )
+
   // Move chapters between episodes: one row per segment, the whole map in one
   // request, because "当场改一格" must survive a reload as a single consistent
   // state rather than a stream of per-row patches.

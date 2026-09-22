@@ -407,4 +407,53 @@ describe('allocation and apply', () => {
     expect(source.version.content).toContain('楔子')
     expect(source.version.content).toContain('第二章 契约')
   })
+
+  it('serves one chapter\'s full text for row expansion, scoped to the owning org', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null; charCount: number }> }
+    // The matrix reads shapes only; the detail read is where the words live.
+    expect(segments[1]).not.toHaveProperty('content')
+
+    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[1].id}`, headers: authHeaders() })
+    expect(detail.statusCode).toBe(200)
+    const segment = (detail.json() as { segment: { title: string | null; content: string; charCount: number } }).segment
+    expect(segment.title).toBe('第一章 纸人开眼')
+    expect(segment.content).toContain('夜里有风，纸人睁了眼。')
+    expect(segment.content).not.toContain('第二章')
+    expect(segment.charCount).toBe(segments[1].charCount)
+
+    // A segment of another org's project is not addressable, and unknown ids 404.
+    const outsider = (await env.register('outsider@studio.test', 'Outsider Org')).token
+    const foreign = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[1].id}`, headers: env.authHeaders(outsider) })
+    expect(foreign.statusCode).toBe(404)
+    const unknown = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/does-not-exist`, headers: authHeaders() })
+    expect(unknown.statusCode).toBe(404)
+  })
+
+  it('rides source statuses on the episode list so rows can flag drafts awaiting review', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
+
+    // Before apply: the episode exists but owes no source.
+    const empty = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    expect(((empty.json() as Array<{ sourceVersions: Array<{ status: string }> }>)[0]).sourceVersions).toEqual([])
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string }> }
+    await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/allocations`,
+      headers: authHeaders(),
+      payload: { allocations: segments.map(segment => ({ segmentId: segment.id, episodeId: episodes[0].id })) },
+    })
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })).statusCode).toBe(200)
+
+    // After apply: the draft the project page must flag is right there in the list read.
+    const list = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const statuses = ((list.json() as Array<{ sourceVersions: Array<{ status: string }> }>)[0]).sourceVersions
+    expect(statuses).toEqual([{ status: 'DRAFT' }])
+  })
 })

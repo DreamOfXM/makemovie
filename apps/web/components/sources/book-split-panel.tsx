@@ -1,10 +1,12 @@
 'use client'
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
 import { toast } from 'sonner'
 import {
   BookCheckIcon,
   BookTextIcon,
+  ChevronDownIcon,
   CircleAlertIcon,
   FileUpIcon,
   LoaderCircleIcon,
@@ -16,6 +18,7 @@ import {
   applyProjectSource,
   autoSplitSource,
   getProjectSource,
+  getProjectSourceSegment,
   pasteProjectSource,
   toProjectFormat,
   updateSourceAllocations,
@@ -23,6 +26,7 @@ import {
   type ApplyProjectSourceResultItem,
   type ProjectSourceResponse,
   type ProjectSourceSegment,
+  type ProjectSourceSegmentDetail,
 } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -84,6 +88,30 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   const [busy, setBusy] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<{ items: ApplyProjectSourceResultItem[]; pendingSegments: number } | null>(null)
   const [actionError, setActionError] = useState<{ message: string; retry?(): void } | null>(null)
+  // Chapter inspection: which segment row is expanded and the full text it fetched.
+  // The matrix deliberately carries no content — it is fetched per expanded row.
+  const [openSegment, setOpenSegment] = useState<string | null>(null)
+  const [segmentDetail, setSegmentDetail] = useState<ProjectSourceSegmentDetail | null>(null)
+  const [segmentLoading, setSegmentLoading] = useState(false)
+
+  async function toggleSegment(segment: ProjectSourceSegment) {
+    setSegmentDetail(null)
+    if (openSegment === segment.id) {
+      setOpenSegment(null)
+      return
+    }
+    setOpenSegment(segment.id)
+    setSegmentLoading(true)
+    try {
+      const result = await getProjectSourceSegment(api, projectId, segment.id)
+      setSegmentDetail(result.segment)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      setOpenSegment(null)
+    } finally {
+      setSegmentLoading(false)
+    }
+  }
 
   const loadMatrix = useCallback(
     () => getProjectSource(api, projectId),
@@ -456,14 +484,31 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                 {matrix.data.segments.map(segment => {
                   const rowBusy = busy === `alloc-${segment.id}`
                   return (
-                    <TableRow key={segment.id}>
-                      <TableCell className="max-w-0">
-                        <p className="truncate font-medium">
-                          {segment.title ?? (
-                            <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>
-                          )}
-                        </p>
-                      </TableCell>
+                    <Fragment key={segment.id}>
+                      <TableRow>
+                        <TableCell className="max-w-0">
+                          <div className="flex items-center gap-1">
+                            {/* 展开核对章节内容:切分对不对要看原文,不能只看字数。 */}
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={openSegment === segment.id ? t('bookSplit.hideChapter') : t('bookSplit.viewChapter')}
+                              onClick={() => void toggleSegment(segment)}
+                            >
+                              <ChevronDownIcon
+                                className={cn(
+                                  'text-muted-foreground size-3.5 transition-transform',
+                                  openSegment === segment.id && 'rotate-180',
+                                )}
+                              />
+                            </Button>
+                            <p className="truncate font-medium">
+                              {segment.title ?? (
+                                <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>
+                              )}
+                            </p>
+                          </div>
+                        </TableCell>
                       <TableCell className="text-muted-foreground text-right font-mono text-xs">
                         {fmt(segment.charCount)}
                       </TableCell>
@@ -498,6 +543,25 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                         </div>
                       </TableCell>
                     </TableRow>
+                    {openSegment === segment.id && (
+                      <TableRow className="hover:bg-transparent">
+                        <TableCell colSpan={4} className="bg-muted/40 py-3">
+                          {segmentLoading ? (
+                            <p className="text-muted-foreground text-xs">{t('common.loading')}</p>
+                          ) : segmentDetail === null ? null : (
+                            <div className="space-y-1.5">
+                              <p className="text-muted-foreground text-xs font-medium">
+                                {segmentDetail.title ?? t('bookSplit.unmarked')} · {t('bookSplit.chapterChars', { count: fmt(segmentDetail.charCount) })}
+                              </p>
+                              <pre className="bg-background max-h-72 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">
+                                {segmentDetail.content}
+                              </pre>
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
                   )
                 })}
               </TableBody>
@@ -582,13 +646,18 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                   skipped: applyResult.items.filter(item => item.skipped).length,
                 })}
               </p>
-              <p className="text-muted-foreground">
-                {applyResult.items
-                  .map(item =>
-                    t('bookSplit.applyResultItem', { number: item.number, version: item.version ?? '—' }) +
-                    (item.skipped ? t('bookSplit.applyResultSkipped') : ''),
-                  )
-                  .join(' · ')}
+              <p className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1">
+                {applyResult.items.map(item => (
+                  <span key={item.episodeId} className="inline-flex items-center gap-1">
+                    <Link
+                      href={`/projects/${projectId}/episodes/${item.episodeId}`}
+                      className="text-primary hover:underline"
+                    >
+                      {t('bookSplit.applyResultItem', { number: item.number, version: item.version ?? '—' })}
+                    </Link>
+                    {item.skipped && <span className="text-muted-foreground text-xs">{t('bookSplit.applyResultSkipped')}</span>}
+                  </span>
+                ))}
               </p>
               {applyResult.pendingSegments > 0 && (
                 <p className="text-warning">

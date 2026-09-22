@@ -1,8 +1,9 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import Link from 'next/link'
 import { toast } from 'sonner'
-import { ArchiveIcon, BookTextIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, CircleHelpIcon, FileTextIcon, LoaderCircleIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, SparklesIcon, Trash2Icon, UploadIcon } from 'lucide-react'
+import { ArchiveIcon, BookTextIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, CircleHelpIcon, FileTextIcon, KeyboardIcon, LoaderCircleIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, SparklesIcon, Trash2Icon, UploadIcon } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -82,11 +83,13 @@ function toneFor(status: string): string {
 
 interface SourcesPanelProps {
   episodeId: string | null
+  /** The project page hosts the whole-book split; the empty state points back to it. */
+  projectId?: string
   /** Approval is what releases the rest of the chain, so the page re-reads the panels it advanced. */
   onScriptApproved?: () => void
 }
 
-export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps) {
+export function SourcesPanel({ episodeId, projectId, onScriptApproved }: SourcesPanelProps) {
   const { t } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -102,6 +105,9 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
   const [deleteConfirm, setDeleteConfirm] = useState<{ kind: 'script' | 'source'; version: VersionSummary } | null>(null)
   const [showArchivedScripts, setShowArchivedScripts] = useState(false)
   const [showArchivedSources, setShowArchivedSources] = useState(false)
+  // 手工录入是次路径:整本书拆分生成的原文直接落在版本表里,粘贴框只在
+  // 本集一条原文都没有时常驻,否则收成按钮,把版面让给审批这件事。
+  const [manualOpen, setManualOpen] = useState(false)
 
   const loadSourceVersions = useCallback(
     () =>
@@ -162,6 +168,11 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
     () => sourceVersions.data.filter(version => version.archivedAt),
     [sourceVersions.data],
   )
+  // 未归档的原文版本:决定手工录入框是常驻(一条都没有)还是收成按钮。
+  const activeSources = useMemo(
+    () => sourceVersions.data.filter(version => !version.archivedAt),
+    [sourceVersions.data],
+  )
 
   const reloadSources = sourceVersions.reload
   const reloadScripts = scriptVersions.reload
@@ -181,6 +192,7 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
       })
       toast.success(t('sources.uploaded', { version: created.version.version }))
       setContent('')
+      setManualOpen(false)
       reloadAll()
     } catch (error) {
       if (error instanceof ApiError && error.message === 'sources:duplicate') {
@@ -346,33 +358,59 @@ export function SourcesPanel({ episodeId, onScriptApproved }: SourcesPanelProps)
         </CardContent>
       ) : (
         <CardContent className="space-y-4">
-          <div className="space-y-3">
-            <Field label={t('sources.uploadLabel')} htmlFor="sourceContent" error={uploadError ?? undefined}>
-              <Textarea
-                id="sourceContent"
-                rows={5}
-                value={content}
-                onChange={event => setContent(event.target.value)}
-                placeholder={t('sources.uploadPlaceholder')}
-                aria-invalid={uploadError !== null}
-              />
-              {/* The ceiling exists only server-side; a live counter keeps it
-                  from being discovered by hitting the rejection. */}
-              <p className="text-muted-foreground text-xs">{t('sources.charCount', { count: content.length, limit: 200_000 })}</p>
-              <p className="text-muted-foreground text-xs">{t('sources.uploadDisabledHint')}</p>
-            </Field>
-            <div className="flex justify-end">
-              <GuardedButton
-                action="episode:write"
-                size="sm"
-                disabled={uploading || !content.trim()}
-                onClick={() => void upload()}
-              >
-                <UploadIcon />
-                {uploading ? t('sources.uploading') : t('sources.upload')}
+          {activeSources.length > 0 && !manualOpen ? (
+            <div className="flex justify-end gap-1.5">
+              <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setManualOpen(true)}>
+                <KeyboardIcon />
+                {t('sources.manualAdd')}
               </GuardedButton>
+              <HelpHint text={t('sources.manualAddHint')} />
             </div>
-          </div>
+          ) : (
+            <div className="space-y-3">
+              {activeSources.length > 0 && (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-muted-foreground text-xs">{t('sources.manualAddHint')}</p>
+                  <Button variant="ghost" size="sm" disabled={uploading} onClick={() => { setManualOpen(false); setUploadError(null) }}>
+                    {t('common.collapse')}
+                  </Button>
+                </div>
+              )}
+              {activeSources.length === 0 && projectId && (
+                <p className="text-muted-foreground text-xs">
+                  {t('sources.noSourcesGuidance')}{' '}
+                  <Link href={`/projects/${projectId}`} className="text-primary hover:underline">
+                    {t('sources.goBookSplit')}
+                  </Link>
+                </p>
+              )}
+              <Field label={t('sources.uploadLabel')} htmlFor="sourceContent" error={uploadError ?? undefined}>
+                <Textarea
+                  id="sourceContent"
+                  rows={5}
+                  value={content}
+                  onChange={event => setContent(event.target.value)}
+                  placeholder={t('sources.uploadPlaceholder')}
+                  aria-invalid={uploadError !== null}
+                />
+                {/* The ceiling exists only server-side; a live counter keeps it
+                    from being discovered by hitting the rejection. */}
+                <p className="text-muted-foreground text-xs">{t('sources.charCount', { count: content.length, limit: 200_000 })}</p>
+                <p className="text-muted-foreground text-xs">{t('sources.uploadDisabledHint')}</p>
+              </Field>
+              <div className="flex justify-end">
+                <GuardedButton
+                  action="episode:write"
+                  size="sm"
+                  disabled={uploading || !content.trim()}
+                  onClick={() => void upload()}
+                >
+                  <UploadIcon />
+                  {uploading ? t('sources.uploading') : t('sources.upload')}
+                </GuardedButton>
+              </div>
+            </div>
+          )}
 
           <VersionTable
             title={t('sources.sourceVersions')}

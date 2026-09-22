@@ -196,6 +196,9 @@ export default function ProjectPage() {
                 .sort((a, b) => a.number - b.number)
                 .map(episode => {
                   const status = toWorkflowStatus(episode.status)
+                  // 拆分生成的原文先以草稿落在集内,等人审批——列表行必须把这
+                  // 件待办亮出来,否则"生成分集原文"的结果要靠用户自己猜在哪。
+                  const pendingSources = episode.sourceVersions?.filter(version => version.status === 'DRAFT').length ?? 0
                   return (
                     <TableRow key={episode.id}>
                       <TableCell className="text-muted-foreground font-mono">{episode.number}</TableCell>
@@ -206,6 +209,11 @@ export default function ProjectPage() {
                         >
                           {episode.title}
                         </Link>
+                        {pendingSources > 0 && (
+                          <Badge variant="warning" className="ml-2 font-normal">
+                            {t('projects.pendingSource', { count: pendingSources })}
+                          </Badge>
+                        )}
                         <span className="text-subtle-foreground ml-2 text-xs">{relativeTime(episode.updatedAt, locale)}</span>
                       </TableCell>
                       <TableCell>
