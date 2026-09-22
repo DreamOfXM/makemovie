@@ -6,6 +6,8 @@ import { useParams } from 'next/navigation'
 import { toast } from 'sonner'
 import { ArrowRightIcon, FilmIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import {
+  ApiError,
+  deleteEpisode,
   isLiveStoryboard,
   toProjectFormat,
   toWorkflowStatus,
@@ -62,6 +64,30 @@ export default function ProjectPage() {
   const [episodeDialogOpen, setEpisodeDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // 页面侧的建集/删集要同时反哺拆分矩阵（下拉的集列表、分配行）——面板自己
+  // 轮不到这些动作，靠这个令牌通知它重读。
+  const [splitRefreshToken, setSplitRefreshToken] = useState(0)
+  const [episodeDeleteTarget, setEpisodeDeleteTarget] = useState<Episode | null>(null)
+  const [episodeDeleting, setEpisodeDeleting] = useState(false)
+
+  async function removeEpisode(target: Episode) {
+    setEpisodeDeleting(true)
+    try {
+      await deleteEpisode(api, projectId, target.id)
+      toast.success(t('projects.episodeDeleted', { number: target.number }))
+      setEpisodeDeleteTarget(null)
+      episodes.reload()
+      setSplitRefreshToken(token => token + 1)
+    } catch (error) {
+      if (error instanceof ApiError && error.message === 'episodes:notDeletable') {
+        toast.error(t('projects.episodeNotDeletable'))
+      } else {
+        toast.error(error instanceof Error ? error.message : t('error.generic'))
+      }
+    } finally {
+      setEpisodeDeleting(false)
+    }
+  }
 
   const nextEpisodeNumber = useMemo(
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
@@ -129,7 +155,7 @@ export default function ProjectPage() {
 
       {/* Intake first, result below: uploading and allocating chapters is what
           populates the episode table underneath. */}
-      <BookSplitPanel projectId={projectId} onEpisodesChanged={episodes.reload} />
+      <BookSplitPanel projectId={projectId} refreshToken={splitRefreshToken} onEpisodesChanged={episodes.reload} />
 
       <Card>
         <CardHeader className="border-b [.border-b]:pb-4">
@@ -222,12 +248,23 @@ export default function ProjectPage() {
                       </TableCell>
                       <TableCell className="text-subtle-foreground">{formatDateTime(episode.createdAt, locale)}</TableCell>
                       <TableCell className="text-right">
-                        <Button asChild variant="ghost" size="sm">
-                          <Link href={`/projects/${projectId}/episodes/${episode.id}`}>
-                            <span className="sr-only">{t('projects.openEpisode')}</span>
-                            <ArrowRightIcon className={cn('size-4')} />
-                          </Link>
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button asChild variant="ghost" size="sm">
+                            <Link href={`/projects/${projectId}/episodes/${episode.id}`}>
+                              <span className="sr-only">{t('projects.openEpisode')}</span>
+                              <ArrowRightIcon className={cn('size-4')} />
+                            </Link>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => setEpisodeDeleteTarget(episode)}
+                          >
+                            <span className="sr-only">{t('projects.deleteEpisodeAction')}</span>
+                            <Trash2Icon />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   )
@@ -255,9 +292,33 @@ export default function ProjectPage() {
         onDone={number => {
           setEpisodeDialogOpen(false)
           episodes.reload()
+          // 新集也要进拆分矩阵的下拉——面板自己轮不到这个动作。
+          setSplitRefreshToken(token => token + 1)
           toast.success(t('projects.episodeCreated', { number }))
         }}
       />
+
+      <AlertDialog open={episodeDeleteTarget !== null} onOpenChange={open => !open && setEpisodeDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('projects.deleteEpisodeTitle', { number: episodeDeleteTarget?.number ?? 0 })}</AlertDialogTitle>
+            <AlertDialogDescription>{t('projects.deleteEpisodeBody')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={episodeDeleting}>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={episodeDeleting}
+              onClick={event => {
+                event.preventDefault()
+                if (episodeDeleteTarget) void removeEpisode(episodeDeleteTarget)
+              }}
+            >
+              {episodeDeleting ? t('common.loading') : t('common.delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={open => !open && setDeleteTarget(null)}>
         <AlertDialogContent>

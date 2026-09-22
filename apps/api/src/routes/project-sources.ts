@@ -392,6 +392,34 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // Removing a chapter is the explicit edit path for junk segments (copyright
+  // pages, announcements): the segment and its allocation go, later applies
+  // simply never see it. Versions already materialized into episodes are
+  // untouched — they are history.
+  app.delete<{ Params: { projectId: string; segmentId: string } }>(
+    '/projects/:projectId/source/segments/:segmentId',
+    { preHandler: requirePermission('project:update') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const segment = await app.db.sourceSegment.findFirst({
+        where: { id: request.params.segmentId, version: { projectId: project.id } },
+      })
+      if (!segment) return reply.code(404).send({ error: 'Segment not found' })
+      await app.db.sourceSegment.delete({ where: { id: segment.id } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'projectSource.segmentDelete',
+        entityType: 'SourceSegment',
+        entityId: segment.id,
+        payload: { projectId: project.id, title: segment.title, charCount: segment.charCount },
+      })
+      return reply.code(204).send()
+    },
+  )
+
   // Move chapters between episodes: one row per segment, the whole map in one
   // request, because "当场改一格" must survive a reload as a single consistent
   // state rather than a stream of per-row patches.

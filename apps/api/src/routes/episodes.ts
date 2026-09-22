@@ -253,6 +253,44 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // An episode is deletable while it is still a shell: text drafts (source,
+  // script) cascade away, but anything generated, composed or delivered — work
+  // that was paid for — refuses the delete instead of silently dying with it.
+  app.delete<{ Params: { projectId: string; episodeId: string } }>(
+    '/projects/:projectId/episodes/:episodeId',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const episode = await app.db.episode.findFirst({ where: { id: request.params.episodeId, projectId: project.id } })
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+
+      const [storyboards, batches, compositions, deliveries] = await Promise.all([
+        app.db.storyboard.count({ where: { episodeId: episode.id } }),
+        app.db.generationBatch.count({ where: { episodeId: episode.id } }),
+        app.db.composition.count({ where: { episodeId: episode.id } }),
+        app.db.delivery.count({ where: { episodeId: episode.id } }),
+      ])
+      if (storyboards > 0 || batches > 0 || compositions > 0 || deliveries > 0) {
+        return reply.code(409).send({ error: 'episodes:notDeletable' })
+      }
+
+      // Chapter allocations pointing here cascade away — those segments fall
+      // back to "unassigned" in the split matrix.
+      await app.db.episode.delete({ where: { id: episode.id } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'episode.delete',
+        entityType: 'Episode',
+        entityId: episode.id,
+        payload: { projectId: project.id, number: episode.number, title: episode.title },
+      })
+      return reply.code(204).send()
+    },
+  )
+
   app.post<{
     Params: { episodeId: string }
     Body: { number?: number; title?: string; durationMs?: number; description?: string; dialogue?: string; speaker?: string; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string; scriptVersionId?: string }

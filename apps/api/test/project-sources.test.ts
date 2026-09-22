@@ -441,6 +441,7 @@ describe('whole-book upload', () => {
 
   it('decodes GBK-named zip entries — the Windows-tool filename case', async () => {
     const projectId = await createProject('series')
+
     const zip = buildStoredZip([
       { nameBytes: Buffer.concat([gbkName('第1章 开眼'), Buffer.from('.txt')]), data: Buffer.from('开眼的正文。', 'utf8') },
       { nameBytes: Buffer.concat([gbkName('第2章 灯下'), Buffer.from('.txt')]), data: Buffer.from('灯下的正文。', 'utf8') },
@@ -452,6 +453,58 @@ describe('whole-book upload', () => {
     const { segments } = matrix.json() as { segments: Array<{ title: string | null }> }
     // Titles must be readable Chinese, not µÚÒ»ÕÂ-style mojibake.
     expect(segments.map(segment => segment.title)).toEqual(['第1章 开眼', '第2章 灯下'])
+  })
+
+  it('deletes a shell episode and returns its chapters to unassigned', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '要删的壳' } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '留下的' } })).statusCode).toBe(201)
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string; number: number }> }
+    const ep1 = episodes.find(e => e.number === 1)!.id
+    await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/allocations`,
+      headers: authHeaders(),
+      payload: { allocations: [{ segmentId: segments[0].id, episodeId: ep1 }] },
+    })
+
+    const del = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/episodes/${ep1}`, headers: authHeaders() })
+    expect(del.statusCode).toBe(204)
+
+    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const after = reread.json() as { segments: Array<{ id: string; episodeId: string | null }>; episodes: Array<{ id: string; number: number }> }
+    expect(after.episodes.map(e => e.number)).toEqual([2])
+    // The chapter fell back to unassigned, it did not vanish.
+    expect(after.segments.find(s => s.id === segments[0].id)?.episodeId).toBeNull()
+
+    // An episode with a storyboard refuses the delete: paid/hand work never
+    // silently dies with a cleanup pass.
+    const ep2 = after.episodes[0]
+    expect((await env.app.inject({ method: 'POST', url: `/episodes/${ep2.id}/storyboards`, headers: authHeaders(), payload: { number: 1, title: '镜头', durationMs: 3000, description: '有人走过' } })).statusCode).toBe(201)
+    const blocked = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/episodes/${ep2.id}`, headers: authHeaders() })
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.json()).toMatchObject({ error: 'episodes:notDeletable' })
+  })
+
+  it('deletes a junk chapter; its allocation goes with it', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string }> }
+
+    const del = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    expect(del.statusCode).toBe(204)
+
+    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const after = reread.json() as { segments: Array<{ id: string }> }
+    expect(after.segments.map(s => s.id)).not.toContain(segments[0].id)
+    expect(after.segments).toHaveLength(2)
+
+    const again = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    expect(again.statusCode).toBe(404)
   })
 })
 

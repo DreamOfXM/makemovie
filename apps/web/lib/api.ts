@@ -398,6 +398,17 @@ export function updateProjectSourceSegment(
   })
 }
 
+/** DELETE — drop a junk chapter from the book; later applies never see it. */
+export function deleteProjectSourceSegment(api: ApiClient, projectId: string, segmentId: string): Promise<void> {
+  return api<void>(`/projects/${projectId}/source/segments/${segmentId}`, { method: 'DELETE' })
+}
+
+/** DELETE an episode that is still a shell (text drafts only); refused with
+ *  `episodes:notDeletable` once shots, batches, compositions or deliveries exist. */
+export function deleteEpisode(api: ApiClient, projectId: string, episodeId: string): Promise<void> {
+  return api<void>(`/projects/${projectId}/episodes/${episodeId}`, { method: 'DELETE' })
+}
+
 /** Multipart upload; `request` leaves the content type to the browser so the boundary is set. */
 /** One file keeps in-text chapter detection; several files (a dropped folder)
  *  become one chapter each, ordered by natural filename sort server-side. */

@@ -12,11 +12,13 @@ import {
   LoaderCircleIcon,
   RefreshCwIcon,
   SplitIcon,
+  Trash2Icon,
 } from 'lucide-react'
 import {
   ApiError,
   applyProjectSource,
   autoSplitSource,
+  deleteProjectSourceSegment,
   getProjectSource,
   getProjectSourceSegment,
   pasteProjectSource,
@@ -38,6 +40,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -112,6 +115,10 @@ const EMPTY_MATRIX: ProjectSourceResponse = {
 
 interface BookSplitPanelProps {
   projectId: string
+  /** Bumped by the page when episodes change outside this panel (created or
+   *  deleted in the episodes module) — the matrix re-reads so its episode
+   *  dropdown and allocation rows stay in sync. */
+  refreshToken?: number
   /** Apply and "new episode" both change what the page's episode table shows. */
   onEpisodesChanged?: () => void
 }
@@ -121,7 +128,7 @@ interface BookSplitPanelProps {
  * mechanical splitter carves chapters, and each row's dropdown decides which
  * episode that chapter feeds — the allocation is data, this panel is its view.
  */
-export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelProps) {
+export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: BookSplitPanelProps) {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -150,6 +157,14 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
     [api, projectId, organizationId],
   )
   const matrix = useAsync<ProjectSourceResponse>(loadMatrix, EMPTY_MATRIX)
+  // 页面侧的建集/删集经 refreshToken 通知到这里——首渲染不算，之后的每次
+  // 变化都重读矩阵（下拉的集列表和分配行都依赖它）。
+  const seenToken = useRef(refreshToken)
+  useEffect(() => {
+    if (refreshToken === undefined || seenToken.current === refreshToken) return
+    seenToken.current = refreshToken
+    matrix.reload()
+  }, [refreshToken, matrix.reload])
 
   const numberFormat = useMemo(() => new Intl.NumberFormat(locale), [locale])
   const fmt = useCallback((value: number) => numberFormat.format(value), [numberFormat])
@@ -722,6 +737,9 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  // 删除本章的确认弹层(叠在审阅弹窗之上)。
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     if (!segment) return
@@ -762,6 +780,22 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
     }
   }
 
+  async function removeChapter() {
+    if (!segment) return
+    setDeleting(true)
+    try {
+      await deleteProjectSourceSegment(api, projectId, segment.id)
+      toast.success(t('bookSplit.chapterDeleted'))
+      onSaved()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('error.generic'))
+    } finally {
+      setDeleting(false)
+      setDeleteOpen(false)
+    }
+  }
+
   const numberFormat = useMemo(() => new Intl.NumberFormat(locale), [locale])
   const editable = can('project:update')
 
@@ -796,17 +830,27 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
           <p className="text-destructive text-xs">{error}</p>
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-muted-foreground text-xs tabular-nums">
-            {t('bookSplit.chapterChars', { count: numberFormat.format(draft.length) })}
-          </span>
-          <div className="flex items-center gap-1.5">
-            <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            disabled={!editable || saving || deleting}
+            onClick={() => setDeleteOpen(true)}
+          >
+            <Trash2Icon className="size-3.5" />
+            {t('bookSplit.deleteChapter')}
+          </Button>
+          <div className="flex items-center gap-3">
+            <span className="text-muted-foreground text-xs tabular-nums">
+              {t('bookSplit.chapterChars', { count: numberFormat.format(draft.length) })}
+            </span>
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={saving || deleting}>
               {t('common.cancel')}
             </Button>
             <GuardedButton
               action="project:update"
               size="sm"
-              disabled={loading || saving || detail === null || !draft.trim() || draft === detail?.content}
+              disabled={loading || saving || deleting || detail === null || !draft.trim() || draft === detail?.content}
               onClick={() => void save()}
             >
               {saving ? <LoaderCircleIcon className="animate-spin" /> : null}
@@ -814,6 +858,28 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
             </GuardedButton>
           </div>
         </div>
+
+        <AlertDialog open={deleteOpen} onOpenChange={open => !open && setDeleteOpen(false)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t('bookSplit.deleteChapterTitle')}</AlertDialogTitle>
+              <AlertDialogDescription>{t('bookSplit.deleteChapterBody')}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleting}>{t('common.cancel')}</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                disabled={deleting}
+                onClick={event => {
+                  event.preventDefault()
+                  void removeChapter()
+                }}
+              >
+                {deleting ? t('common.loading') : t('common.delete')}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   )
