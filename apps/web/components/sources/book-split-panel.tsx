@@ -78,6 +78,8 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   const [pasteOpen, setPasteOpen] = useState(true)
   const [pasteText, setPasteText] = useState('')
   const [pasting, setPasting] = useState(false)
+  // Drop-target highlight: the dashed box must not merely look droppable.
+  const [dropping, setDropping] = useState(false)
   // Identifies the mutation in flight: 'apply', 'new-episode', `alloc-<segmentId>`.
   const [busy, setBusy] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<{ items: ApplyProjectSourceResultItem[]; pendingSegments: number } | null>(null)
@@ -255,6 +257,21 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
 
   return (
     <Card>
+      {/* Hidden file input, mounted unconditionally: it was previously rendered
+          only in the has-version branch, which made the empty state's upload
+          button call a null ref and do nothing in EVERY browser. */}
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".txt,.md"
+        className="hidden"
+        onChange={event => {
+          const file = event.target.files?.[0]
+          // Reset so picking the same file again re-fires change.
+          event.target.value = ''
+          if (file) void upload(file)
+        }}
+      />
       <CardHeader className="border-b [.border-b]:pb-4">
         <CardTitle className="flex items-center gap-2">
           <BookTextIcon className="text-muted-foreground size-4" />
@@ -280,7 +297,22 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           <TableSkeleton rows={4} columns={4} />
         </CardContent>
       ) : matrix.data.version === null ? (
-        <CardContent>
+        <CardContent
+          className={cn('transition-colors', dropping && 'bg-primary/5 ring-primary/40 -mx-1 rounded-xl ring-2')}
+          onDragOver={event => {
+            if (event.dataTransfer.types.includes('Files')) {
+              event.preventDefault()
+              setDropping(true)
+            }
+          }}
+          onDragLeave={() => setDropping(false)}
+          onDrop={event => {
+            event.preventDefault()
+            setDropping(false)
+            const file = event.dataTransfer.files?.[0]
+            if (file) void upload(file)
+          }}
+        >
           <EmptyState
             icon={<BookTextIcon />}
             title={t('bookSplit.emptyTitle')}
@@ -308,6 +340,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
               )
             }
           />
+          <p className="text-muted-foreground mt-2 text-center text-xs">{t('bookSplit.dropHint')}</p>
           {!pasteOpen && (
             <div className="mt-2 flex flex-col items-center gap-1">
               <Button size="sm" variant="outline" disabled={uploading} onClick={() => { setPasteOpen(true); setUploadError(null) }}>
@@ -363,20 +396,6 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
         </CardContent>
       ) : (
         <CardContent className="space-y-4">
-          {/* Hidden input shared by the empty state and the re-upload button. */}
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".txt,.md"
-            className="hidden"
-            onChange={event => {
-              const file = event.target.files?.[0]
-              // Reset so picking the same file again re-fires change.
-              event.target.value = ''
-              if (file) void upload(file)
-            }}
-          />
-
           <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1.5 text-sm">
             <span>
               <span className="text-muted-foreground">{t('bookSplit.statChars')} </span>
