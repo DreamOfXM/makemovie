@@ -248,34 +248,36 @@ function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: Si
 
   return (
     <div className={cn('flex h-full flex-col gap-6 p-4', collapsed && 'items-center gap-4 px-2')}>
-      <Link href="/projects" onClick={onNavigate} className={cn('flex items-center gap-3 py-1', collapsed && 'justify-center')}>
-        <span className="from-primary to-primary/60 flex size-9 shrink-0 items-center justify-center rounded-lg bg-linear-to-br text-primary-foreground shadow-sm">
-          <ClapperboardIcon className="size-5" />
-        </span>
-        {!collapsed && (
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold">{t('app.title')}</span>
-            <span className="text-muted-foreground block truncate text-xs">{t('app.tagline')}</span>
+      <div className={cn('flex items-center gap-1', collapsed && 'flex-col gap-4')}>
+        <Link href="/projects" onClick={onNavigate} className={cn('flex min-w-0 flex-1 items-center gap-3 py-1', collapsed && 'flex-none justify-center')}>
+          <span className="from-primary to-primary/60 flex size-9 shrink-0 items-center justify-center rounded-lg bg-linear-to-br text-primary-foreground shadow-sm">
+            <ClapperboardIcon className="size-5" />
           </span>
-        )}
-      </Link>
+          {!collapsed && (
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-semibold">{t('app.title')}</span>
+              <span className="text-muted-foreground block truncate text-xs">{t('app.tagline')}</span>
+            </span>
+          )}
+        </Link>
 
-      {onToggleCollapsed && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={cn('self-end', collapsed && 'self-center')}
-              aria-label={collapsed ? t('nav.expand') : t('nav.collapse')}
-              onClick={onToggleCollapsed}
-            >
-              {collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">{collapsed ? t('nav.expand') : t('nav.collapse')}</TooltipContent>
-        </Tooltip>
-      )}
+        {onToggleCollapsed && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                aria-label={collapsed ? t('nav.expand') : t('nav.collapse')}
+                onClick={onToggleCollapsed}
+              >
+                {collapsed ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{collapsed ? t('nav.expand') : t('nav.collapse')}</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
 
       <nav className={cn('flex-1 space-y-1', collapsed && 'space-y-4')}>
         {projectId && (
