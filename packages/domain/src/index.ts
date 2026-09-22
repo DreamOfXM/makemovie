@@ -58,6 +58,12 @@ export function durationOutOfRange(format: ProjectFormat, targetDurationMs: numb
 /** Whole-book uploads get their own ceiling; the 200k per-version limit stays episode-level. */
 export const PROJECT_SOURCE_CHAR_LIMIT = 1_000_000
 
+/**
+ * Spoken-Chinese script pacing, the same rate the script prompt budgets with.
+ * Auto-split packs chapters into episodes sized by this many characters a minute.
+ */
+export const SCRIPT_CHARS_PER_MINUTE = 350
+
 export function isContentLocale(value: unknown): value is ContentLocale {
   return (contentLocales as readonly string[]).includes(value as string)
 }

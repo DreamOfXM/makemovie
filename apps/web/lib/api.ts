@@ -375,6 +375,11 @@ export function pasteProjectSource(api: ApiClient, projectId: string, content: s
   return api<UploadProjectSourceResult>(`/projects/${projectId}/source`, { method: 'POST', body: JSON.stringify({ content }) })
 }
 
+/** One-click mechanical split: packs chapters into new episodes sized by the target duration. */
+export function autoSplitSource(api: ApiClient, projectId: string): Promise<{ episodesCreated: number; allocated: number }> {
+  return api<{ episodesCreated: number; allocated: number }>(`/projects/${projectId}/source/auto-split`, { method: 'POST' })
+}
+
 export function getProjectSource(api: ApiClient, projectId: string): Promise<ProjectSourceResponse> {
   return api<ProjectSourceResponse>(`/projects/${projectId}/source`)
 }

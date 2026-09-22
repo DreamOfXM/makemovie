@@ -214,6 +214,41 @@ describe('whole-book upload', () => {
     expect(again.json()).toMatchObject({ error: 'projectSources:duplicate' })
   })
 
+  it('auto-splits by target duration into new episodes and lands the whole book', async () => {
+    // 1-minute target × 350 chars/min: chapters of 200/200/100 pack as [200] + [200,100].
+    const custom = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '自动拆分靶', format: 'short_drama', targetDurationMs: 60_000 } })
+    const projectId = (custom.json() as { id: string }).id
+    const book = '第一章 灯\n' + '灯下有人。'.repeat(40) + '\n\n第二章 巷\n' + '巷口风大。'.repeat(40) + '\n\n第三章 归\n' + '有人归来。'.repeat(20)
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(book, 'utf8'))).statusCode).toBe(201)
+
+    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    expect(split.statusCode).toBe(200)
+    expect(split.json()).toMatchObject({ episodesCreated: 2, allocated: 3 })
+
+    const applied = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    expect(applied.statusCode).toBe(200)
+    expect(applied.json()).toMatchObject({ pendingSegments: 0 })
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    expect((matrix.json() as { version: { status: string } }).version.status).toBe('APPROVED')
+
+    // Existing episodes are appended after, never renumbered or touched.
+    const splitAgain = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    expect(splitAgain.statusCode).toBe(200)
+    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const numbers = (episodes.json() as Array<{ number: number }>).map(e => e.number)
+    expect(numbers).toEqual([1, 2, 3, 4])
+  })
+
+  it('auto-split lands a film in its single born episode', async () => {
+    const projectId = await createProject('film')
+    expect((await uploadBook(projectId, 'film.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    expect(split.statusCode).toBe(200)
+    expect(split.json()).toMatchObject({ episodesCreated: 0, allocated: 3 })
+    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    expect((episodes.json() as unknown[]).length).toBe(1)
+  })
+
   it('keeps the whole book in draft while chapters remain unallocated', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)

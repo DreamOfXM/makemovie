@@ -10,10 +10,12 @@ import {
   LoaderCircleIcon,
   PlusIcon,
   RefreshCwIcon,
+  SplitIcon,
 } from 'lucide-react'
 import {
   ApiError,
   applyProjectSource,
+  autoSplitSource,
   createEpisode,
   getProjectSource,
   pasteProjectSource,
@@ -227,6 +229,22 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
       onEpisodesChanged?.()
     } catch (error) {
       setActionError({ message: friendlyError(error), retry: () => void addEpisode() })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function autoSplit() {
+    setBusy('auto-split')
+    setActionError(null)
+    try {
+      const result = await autoSplitSource(api, projectId)
+      toast.success(t('bookSplit.autoSplitDone', { episodes: result.episodesCreated, chapters: result.allocated }))
+      setApplyResult(null)
+      matrix.reload()
+      onEpisodesChanged?.()
+    } catch (error) {
+      setActionError({ message: friendlyError(error), retry: () => void autoSplit() })
     } finally {
       setBusy(null)
     }
@@ -528,6 +546,11 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
             )}
           </div>
 
+          {/* The map's three questions answered in one strip: what happened,
+              what now, and that nothing below gets overwritten. */}
+          <p className="text-muted-foreground text-xs">
+            {t('bookSplit.steps')}
+          </p>
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             {!isFilm && (
               <GuardedButton
@@ -543,6 +566,16 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
             )}
             <GuardedButton
               action="episode:write"
+              variant="outline"
+              size="sm"
+              disabled={busy !== null || matrix.data.segments.every(segment => segment.episodeId !== null)}
+              onClick={() => void autoSplit()}
+            >
+              {busy === 'auto-split' ? <LoaderCircleIcon className="animate-spin" /> : <SplitIcon />}
+              {t('bookSplit.autoSplit')}
+            </GuardedButton>
+            <GuardedButton
+              action="episode:write"
               size="sm"
               disabled={busy !== null || episodesReceivingContent === 0}
               onClick={() => void apply()}
@@ -555,6 +588,7 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           {episodesReceivingContent === 0 && (
             <p className="text-muted-foreground text-right text-xs">{t('bookSplit.applyNeedOne')}</p>
           )}
+          <p className="text-muted-foreground text-right text-xs">{t('bookSplit.applySafety')}</p>
 
           {actionError && (
             <Alert variant="destructive">

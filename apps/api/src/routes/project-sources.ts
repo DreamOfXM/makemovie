@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { type PrismaClient } from '@studio/db'
-import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT } from '@studio/domain'
+import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT, SCRIPT_CHARS_PER_MINUTE } from '@studio/domain'
 import { splitChapters } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -279,6 +279,85 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         payload: { projectId: project.id, changes: changes.length },
       })
       return { updated: changes.length }
+    },
+  )
+
+  // Auto-split: the one-click answer to "when do episodes happen, which button?".
+  // Packs chapters in book order into episodes sized by the project's target
+  // duration (350 chars/minute), creating the episodes it needs; mechanical and
+  // free. The map stays editable afterwards — this only writes allocations.
+  app.post<{ Params: { projectId: string } }>(
+    '/projects/:projectId/source/auto-split',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
+      if (!latest) return reply.code(404).send({ error: 'projectSources:notUploaded' })
+
+      const segments = await app.db.sourceSegment.findMany({ where: { projectSourceVersionId: latest.id }, orderBy: { index: 'asc' } })
+      if (segments.length === 0) return reply.code(409).send({ error: 'projectSources:nothingAllocated' })
+
+      const fmt = project.format.toLowerCase() as 'short_drama' | 'series' | 'film'
+      const targetMs = project.targetDurationMs ?? formatDefaults[fmt].targetDurationMs
+      const charBudget = Math.max(1, Math.round((targetMs / 60_000) * SCRIPT_CHARS_PER_MINUTE))
+
+      // Film lands in its one episode; everything else packs in order. A chapter
+      // larger than the budget keeps the episode to itself rather than splitting
+      // mid-chapter — chapters are the atomic unit the matrix shows.
+      const groups: typeof segments[] = []
+      if (project.format === 'FILM') {
+        groups.push(segments)
+      } else {
+        let current: typeof segments = []
+        let budget = charBudget
+        for (const segment of segments) {
+          if (current.length > 0 && segment.charCount > budget) {
+            groups.push(current)
+            current = []
+            budget = charBudget
+          }
+          current.push(segment)
+          budget -= segment.charCount
+        }
+        if (current.length > 0) groups.push(current)
+      }
+
+      const existing = await app.db.episode.findMany({ where: { projectId: project.id }, orderBy: { number: 'asc' } })
+      let nextNumber = (existing.at(-1)?.number ?? 0) + 1
+      // Existing episodes are never touched: new groups append after them.
+      const allocations: Array<{ segmentId: string; episodeId: string }> = []
+      let episodesCreated = 0
+      for (const group of groups) {
+        let episodeId: string | undefined
+        if (project.format === 'FILM' && existing.length > 0) {
+          episodeId = existing[0].id
+        } else {
+          const title = group[0].title?.trim() || `第 ${nextNumber} 集`
+          const created = await app.db.episode.create({
+            data: { projectId: project.id, number: nextNumber, title, targetDurationMs: project.targetDurationMs ?? formatDefaults[fmt].targetDurationMs },
+          })
+          episodeId = created.id
+          nextNumber += 1
+          episodesCreated += 1
+        }
+        for (const segment of group) allocations.push({ segmentId: segment.id, episodeId: episodeId! })
+      }
+
+      await app.db.$transaction(async tx => {
+        await tx.segmentAllocation.deleteMany({ where: { segment: { projectSourceVersionId: latest.id } } })
+        await tx.segmentAllocation.createMany({ data: allocations })
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'projectSource.autoSplit',
+        entityType: 'ProjectSourceVersion',
+        entityId: latest.id,
+        payload: { projectId: project.id, episodesCreated, targetDurationMs: targetMs, charBudget },
+      })
+      return { episodesCreated, allocated: allocations.length }
     },
   )
 
