@@ -8,7 +8,6 @@ import {
   CircleAlertIcon,
   FileUpIcon,
   LoaderCircleIcon,
-  PlusIcon,
   RefreshCwIcon,
   SplitIcon,
 } from 'lucide-react'
@@ -16,7 +15,6 @@ import {
   ApiError,
   applyProjectSource,
   autoSplitSource,
-  createEpisode,
   getProjectSource,
   pasteProjectSource,
   toProjectFormat,
@@ -113,8 +111,6 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
   }, [matrix.data.segments])
   const episodesReceivingContent = allocatedByEpisode.size
   const maxChars = matrix.data.segments.reduce((highest, segment) => Math.max(highest, segment.charCount), 0)
-  const nextEpisodeNumber =
-    matrix.data.episodes.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1
   const defaultMinutes = Math.round(matrix.data.defaults.targetDurationMs / 60_000)
   const canAllocate = can('episode:write')
 
@@ -216,23 +212,6 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
     }
   }
 
-  async function addEpisode() {
-    setBusy('new-episode')
-    setActionError(null)
-    try {
-      const created = await createEpisode(api, projectId, {
-        number: nextEpisodeNumber,
-        title: t('bookSplit.newEpisodeAutoTitle', { number: nextEpisodeNumber }),
-      })
-      toast.success(t('projects.episodeCreated', { number: created.number }))
-      matrix.reload()
-      onEpisodesChanged?.()
-    } catch (error) {
-      setActionError({ message: friendlyError(error), retry: () => void addEpisode() })
-    } finally {
-      setBusy(null)
-    }
-  }
 
   async function autoSplit() {
     setBusy('auto-split')
@@ -552,18 +531,9 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
             {t('bookSplit.steps')}
           </p>
           <div className="flex flex-wrap items-center justify-end gap-1.5">
-            {!isFilm && (
-              <GuardedButton
-                action="episode:write"
-                variant="outline"
-                size="sm"
-                disabled={busy !== null}
-                onClick={() => void addEpisode()}
-              >
-                {busy === 'new-episode' ? <LoaderCircleIcon className="animate-spin" /> : <PlusIcon />}
-                {busy === 'new-episode' ? t('common.loading') : t('projects.newEpisode')}
-              </GuardedButton>
-            )}
+            {/* Episode creation moved to the episodes module below: this panel
+                creates episodes through auto-split, and a manual "new episode"
+                button here only competed with it for attention. */}
             <GuardedButton
               action="episode:write"
               variant="outline"

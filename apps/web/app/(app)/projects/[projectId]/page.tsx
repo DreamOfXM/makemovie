@@ -18,7 +18,7 @@ import { useAsync } from '@/lib/use-async'
 import { cn, formatDateTime, relativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -144,6 +144,17 @@ export default function ProjectPage() {
           <CardDescription>
             {episodes.loading ? t('common.loading') : t('projects.episodeProgress', { done: completed, total: episodes.data.length })}
           </CardDescription>
+          {/* Creating episodes lives where episodes live: the split panel creates
+              its own via auto-split, this module owns the manual door. Films are
+              locked to their single born episode. */}
+          {!isFilm && (
+            <CardAction>
+              <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setEpisodeDialogOpen(true)}>
+                <PlusIcon />
+                {t('projects.newEpisode')}
+              </GuardedButton>
+            </CardAction>
+          )}
         </CardHeader>
 
         {episodes.error ? (
