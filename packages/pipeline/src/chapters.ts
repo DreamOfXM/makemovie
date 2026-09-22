@@ -16,6 +16,13 @@ export interface ChapterSegment {
 const CN_NUM = '[0-9０-９〇零一二两三四五六七八九十百千万]+'
 const MARKER = new RegExp(`^[ \\t]*(?:第[ \\t]*${CN_NUM}[ \\t]*(?:之[ \\t]*)?[上下中]?[ \\t]*[章节卷部集回][ \\t]*[^\\n]*|(?:Chapter|CHAPTER)[ \\t]+[0-9IVXLCivxlc]+[^\\n]*)$`)
 
+/** Whether a single line (or a filename stem) reads as a chapter marker. Folder
+ *  uploads use this to decide whether the filename itself can headline the
+ *  chapter or a synthesized 第N章 header is needed. */
+export function isChapterMarkerLine(line: string): boolean {
+  return MARKER.test(line)
+}
+
 export function splitChapters(raw: string): ChapterSegment[] {
   const text = raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
   const lines = text.split('\n')

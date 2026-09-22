@@ -3,7 +3,7 @@ import path from 'node:path'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { type PrismaClient } from '@studio/db'
 import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT, SCRIPT_CHARS_PER_MINUTE } from '@studio/domain'
-import { splitChapters } from '@studio/pipeline'
+import { isChapterMarkerLine, splitChapters } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -53,7 +53,7 @@ function decodeBook(buffer: Buffer): string | null {
 export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
   // Shared intake for both doors — the multipart file and the pasted text: validate
   // the ceiling, refuse a byte-identical re-intake, split mechanically, and version.
-  async function ingestBook(request: FastifyRequest, project: { id: string; organizationId: string }, content: string, filename: string, reply: FastifyReply) {
+  async function ingestBook(request: FastifyRequest, project: { id: string; organizationId: string }, content: string, filename: string, reply: FastifyReply, filesCount?: number) {
     const auth = request.auth!
     if (!content.trim()) return reply.code(400).send({ error: 'projectSources:empty' })
     if (content.length > PROJECT_SOURCE_CHAR_LIMIT) return reply.code(400).send({ error: 'projectSources:tooLarge' })
@@ -115,12 +115,16 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         status: created.status,
       },
       segments: segments.length,
+      // Folder uploads report how many chapter files built the book.
+      ...(filesCount !== undefined && filesCount > 1 ? { files: filesCount } : {}),
     })
   }
 
-  // Whole-book upload: multipart file in, versioned source plus mechanical
-  // chapter segmentation out. The paste box (episode-level, 200k) stays where it
-  // is; this is the project-level intake with its own 1M ceiling.
+  // Whole-book upload: multipart file(s) in, versioned source plus mechanical
+  // chapter segmentation out. One file keeps today's semantics (chapters are
+  // found inside the text); a folder of chapter files is equally first-class —
+  // every .txt/.md part becomes exactly one chapter, ordered by natural
+  // filename sort, headed by its filename.
   app.post<{ Params: { projectId: string } }>(
     '/projects/:projectId/source/upload',
     { preHandler: requirePermission('project:update') },
@@ -128,15 +132,66 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       const project = await findProjectInOrg(app.db, request.params.projectId, request.auth!.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
 
-      const file = await request.file()
-      if (!file) return reply.code(400).send({ error: 'file is required' })
-      const ext = path.extname(file.filename).toLowerCase()
-      if (ext !== '.txt' && ext !== '.md') {
-        return reply.code(400).send({ error: 'only .txt and .md files are supported (.docx is planned)' })
+      const collected: Array<{ filename: string; buffer: Buffer }> = []
+      let sawUnsupported = false
+      for await (const part of request.files()) {
+        // Every part is consumed before any filtering decision — an unread
+        // stream stalls the iterator and the whole request with it.
+        const buffer = await part.toBuffer()
+        const base = path.basename(part.filename)
+        const ext = path.extname(base).toLowerCase()
+        // OS droppings (`.DS_Store`) must not become chapters; anything that is
+        // not .txt/.md is skipped rather than failing the whole folder.
+        if (base.startsWith('.')) continue
+        if (ext !== '.txt' && ext !== '.md') {
+          sawUnsupported = true
+          continue
+        }
+        collected.push({ filename: base, buffer })
       }
-      const content = decodeBook(await file.toBuffer())
-      if (content === null) return reply.code(400).send({ error: 'projectSources:badEncoding' })
-      return ingestBook(request, project, content, file.filename, reply)
+      if (collected.length === 0) {
+        return reply.code(400).send({
+          error: sawUnsupported
+            ? 'only .txt and .md files are supported (.docx is planned)'
+            : 'file is required',
+        })
+      }
+
+      const chapters: Array<{ filename: string; content: string }> = []
+      for (const part of collected) {
+        const content = decodeBook(part.buffer)
+        if (content === null) return reply.code(400).send({ error: 'projectSources:badEncoding' })
+        if (content.trim().length === 0) continue
+        chapters.push({ filename: part.filename, content })
+      }
+
+      if (chapters.length <= 1) {
+        const only = chapters[0]
+        return ingestBook(request, project, only?.content ?? '', only?.filename ?? 'book.txt', reply)
+      }
+
+      // Folder mode: 第2章 must sort before 第10章, so numeric-aware compare.
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+      chapters.sort((a, b) => collator.compare(a.filename, b.filename))
+      const parts: string[] = []
+      chapters.forEach((chapter, index) => {
+        const ext = path.extname(chapter.filename)
+        const stem = chapter.filename.slice(0, chapter.filename.length - ext.length).trim()
+        // A filename that already reads as a marker headlines itself; otherwise
+        // the position number does, with the filename (minus leading digits) as
+        // the chapter's display name.
+        const header = isChapterMarkerLine(stem)
+          ? stem
+          : `第${index + 1}章 ${stem.replace(/^[0-9０-９]+[\s._-]*/, '').trim()}`.trimEnd()
+        // One file = one chapter: the file's own opening marker line, when
+        // present, is redundant next to the filename-derived header.
+        const lines = chapter.content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split('\n')
+        const firstText = lines.findIndex(line => line.trim() !== '')
+        if (firstText >= 0 && isChapterMarkerLine(lines[firstText].trim())) lines.splice(firstText, 1)
+        parts.push(`${header}\n${lines.join('\n').trim()}`)
+      })
+      const book = parts.join('\n\n')
+      return ingestBook(request, project, book, `${chapters[0].filename} (+${chapters.length - 1} files)`, reply, chapters.length)
     },
   )
 

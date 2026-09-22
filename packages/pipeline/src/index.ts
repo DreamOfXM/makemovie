@@ -22,7 +22,7 @@ export { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE } from '
 export type { GuardCharacterInfo, GuardContext, GuardFinding, GuardOutcome, GuardShotInfo, GuardStage, PromptGuard } from './guards.js'
 
 // Mechanical chapter splitting for whole-book uploads; no model involved.
-export { splitChapters } from './chapters.js'
+export { splitChapters, isChapterMarkerLine } from './chapters.js'
 export type { ChapterSegment } from './chapters.js'
 
 // Prompt builders are part of the pipeline's contract with the worker (分段分镜在

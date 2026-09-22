@@ -52,8 +52,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(rateLimit, app.config.nodeEnv === 'test' ? { max: Number.MAX_SAFE_INTEGER, timeWindow: '1 minute' } : { max: 300, timeWindow: '1 minute' })
   // Whole-book intake. The byte ceiling is generous on purpose: 4 bytes per char
   // covers UTF-8's worst case against the 1M-character limit; bigger files die
-  // here instead of buffering in memory first.
-  await app.register(multipart, { limits: { fileSize: PROJECT_SOURCE_CHAR_LIMIT * 4, files: 1 } })
+  // here instead of buffering in memory first. The part cap admits a folder of
+  // chapter files (one part per chapter); the 1M-char book ceiling still bounds
+  // the total.
+  await app.register(multipart, { limits: { fileSize: PROJECT_SOURCE_CHAR_LIMIT * 4, files: 500 } })
 
   app.get('/health', async () => ({ status: 'ok', service: 'api' }))
 

@@ -57,6 +57,51 @@ function episodeDisplayTitle(episode: { number: number; title: string }): string
   return AUTO_EPISODE_TITLE.test(episode.title.trim()) ? '' : episode.title
 }
 
+const TEXT_FILE = /\.(txt|md)$/i
+
+function isChapterFile(file: File): boolean {
+  return TEXT_FILE.test(file.name) && !file.name.startsWith('.')
+}
+
+/**
+ * A dropped folder arrives as directory entries, not as dataTransfer.files —
+ * walk it into a flat list of chapter files. The entry list must be captured
+ * synchronously (it dies with the event); the walk itself is async.
+ */
+function collectDroppedFiles(data: DataTransfer): Promise<File[]> {
+  const entries = Array.from(data.items ?? [])
+    .map(item => (typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null))
+    .filter((entry): entry is FileSystemEntry => entry !== null)
+  const fromFiles = Array.from(data.files ?? []).filter(isChapterFile)
+  if (entries.length === 0) return Promise.resolve(fromFiles)
+  const out: File[] = []
+  const walk = async (entry: FileSystemEntry): Promise<void> => {
+    if (entry.isFile) {
+      await new Promise<void>(resolve => {
+        ;(entry as FileSystemFileEntry).file(
+          file => {
+            if (isChapterFile(file)) out.push(file)
+            resolve()
+          },
+          () => resolve(),
+        )
+      })
+    } else if (entry.isDirectory) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader()
+      const readBatch = () => new Promise<FileSystemEntry[]>(resolve => reader.readEntries(resolve, () => resolve([])))
+      let batch = await readBatch()
+      while (batch.length > 0) {
+        for (const child of batch) await walk(child)
+        batch = await readBatch()
+      }
+    }
+  }
+  return (async () => {
+    for (const entry of entries) await walk(entry)
+    return out.length > 0 ? out : fromFiles
+  })()
+}
+
 const EMPTY_MATRIX: ProjectSourceResponse = {
   version: null,
   format: 'SHORT_DRAMA',
@@ -167,13 +212,22 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
     fileInput.current?.click()
   }
 
-  async function upload(file: File) {
+  async function upload(files: File[]) {
+    const valid = files.filter(isChapterFile)
+    if (valid.length === 0) {
+      setUploadError(t('bookSplit.errorNoTextFiles'))
+      return
+    }
     setUploading(true)
     setUploadError(null)
     setActionError(null)
     try {
-      const result = await uploadProjectSource(api, projectId, file)
-      toast.success(t('bookSplit.uploadedToast', { version: result.version.version, segments: result.segments }))
+      const result = await uploadProjectSource(api, projectId, valid)
+      toast.success(
+        result.files && result.files > 1
+          ? t('bookSplit.uploadedToastFiles', { files: result.files, segments: result.segments })
+          : t('bookSplit.uploadedToast', { version: result.version.version, segments: result.segments }),
+      )
       setApplyResult(null)
       matrix.reload()
     } catch (error) {
@@ -275,12 +329,13 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
         ref={fileInput}
         type="file"
         accept=".txt,.md"
+        multiple
         className="hidden"
         onChange={event => {
-          const file = event.target.files?.[0]
+          const picked = Array.from(event.target.files ?? [])
           // Reset so picking the same file again re-fires change.
           event.target.value = ''
-          if (file) void upload(file)
+          if (picked.length > 0) void upload(picked)
         }}
       />
       <CardHeader className="border-b [.border-b]:pb-4">
@@ -320,8 +375,8 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
           onDrop={event => {
             event.preventDefault()
             setDropping(false)
-            const file = event.dataTransfer.files?.[0]
-            if (file) void upload(file)
+            // 文件夹以目录条目抵达,不是 files 列表;条目必须同步取走,遍历可以异步。
+            void collectDroppedFiles(event.dataTransfer).then(files => void upload(files))
           }}
         >
           <EmptyState

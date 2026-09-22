@@ -21,6 +21,24 @@ async function uploadBook(projectId: string, filename: string, bytes: Buffer) {
   return env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/upload`, headers: { ...authHeaders(), ...headers }, payload })
 }
 
+/** A dropped folder arrives as many parts: one per chapter file. */
+function uploadFolder(projectId: string, files: Array<{ filename: string; bytes: Buffer }>) {
+  const boundary = '----studiobooktest'
+  const chunks: Buffer[] = []
+  for (const file of files) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.filename}"\r\nContent-Type: text/plain\r\n\r\n`))
+    chunks.push(file.bytes)
+    chunks.push(Buffer.from('\r\n'))
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`))
+  return env.app.inject({
+    method: 'POST',
+    url: `/projects/${projectId}/source/upload`,
+    headers: { ...authHeaders(), 'content-type': `multipart/form-data; boundary=${boundary}` },
+    payload: Buffer.concat(chunks),
+  })
+}
+
 const BOOK = [
   '楔子：巷口的灯忽明忽暗，纸人在灯下站了很多年。',
   '第一章 纸人开眼',
@@ -314,6 +332,71 @@ describe('whole-book upload', () => {
     const dup = await uploadBook(projectId, 'b.txt', Buffer.from(BOOK, 'utf8'))
     expect(dup.statusCode).toBe(409)
     expect(dup.json()).toMatchObject({ error: 'projectSources:duplicate' })
+  })
+
+  it('treats a folder of chapter files as one book: one chapter per file, filename-titled', async () => {
+    const projectId = await createProject('series')
+    const res = await uploadFolder(projectId, [
+      { filename: '第2章 奶奶的葬礼.txt', bytes: Buffer.from('葬礼的正文，没有内部章头。', 'utf8') },
+      // Internal marker line duplicates the filename's — the filename wins.
+      { filename: '第1章 雨夜寻人.txt', bytes: Buffer.from('第一章 雨夜寻人\n雨夜的正文。', 'utf8') },
+      { filename: '第10章 巷底的灯.txt', bytes: Buffer.from('灯的正文。', 'utf8') },
+    ])
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ files: 3, segments: 3 })
+
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
+    // Natural order: 第2章 sorts before 第10章 (lexicographic would flip them).
+    expect(segments.map(segment => segment.title)).toEqual(['第1章 雨夜寻人', '第2章 奶奶的葬礼', '第10章 巷底的灯'])
+
+    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const content = (detail.json() as { segment: { content: string } }).segment.content
+    expect(content).toContain('雨夜的正文。')
+    expect(content).not.toContain('第一章 雨夜寻人')
+  })
+
+  it('synthesizes chapter numbers for plainly named files in natural order', async () => {
+    const projectId = await createProject('series')
+    const res = await uploadFolder(projectId, [
+      { filename: '10.txt', bytes: Buffer.from('丙的内容。', 'utf8') },
+      { filename: '2.txt', bytes: Buffer.from('乙的内容。', 'utf8') },
+      { filename: '1.txt', bytes: Buffer.from('甲的内容。', 'utf8') },
+    ])
+    expect(res.statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
+    // 1, 2, 10 — not 1, 10, 2 — and each file's body rides its position's chapter.
+    expect(segments.map(segment => segment.title)).toEqual(['第1章', '第2章', '第3章'])
+    const details = await Promise.all(segments.map(segment =>
+      env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segment.id}`, headers: authHeaders() })))
+    const bodies = await Promise.all(details.map(d => (d.json() as { segment: { content: string } }).segment.content))
+    expect(bodies[0]).toContain('甲的内容。')
+    expect(bodies[2]).toContain('丙的内容。')
+  })
+
+  it('skips OS droppings and non-text files inside a dropped folder', async () => {
+    const projectId = await createProject('series')
+    const res = await uploadFolder(projectId, [
+      { filename: '.DS_Store', bytes: Buffer.from('junk', 'utf8') },
+      { filename: 'notes.docx', bytes: Buffer.from('PK\x03\x04') },
+      { filename: '第1章 正经的章.txt', bytes: Buffer.from('正文直接开始。', 'utf8') },
+    ])
+    expect(res.statusCode).toBe(201)
+    const body = res.json() as { files?: number; segments: number; version: { filename: string } }
+    expect(body.files).toBeUndefined()
+    expect(body.segments).toBe(1)
+    expect(body.version.filename).toBe('第1章 正经的章.txt')
+  })
+
+  it('refuses a folder when any chapter file cannot be decoded', async () => {
+    const projectId = await createProject('series')
+    const res = await uploadFolder(projectId, [
+      { filename: '第1章 好文件.txt', bytes: Buffer.from('正文。', 'utf8') },
+      { filename: '第2章 坏文件.txt', bytes: Buffer.from([0xff, 0xff, 0x41]) },
+    ])
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toMatchObject({ error: 'projectSources:badEncoding' })
   })
 })
 

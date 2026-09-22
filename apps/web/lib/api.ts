@@ -353,6 +353,8 @@ export interface ProjectSourceResponse {
 export interface UploadProjectSourceResult {
   version: ProjectSourceVersionInfo
   segments: number
+  /** Present when more than one file built the book (a folder of chapter files). */
+  files?: number
 }
 
 /** One episode's outcome of POST /projects/:id/source/apply. */
@@ -397,9 +399,11 @@ export function updateProjectSourceSegment(
 }
 
 /** Multipart upload; `request` leaves the content type to the browser so the boundary is set. */
-export function uploadProjectSource(api: ApiClient, projectId: string, file: File): Promise<UploadProjectSourceResult> {
+/** One file keeps in-text chapter detection; several files (a dropped folder)
+ *  become one chapter each, ordered by natural filename sort server-side. */
+export function uploadProjectSource(api: ApiClient, projectId: string, files: File[]): Promise<UploadProjectSourceResult> {
   const body = new FormData()
-  body.append('file', file)
+  for (const file of files) body.append('file', file)
   return api<UploadProjectSourceResult>(`/projects/${projectId}/source/upload`, { method: 'POST', body })
 }
 
