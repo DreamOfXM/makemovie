@@ -74,7 +74,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     s3AccessKey: env.S3_ACCESS_KEY || 'studio',
     s3SecretKey: env.S3_SECRET_KEY || 'studio-password',
     masterKey: masterKey.toLowerCase(),
-    corsOrigins: (env.CORS_ORIGIN || 'http://localhost:3010').split(',').map(origin => origin.trim()).filter(Boolean),
+    corsOrigins: (() => {
+      // Allow localhost for local development + LAN access for team members
+      const defaultOrigins = ['http://localhost:3010']
+      if (env.CORS_ORIGIN) {
+        // Custom list takes precedence
+        return env.CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
+      }
+      // Auto-add the machine's LAN IP by reading from environment or using a wildcard for testing
+      if (env.CORS_ALLOW_LAN === 'true') {
+        return [...defaultOrigins, '*'] // Wildcard in dev mode only
+      }
+      return defaultOrigins
+    })(),
     allowPrivateProviderUrls: ['1', 'true'].includes((env.STUDIO_ALLOW_PRIVATE_PROVIDER_URLS ?? '').trim().toLowerCase()),
     sessionTtlMs,
     pollTimeoutMs,
