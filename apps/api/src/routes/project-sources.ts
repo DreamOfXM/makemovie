@@ -494,11 +494,13 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
-  // Auto-split: the one-click answer to "when do episodes happen, which button?".
-  // Packs chapters in book order into episodes sized by the project's target
-  // duration (350 chars/minute), creating the episodes it needs; mechanical and
-  // free. The map stays editable afterwards — this only writes allocations.
-  app.post<{ Params: { projectId: string } }>(
+  // One-click presets for "when do episodes happen, which button?". Two modes:
+  // budget (pack chapters by the target duration, 350 chars/minute) and
+  // per_chapter (one episode per chapter — the reading most people assume).
+  // Both presets are a STARTING POINT: they fill only chapters that are still
+  // unassigned, never touching groups the user already placed, and every
+  // grouping stays editable afterwards — this only writes allocations.
+  app.post<{ Params: { projectId: string }; Body: { mode?: string } }>(
     '/projects/:projectId/source/auto-split',
     { preHandler: requirePermission('episode:write') },
     async (request, reply) => {
@@ -507,20 +509,27 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       const latest = await app.db.projectSourceVersion.findFirst({ where: { projectId: project.id }, orderBy: { version: 'desc' } })
       if (!latest) return reply.code(404).send({ error: 'projectSources:notUploaded' })
+      const mode = request.body?.mode === 'per_chapter' ? 'per_chapter' : 'budget'
 
-      const segments = await app.db.sourceSegment.findMany({ where: { projectSourceVersionId: latest.id }, orderBy: { index: 'asc' } })
+      const segments = await app.db.sourceSegment.findMany({
+        where: { projectSourceVersionId: latest.id, allocation: null },
+        orderBy: { index: 'asc' },
+      })
       if (segments.length === 0) return reply.code(409).send({ error: 'projectSources:nothingAllocated' })
 
       const fmt = project.format.toLowerCase() as 'short_drama' | 'series' | 'film'
       const targetMs = project.targetDurationMs ?? formatDefaults[fmt].targetDurationMs
       const charBudget = Math.max(1, Math.round((targetMs / 60_000) * SCRIPT_CHARS_PER_MINUTE))
 
-      // Film lands in its one episode; everything else packs in order. A chapter
-      // larger than the budget keeps the episode to itself rather than splitting
-      // mid-chapter — chapters are the atomic unit the matrix shows.
+      // Film lands in its one episode; per_chapter gives each chapter its own;
+      // budget packs in order — a chapter larger than the budget keeps the
+      // episode to itself rather than splitting mid-chapter, chapters being the
+      // atomic unit the matrix shows.
       const groups: typeof segments[] = []
       if (project.format === 'FILM') {
         groups.push(segments)
+      } else if (mode === 'per_chapter') {
+        for (const segment of segments) groups.push([segment])
       } else {
         let current: typeof segments = []
         let budget = charBudget
@@ -559,17 +568,16 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
         for (const segment of group) allocations.push({ segmentId: segment.id, episodeId: episodeId! })
       }
 
-      await app.db.$transaction(async tx => {
-        await tx.segmentAllocation.deleteMany({ where: { segment: { projectSourceVersionId: latest.id } } })
-        await tx.segmentAllocation.createMany({ data: allocations })
-      })
+      // Presets only write the rows they just created; allocations the user
+      // placed by hand (or a previous preset) are preserved as-is.
+      await app.db.segmentAllocation.createMany({ data: allocations })
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
         userId: auth.userId,
         action: 'projectSource.autoSplit',
         entityType: 'ProjectSourceVersion',
         entityId: latest.id,
-        payload: { projectId: project.id, episodesCreated, targetDurationMs: targetMs, charBudget },
+        payload: { projectId: project.id, mode, episodesCreated, targetDurationMs: targetMs, charBudget },
       })
       return { episodesCreated, allocated: allocations.length }
     },

@@ -250,15 +250,45 @@ describe('whole-book upload', () => {
     const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
     expect((matrix.json() as { version: { status: string } }).version.status).toBe('APPROVED')
 
-    // Existing episodes are appended after, never renumbered or touched.
+    // Presets never touch groups already placed: with everything allocated a
+    // re-run has nothing to do (it used to re-pack the whole book).
     const splitAgain = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
-    expect(splitAgain.statusCode).toBe(200)
+    expect(splitAgain.statusCode).toBe(409)
     const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
     const list = episodes.json() as Array<{ number: number; title: string }>
-    expect(list.map(e => e.number)).toEqual([1, 2, 3, 4])
+    expect(list.map(e => e.number)).toEqual([1, 2])
     // Episodes are numbered artifacts, not chapter digests: the first chapter's
     // title must not leak into the episode's own name.
-    expect(list.map(e => e.title)).toEqual(['第 1 集', '第 2 集', '第 3 集', '第 4 集'])
+    expect(list.map(e => e.title)).toEqual(['第 1 集', '第 2 集'])
+  })
+
+  it('per-chapter preset gives each unassigned chapter its own episode', async () => {
+    const projectId = await createProject('series')
+    expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
+    // One chapter is manually grouped first — the preset must leave it alone.
+    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '手工集' } })).statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string; number: number }> }
+    const manual = episodes.find(e => e.number === 1)!.id
+    await env.app.inject({
+      method: 'PATCH',
+      url: `/projects/${projectId}/source/allocations`,
+      headers: authHeaders(),
+      payload: { allocations: [{ segmentId: segments[0].id, episodeId: manual }] },
+    })
+
+    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders(), payload: { mode: 'per_chapter' } })
+    expect(split.statusCode).toBe(200)
+    expect(split.json()).toMatchObject({ episodesCreated: 2, allocated: 2 })
+
+    const after = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const data = after.json() as { segments: Array<{ id: string; episodeId: string | null }>; episodes: Array<{ id: string; number: number }> }
+    // The manually placed chapter still points at the hand-made episode; each
+    // other chapter got an episode of its own.
+    expect(data.segments.find(s => s.id === segments[0].id)?.episodeId).toBe(manual)
+    const targets = new Set(data.segments.map(s => s.episodeId))
+    expect(targets.size).toBe(3)
+    expect(data.episodes.map(e => e.number)).toEqual([1, 2, 3])
   })
 
   it('auto-split lands a film in its single born episode', async () => {
