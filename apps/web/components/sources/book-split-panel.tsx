@@ -717,6 +717,9 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   {splitMode ? t('bookSplit.splitExit') : t('bookSplit.splitEnter')}
                 </Button>
               )}
+              {/* 预分组是浏览态的批量动作:拆集态的语境是"我正在手选",
+                  并排出现只会让人以为要先勾选才能预分组。 */}
+              {!splitMode && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null || unassignedCount === 0}>
@@ -736,11 +739,12 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              )}
               <span className="flex-1" />
               <span className="text-muted-foreground text-xs">
                 {unassignedCount > 0 ? t('bookSplit.unassignedCount', { count: unassignedCount }) : t('bookSplit.allGrouped')}
               </span>
-              {canAllocate && (
+              {canAllocate && !splitMode && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -801,22 +805,27 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   const isSelected = selected.has(segment.id)
                   const episode = segment.episodeId ? episodeById.get(segment.episodeId) : null
                   const rowBusy = busy === `alloc-${segment.id}`
+                  // 已分组的章节在拆集态锁定:选择语境只针对"未分配";要动它,
+                  // 先到它所在集的集头「解散」。锁定的行点标题=看详情。
+                  const lockedInSplit = splitMode && segment.episodeId !== null
+                  const selectable = splitMode && !lockedInSplit
                   return (
                     <TableRow
                       key={segment.id}
                       className={cn(
                         'transition-colors',
-                        splitMode && 'cursor-pointer',
-                        splitMode && isSelected && 'bg-primary/5',
+                        selectable && 'cursor-pointer',
+                        selectable && isSelected && 'bg-primary/5',
+                        lockedInSplit && 'opacity-55',
                       )}
-                      onClick={splitMode ? event => toggleSelect(segment, event.shiftKey, index) : undefined}
+                      onClick={selectable ? event => toggleSelect(segment, event.shiftKey, index) : undefined}
                     >
                       {splitMode && (
                         <TableCell>
                           <span
                             className={cn(
                               'flex size-4 items-center justify-center rounded border',
-                              isSelected ? 'bg-primary border-primary text-primary-foreground' : 'border-input',
+                              isSelected ? 'bg-primary border-primary text-primary-foreground' : lockedInSplit ? 'border-muted-foreground/30 bg-muted' : 'border-input',
                             )}
                             aria-hidden
                           >
@@ -832,7 +841,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                           className="hover:bg-muted/40 -mx-1.5 flex min-w-0 flex-col items-start gap-0.5 rounded-md px-1.5 py-1 text-left transition-colors"
                           aria-label={`${segment.title ?? t('bookSplit.unmarked')} · ${t('bookSplit.viewChapter')}`}
                           onClick={event => {
-                            if (splitMode) return // 放行给整行勾选
+                            if (selectable) return // 放行给整行勾选
                             event.stopPropagation()
                             setChapterTarget(segment)
                           }}
@@ -898,14 +907,6 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
                   })}
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={busy !== null || ![...selected].some(id => matrix.data.segments.find(s => s.id === id)?.episodeId)}
-                onClick={() => void assignSelected(null)}
-              >
-                {t('bookSplit.splitMoveOut')}
-              </Button>
               <GuardedButton
                 action="project:update"
                 variant="outline"
@@ -1191,7 +1192,8 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
 
   return (
     <Dialog open={segment !== null} onOpenChange={open => !open && !saving && onClose()}>
-      <DialogContent className="flex max-h-[92vh] flex-col sm:max-w-3xl">
+      {/* 阅读与编辑是一等动作,画布就要一等大:近全屏(用户五次追问后的定稿)。 */}
+      <DialogContent className="flex h-[92vh] w-[95vw] max-w-none flex-col p-5 sm:max-w-none sm:p-6">
         <DialogHeader>
           <DialogTitle className="truncate">
             {segment?.title ?? t('bookSplit.unmarked')}
@@ -1212,7 +1214,7 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
               value={draft}
               onChange={event => setDraft(event.target.value)}
               disabled={!editable || saving}
-              className="field-sizing-fixed h-full min-h-0 w-full resize-none font-mono text-xs"
+              className="field-sizing-fixed h-full min-h-0 w-full resize-none font-mono text-sm leading-relaxed"
             />
           )}
         </div>
