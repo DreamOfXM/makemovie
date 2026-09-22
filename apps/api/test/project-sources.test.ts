@@ -438,7 +438,77 @@ describe('whole-book upload', () => {
     expect(res.statusCode).toBe(400)
     expect(res.json()).toMatchObject({ error: 'projectSources:badEncoding' })
   })
+
+  it('decodes GBK-named zip entries — the Windows-tool filename case', async () => {
+    const projectId = await createProject('series')
+    const zip = buildStoredZip([
+      { nameBytes: Buffer.concat([gbkName('第1章 开眼'), Buffer.from('.txt')]), data: Buffer.from('开眼的正文。', 'utf8') },
+      { nameBytes: Buffer.concat([gbkName('第2章 灯下'), Buffer.from('.txt')]), data: Buffer.from('灯下的正文。', 'utf8') },
+    ])
+    const res = await uploadBook(projectId, 'windows书.zip', zip)
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ files: 2, segments: 2 })
+    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const { segments } = matrix.json() as { segments: Array<{ title: string | null }> }
+    // Titles must be readable Chinese, not µÚÒ»ÕÂ-style mojibake.
+    expect(segments.map(segment => segment.title)).toEqual(['第1章 开眼', '第2章 灯下'])
+  })
 })
+
+/** Hand byte table for the few characters the GBK test needs; each value is
+ *  self-checked against a real gb18030 decode inside gbkName(). */
+const GBK_BYTES: Record<string, number[]> = {
+  '第': [0xb5, 0xda], '章': [0xd5, 0xc2], '开': [0xbf, 0xaa],
+  '眼': [0xd1, 0xdb], '灯': [0xb5, 0xc6], '下': [0xcf, 0xc2],
+}
+
+function gbkName(text: string): Buffer {
+  const out: number[] = []
+  for (const ch of text) {
+    if (GBK_BYTES[ch]) out.push(...GBK_BYTES[ch])
+    else if (/^[\x20-\x7e]$/.test(ch)) out.push(ch.charCodeAt(0))
+    else throw new Error(`no GBK byte table for ${ch}`)
+  }
+  const bytes = Buffer.from(out)
+  expect(new TextDecoder('gb18030').decode(bytes)).toBe(text)
+  return bytes
+}
+
+/** A stored (uncompressed) zip assembled byte-by-byte, so filenames are raw
+ *  caller-supplied bytes without the UTF-8 flag — what Windows tools emit and
+ *  what JS unzip libs decode into mojibake. Independent of fflate on purpose:
+ *  it exercises the route's own directory parser against the zip spec. */
+function buildStoredZip(entries: Array<{ nameBytes: Buffer; data: Buffer }>): Buffer {
+  const u16 = (v: number) => Buffer.from([v & 0xff, (v >> 8) & 0xff])
+  const u32 = (v: number) => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32LE(v >>> 0)
+    return b
+  }
+  const locals: Buffer[] = []
+  const centrals: Buffer[] = []
+  let offset = 0
+  for (const entry of entries) {
+    const local = Buffer.concat([
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0), u32(0),
+      u32(entry.data.length), u32(entry.data.length), u16(entry.nameBytes.length), u16(0),
+      entry.nameBytes, entry.data,
+    ])
+    locals.push(local)
+    centrals.push(Buffer.concat([
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0), u32(0),
+      u32(entry.data.length), u32(entry.data.length), u16(entry.nameBytes.length),
+      u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), entry.nameBytes,
+    ]))
+    offset += local.length
+  }
+  const dir = Buffer.concat(centrals)
+  const eocd = Buffer.concat([
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+    u32(dir.length), u32(offset), u16(0),
+  ])
+  return Buffer.concat([...locals, dir, eocd])
+}
 
 describe('allocation and apply', () => {
   it('moves chapters between episodes as data and materializes per-episode sources in book order', async () => {

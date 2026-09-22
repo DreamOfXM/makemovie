@@ -541,7 +541,9 @@ export function BookSplitPanel({ projectId, onEpisodesChanged }: BookSplitPanelP
                           onClick={() => setChapterTarget(segment)}
                         >
                           <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
-                          <span className="truncate font-medium">
+                          {/* 标题上限必须显式给:表格自动布局里 max-w-0 的单元格压不住
+                              一整行超长章名,整张表会被撑出屏。 */}
+                          <span className="max-w-md truncate font-medium">
                             {segment.title ?? <span className="text-muted-foreground">{t('bookSplit.unmarked')}</span>}
                           </span>
                         </button>

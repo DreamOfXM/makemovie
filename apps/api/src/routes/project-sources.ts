@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { unzipSync } from 'fflate'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { type PrismaClient } from '@studio/db'
 import { formatDefaults, PROJECT_SOURCE_CHAR_LIMIT, SCRIPT_CHARS_PER_MINUTE } from '@studio/domain'
 import { isChapterMarkerLine, splitChapters } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
+import { unzipEntries, BadZipError } from '../lib/zip.js'
 import { requirePermission } from '../plugins/auth.js'
 
 interface SegmentDto {
@@ -174,28 +174,31 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       }
       for (const part of collected) {
         if (part.filename.toLowerCase().endsWith('.zip')) {
-          let entries: Record<string, Uint8Array>
+          let entries
           try {
-            // unzipSync materializes every entry before we can cap the total —
-            // the request-size ceiling (multipart fileSize, 4 MB per part) is
-            // what bounds the compressed input; the byte cap below bounds the
-            // accumulated output as soon as entries are enumerable.
-            entries = unzipSync(new Uint8Array(part.buffer))
-          } catch {
-            return reply.code(400).send({ error: 'projectSources:badZip' })
+            // Names are decoded with the same policy as file content (strict
+            // UTF-8, then GB18030) — see lib/zip.ts for why fflate's own
+            // decoding is not used. unzipSync materializes every entry before
+            // we can cap the total — the request-size ceiling (multipart
+            // fileSize, 4 MB per part) bounds the compressed input; the byte
+            // cap below bounds the accumulated output as entries enumerate.
+            entries = unzipEntries(part.buffer)
+          } catch (error) {
+            if (error instanceof BadZipError) return reply.code(400).send({ error: 'projectSources:badZip' })
+            throw error
           }
-          for (const [rawPath, data] of Object.entries(entries)) {
-            const inner = rawPath.replace(/\\/g, '/')
+          for (const entry of entries) {
+            const inner = entry.name.replace(/\\/g, '/')
             if (inner.endsWith('/') || inner.split('/').includes('__MACOSX')) continue
             const base = path.posix.basename(inner)
             if (base.startsWith('.')) continue
             const ext = path.posix.extname(base).toLowerCase()
             if (ext !== '.txt' && ext !== '.md') continue
-            unzippedBytes += data.byteLength
+            unzippedBytes += entry.data.byteLength
             if (unzippedBytes > PROJECT_SOURCE_CHAR_LIMIT * 4) {
               return reply.code(400).send({ error: 'projectSources:tooLarge' })
             }
-            const problem = pushChapter(base, Buffer.from(data))
+            const problem = pushChapter(base, entry.data)
             if (problem) return reply.code(400).send({ error: `projectSources:${problem}` })
           }
           continue
