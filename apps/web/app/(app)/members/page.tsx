@@ -4,7 +4,7 @@ import { useCallback, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { CheckIcon, CircleAlertIcon, CrownIcon, Trash2Icon, UserPlusIcon, UsersIcon } from 'lucide-react'
 import { roles, type Role } from '@studio/domain'
-import type { Member } from '@/lib/api'
+import type { Member, MemberSearchHit } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -314,15 +314,11 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
     setExistingMembership(null)
     
     try {
-      console.log('🔍 Searching members with email filter:', email.toLowerCase())
       
       // Call the backend fuzzy search endpoint: GET /members?email=xxx
-      const searchResults = await api<Member[]>('/members?email=' + encodeURIComponent(email.toLowerCase())) as Member[] | undefined
+      const searchResults = await api<MemberSearchHit[]>('/members?email=' + encodeURIComponent(email.toLowerCase()))
       
-      console.log('✅ Search results:', searchResults)
-      console.log('📊 Results length:', searchResults?.length)
       if (searchResults) {
-        console.log('📝 Full results:', JSON.stringify(searchResults, null, 2))
       }
       
       // Filter results client-side for fuzzy matching (defense in depth)
@@ -330,7 +326,6 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
         m.email.toLowerCase().includes(email.toLowerCase())
       )
       
-      console.log('🎯 Fuzzy matched count:', fuzzyMatched?.length)
       
       if (fuzzyMatched && fuzzyMatched.length > 0) {
         // Found matching users - check if any are already members of this org
@@ -338,25 +333,19 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
           m.email === email.toLowerCase() // Exact match first
         )
         
-        console.log('🔖 Already member check:', alreadyMember)
         
-        if (alreadyMember) {
-          setExistingMembership({ 
-            role: alreadyMember.role, 
-            joinedAt: '' // Would need to fetch from membership table
-          })
+        if (alreadyMember?.member) {
+          setExistingMembership({ role: alreadyMember.role ?? '', joinedAt: alreadyMember.joinedAt ?? '' })
           setUserExists(true)
         } else {
-          // User exists but not in this org
+          // Registered elsewhere (or in nobody's org): addable here.
           setUserExists(true)
         }
       } else {
         // No fuzzy match found - user likely doesn't exist
-        console.log('❌ No matches found for', email)
         setUserExists(false)
       }
     } catch (err) {
-      console.error('❌ Search error:', err)
       setError(err instanceof Error ? err.message : '')
       setUserExists(false)
     } finally {
@@ -402,7 +391,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             htmlFor="memberEmail" 
             required 
             error={error && !existingMembership ? error : undefined}
-            hint={checking ? '正在查找...' : t('members.searchHint')}
+            hint={checking ? t('members.searching') : t('members.searchHint')}
           >
             <div className="flex gap-2">
               <Input

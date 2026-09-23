@@ -12,35 +12,37 @@ export async function memberRoutes(app: FastifyInstance): Promise<void> {
   app.get('/members', { preHandler: requirePermission('read') }, async (request, reply) => {
     const auth = request.auth!
     const query = request.query as MemberListQuery
-    
-    // Support fuzzy email search via query param or custom header (for compatibility)
-    const emailFilter = query.email || 
-                       (request.headers['email-filter'] as string | undefined)
-    
-    if (emailFilter && emailFilter.trim()) {
-      console.log('[MEMBERS DEBUG] Email filter:', emailFilter.trim())
-      
-      // Check if user exists in the system (any organization)
+
+    // Fuzzy user lookup by email — across the whole installation, because the
+    // question is "has this person registered at all?". Membership in THIS org
+    // is reported honestly (null role, member: false) so the caller can tell
+    // "found and addable" from "already in here" — never a placeholder role.
+    const emailFilter = typeof query.email === 'string' ? query.email.trim() : ''
+    if (emailFilter) {
       const matchingUsers = await app.db.user.findMany({
-        where: {
-          email: {
-            contains: emailFilter.trim().toLowerCase(),
-            mode: 'insensitive',
-          },
-        },
+        where: { email: { contains: emailFilter.toLowerCase(), mode: 'insensitive' } },
         select: { id: true, email: true, name: true, createdAt: true },
+        take: 20,
       })
-      
-      console.log('[MEMBERS DEBUG] Found users in system:', matchingUsers.length)
-      
-      // Return all matches - caller will check membership separately if needed
-      return matchingUsers.map(u => ({
-        userId: u.id,
-        email: u.email,
-        name: u.name,
-        role: 'VIEWER' as const, // placeholder
-        joinedAt: u.createdAt,
-      }))
+      if (matchingUsers.length === 0) return []
+      // OrganizationMember carries no timestamps; the list branch reports the
+      // user's createdAt as joinedAt, so the search branch does the same.
+      const memberships = await app.db.organizationMember.findMany({
+        where: { organizationId: auth.organizationId, userId: { in: matchingUsers.map(user => user.id) } },
+        select: { userId: true, role: true },
+      })
+      const membershipByUser = new Map(memberships.map(item => [item.userId, item]))
+      return matchingUsers.map(user => {
+        const membership = membershipByUser.get(user.id)
+        return {
+          userId: user.id,
+          email: user.email,
+          name: user.name,
+          role: membership?.role ?? null,
+          member: Boolean(membership),
+          joinedAt: user.createdAt,
+        }
+      })
     }
     
     // No filter: return all members of current org

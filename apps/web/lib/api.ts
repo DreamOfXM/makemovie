@@ -162,6 +162,17 @@ export interface Member {
   joinedAt: string
 }
 
+/** One hit of GET /members?email=…: a registered user plus their standing in
+ *  this organization — role is null and member false when they are addable. */
+export interface MemberSearchHit {
+  userId: string
+  email: string
+  name: string | null
+  role: Role | null
+  member: boolean
+  joinedAt: string | null
+}
+
 /** Prisma returns the workflow enum SCREAMING_SNAKE; the domain speaks snake_case. */
 export type DbWorkflowStatus = Uppercase<WorkflowStatus>
 

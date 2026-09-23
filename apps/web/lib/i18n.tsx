@@ -1054,7 +1054,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.removed': '{email} removed',
     'members.you': 'You',
     'members.joinedAt': 'Joined',
-    'members.count': '{count, plural, one {# member} other {# members}}',
+    'members.count': '{count} member(s)',
+    'members.searching': 'Searching…',
     'members.noMembers': 'No members',
 
     'audit.title': 'Audit log',
@@ -2200,7 +2201,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.noMembers': '暂无团队成员',
     'members.you': '你',
     'members.joinedAt': '加入时间',
-    'members.count': '{count, plural, =0 {无成员} =1 {# 成员} other {# 成员}}',
+    'members.count': '共 {count} 名成员',
+    'members.searching': '正在查找…',
 
     'audit.title': '审计日志',
     'audit.subtitle': '本组织所有写操作，按时间倒序排列。',
