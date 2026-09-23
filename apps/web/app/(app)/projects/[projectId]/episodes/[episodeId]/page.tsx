@@ -16,6 +16,7 @@ import {
   type Episode,
   type GenerationBatch,
   type GenerationTask,
+  type Project,
   type Storyboard,
 } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -71,6 +72,23 @@ export default function EpisodePage() {
   const loadEpisodes = useCallback(() => api<Episode[]>(`/projects/${projectId}/episodes`), [api, projectId])
   const episodes = useAsync<Episode[]>(loadEpisodes, [])
   const episode = episodes.data.find(item => item.id === episodeId) ?? null
+
+  // The project's style is set on the project page; the media panel shows it so
+  // what a run will look like is visible where the run is triggered.
+  const [stylePresetId, setStylePresetId] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    api<Project[]>('/projects')
+      .then(list => {
+        if (!cancelled) setStylePresetId(list.find(item => item.id === projectId)?.stylePresetId ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setStylePresetId(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, projectId])
 
   const view: EpisodeTab = pickedView ?? (episode && (episode.storyboards?.length ?? 0) === 0 ? 'flow' : 'board')
 
@@ -399,7 +417,7 @@ export default function EpisodePage() {
               </Card>
             </div>
 
-            <GenerationsPanel episodeId={episodeId} reloadToken={generationsToken} storyboards={storyboards} />
+            <GenerationsPanel episodeId={episodeId} reloadToken={generationsToken} storyboards={storyboards} stylePresetId={stylePresetId} />
             <div id="step-delivery" className="scroll-mt-20">
               <DeliveryPanel episodeId={episodeId} />
             </div>

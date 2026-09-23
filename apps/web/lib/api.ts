@@ -194,6 +194,8 @@ export interface Project {
   targetDurationMs: number | null
   /** Language the pipeline writes this project's content in; not the console locale. */
   contentLocale: ContentLocale
+  /** The project's default style preset for generation. */
+  stylePresetId: string | null
   createdAt: string
   updatedAt: string
   /** Episode status summary, carried so the lifecycle bar renders without a drill-down. */

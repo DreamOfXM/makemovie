@@ -40,6 +40,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { EpisodeDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
 import { BookSplitPanel } from '@/components/sources/book-split-panel'
+import { ProjectSettingsDialog, SettingsButton } from '@/components/ProjectSettingsDialog'
 
 /**
  * The project surface: everything that belongs to a season rather than to one episode.
@@ -70,6 +71,7 @@ export default function ProjectPage() {
   const [episodeDeleteTarget, setEpisodeDeleteTarget] = useState<Episode | null>(null)
   const [episodeDeleteAllOpen, setEpisodeDeleteAllOpen] = useState(false)
   const [episodeDeleting, setEpisodeDeleting] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   async function removeEpisode(target: Episode) {
     setEpisodeDeleting(true)
@@ -154,6 +156,9 @@ export default function ProjectPage() {
         }
         actions={
           <>
+            {project && (
+              <SettingsButton onClick={() => setSettingsOpen(true)} />
+            )}
             <GuardedButton
               action="project:update"
               variant="outline"
@@ -403,6 +408,14 @@ export default function ProjectPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ProjectSettingsDialog
+        open={settingsOpen}
+        projectId={projectId}
+        currentStyleId={project?.stylePresetId ?? null}
+        onOpenChange={setSettingsOpen}
+        onStyleChanged={projects.reload}
+      />
     </>
   )
 }

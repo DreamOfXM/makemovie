@@ -1,68 +1,19 @@
 'use client'
 
-import { CheckIcon, ClapperboardIcon, DropletsIcon, GhostIcon, LightbulbIcon, SparklesIcon, SunDimIcon, ZapIcon } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CheckIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
-import { Button } from '@/components/ui/button'
+import { useSession } from '@/lib/session'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
-export interface VideoStyle {
+interface StylePreset {
   id: string
-  nameKey: string
-  descriptionKey: string
-  icon: React.ReactNode
+  name: string
+  nameEn?: string
+  description: string
+  isOfficial: boolean
 }
-
-const OFFICIAL_STYLES: VideoStyle[] = [
-  {
-    id: 'realistic',
-    nameKey: 'style.realistic',
-    descriptionKey: 'style.realistic.desc',
-    icon: <ClapperboardIcon className="size-5" />,
-  },
-  {
-    id: 'anime',
-    nameKey: 'style.anime',
-    descriptionKey: 'style.anime.desc',
-    icon: <SparklesIcon className="size-5" />,
-  },
-  {
-    id: 'watercolor',
-    nameKey: 'style.watercolor',
-    descriptionKey: 'style.watercolor.desc',
-    icon: <DropletsIcon className="size-5" />,
-  },
-  {
-    id: 'oil_painting',
-    nameKey: 'style.oil_painting',
-    descriptionKey: 'style.oil_painting.desc',
-    icon: <SunDimIcon className="size-5" />,
-  },
-  {
-    id: 'sketch',
-    nameKey: 'style.sketch',
-    descriptionKey: 'style.sketch.desc',
-    icon: <LightbulbIcon className="size-5" />,
-  },
-  {
-    id: 'comic',
-    nameKey: 'style.comic',
-    descriptionKey: 'style.comic.desc',
-    icon: <ZapIcon className="size-5" />,
-  },
-  {
-    id: '3d_cgi',
-    nameKey: 'style.3d_cgi',
-    descriptionKey: 'style.3d_cgi.desc',
-    icon: <GhostIcon className="size-5" />,
-  },
-  {
-    id: 'fantasy',
-    nameKey: 'style.fantasy',
-    descriptionKey: 'style.fantasy.desc',
-    icon: <SparklesIcon className="size-5" />,
-  },
-]
 
 interface StyleSelectorProps {
   value?: string
@@ -70,12 +21,42 @@ interface StyleSelectorProps {
   disabled?: boolean
 }
 
+const STYLE_ICONS: Record<string, string> = {
+  realistic: '📷',
+  cinematic: '🎬',
+  animation: '🎨',
+  anime: '✨',
+  noir: '🌑',
+  'sci-fi': '🚀',
+  fantasy: '🏰',
+  commercial: '📺',
+}
+
 export function StyleSelector({ value, onChange, disabled }: StyleSelectorProps) {
   const { t } = useI18n()
+  const { api } = useSession()
+  const [styles, setStyles] = useState<StylePreset[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api<{ styles: StylePreset[] }>('/styles')
+      .then(data => setStyles(data.styles))
+      .catch(() => setError(t('error.generic')))
+      .finally(() => setLoading(false))
+  }, [api, t])
+
+  if (loading) {
+    return <div className="text-muted-foreground">{t('common.loading')}</div>
+  }
+
+  if (error) {
+    return <div className="text-destructive">{error}</div>
+  }
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {OFFICIAL_STYLES.map((style) => {
+      {styles.map((style) => {
         const isSelected = value === style.id
         return (
           <Card
@@ -96,7 +77,7 @@ export function StyleSelector({ value, onChange, disabled }: StyleSelectorProps)
                     isSelected ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
                   )}
                 >
-                  {style.icon}
+                  <span className="size-5">{STYLE_ICONS[style.id] || '🎭'}</span>
                 </div>
                 {isSelected && (
                   <div className="flex size-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
@@ -106,33 +87,14 @@ export function StyleSelector({ value, onChange, disabled }: StyleSelectorProps)
               </div>
             </CardHeader>
             <CardContent className="pt-0">
-              <CardTitle className="text-base">{t(style.nameKey)}</CardTitle>
-              <CardDescription className="mt-1 text-xs">{t(style.descriptionKey)}</CardDescription>
+              <CardTitle className="text-base">
+                {style.nameEn ? `${style.name} / ${style.nameEn}` : style.name}
+              </CardTitle>
+              <CardDescription className="mt-1 text-xs">{style.description}</CardDescription>
             </CardContent>
           </Card>
         )
       })}
     </div>
-  )
-}
-
-interface StyleBadgeProps {
-  styleId?: string
-  size?: 'sm' | 'default'
-}
-
-export function StyleBadge({ styleId, size = 'default' }: StyleBadgeProps) {
-  const { t } = useI18n()
-
-  if (!styleId) return null
-
-  const style = OFFICIAL_STYLES.find((s) => s.id === styleId)
-  if (!style) return null
-
-  return (
-    <Button variant="outline" size={size === 'sm' ? 'sm' : 'default'} className="gap-2" disabled>
-      <span className={size === 'sm' ? 'size-4' : 'size-5'}>{style.icon}</span>
-      {t(style.nameKey)}
-    </Button>
   )
 }

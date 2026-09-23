@@ -85,9 +85,11 @@ interface GenerationsPanelProps {
   reloadToken?: number
   /** Live shots, in shot order: the media view is organised around them, not around batches. */
   storyboards: Storyboard[]
+  /** The project's default style preset, shown next to the trigger so what a run will look like is visible. */
+  stylePresetId?: string | null
 }
 
-export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards }: GenerationsPanelProps) {
+export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, stylePresetId = null }: GenerationsPanelProps) {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -96,6 +98,28 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards }: Ge
   const [regenerating, setRegenerating] = useState(false)
   const [composing, setComposing] = useState(false)
   const [cancellingId, setCancellingId] = useState<string | null>(null)
+  /** null = unresolved/lookup failed, '' = resolved to nothing; only a non-empty string names the style. */
+  const [styleName, setStyleName] = useState('')
+
+  useEffect(() => {
+    if (!stylePresetId) {
+      setStyleName('')
+      return
+    }
+    let cancelled = false
+    api<{ styles: Array<{ id: string; name: string; nameEn?: string | null }> }>('/styles')
+      .then(data => {
+        if (cancelled) return
+        const found = data.styles.find(style => style.id === stylePresetId)
+        setStyleName(found ? (locale === 'zh' || !found.nameEn ? found.name : found.nameEn) : '')
+      })
+      .catch(() => {
+        if (!cancelled) setStyleName('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, locale, stylePresetId])
 
   const loadGenerations = useCallback(
     () =>
@@ -295,6 +319,16 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards }: Ge
             {t('generations.title')}
           </CardTitle>
           <CardDescription>{active ? t('generations.pollHint') : t('generations.mediaHint')}</CardDescription>
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <span>
+              {stylePresetId
+                ? styleName
+                  ? t('generations.currentStyle', { name: styleName })
+                  : t('generations.currentStyleSet')
+                : t('generations.currentStyleNone')}
+            </span>
+            <HelpHint text={t('generations.currentStyleHint')} />
+          </div>
           {episodeId && (
             <CardAction>
               <div className="flex flex-wrap items-center gap-2">
