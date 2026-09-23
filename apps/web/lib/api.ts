@@ -700,7 +700,7 @@ export interface UsageReport {
  */
 export function artifactHref(downloadUrl: string): string {
   if (/^https?:\/\//i.test(downloadUrl)) return downloadUrl
-  return `${apiBase}/api${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
+  return `${apiBase}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
 }
 
 /* -------------------------------------------------------------------------- */
