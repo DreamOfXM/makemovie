@@ -21,7 +21,7 @@ export async function resolveSession(db: PrismaClient, token: string): Promise<A
     await db.session.delete({ where: { id: session.id } }).catch(() => undefined)
     return null
   }
-  const membership = session.user.memberships.find(item => item.organizationId === session.organizationId)
+  const membership = session.user.memberships.find((item: { organizationId: string }) => item.organizationId === session.organizationId)
   if (!membership) return null
   return {
     sessionId: session.id,

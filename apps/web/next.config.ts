@@ -9,12 +9,18 @@ const nextConfig: NextConfig = {
   // this key entirely.
   allowedDevOrigins: ['localhost', '127.0.0.1', '192.168.5.99'],
   
-  // Proxy /api requests to backend
+  // Proxy requests to backend API
   async rewrites() {
     return [
+      // Rewrite /api/* to backend /api/*
       {
         source: '/api/:path*',
-        destination: 'http://localhost:4010/:path*',
+        destination: 'http://localhost:4010/api/:path*',
+      },
+      // Rewrite /auth/* to backend /auth/*
+      {
+        source: '/auth/:path*',
+        destination: 'http://localhost:4010/auth/:path*',
       },
     ]
   },

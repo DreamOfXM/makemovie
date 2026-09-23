@@ -54,7 +54,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
   await deps.db.generationTask.update({ where: { id: task.id }, data: { status: 'RUNNING', attempts: payload.attempt } })
   await syncBatchStatus(deps.db, task.batchId)
 
-  const anchor = { organizationId: task.organizationId, taskId: task.id, batchId: task.batchId, episodeId: task.batch.episodeId, stage: task.stage }
+  const anchor = { organizationId: task.organizationId, taskId: task.id, batchId: task.batchId, episodeId: task.batch.episode.id, stage: task.stage }
   await taskLog(deps.db, anchor, 'info', 'task.start', `attempt ${payload.attempt} with ${payload.candidates.length} candidate(s): ${payload.candidates.map(label).join(' → ') || 'none'}`, { attempt: payload.attempt, candidates: payload.candidates.map(label) })
 
   const errors: string[] = []
@@ -108,7 +108,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
 // failure that would re-run this one.
 async function autoAdvance(deps: PipelineDeps, task: TaskRow): Promise<void> {
   try {
-    const result = await advancePipeline({ db: deps.db, enqueueJob: deps.enqueueJob }, task.organizationId, null, task.batch.episodeId, { auto: true })
+    const result = await advancePipeline({ db: deps.db, enqueueJob: deps.enqueueJob }, task.organizationId, null, task.batch.episode.id, { auto: true })
     // A refused stage (the VIDEO first-frame gate, for one) stops the relay silently
     // otherwise — the operator would never learn why the chain stopped mid-way.
     if (!result.ok) process.stderr.write(`auto-advance after batch ${task.batchId} stopped: ${result.error}${result.reasons ? ` (${result.reasons.join(', ')})` : ''}\n`)
@@ -190,7 +190,7 @@ async function runCandidate(
     const objectKey = buildObjectKey({
       tenantId: task.organizationId,
       projectId: task.batch.episode.project.id,
-      episodeId: task.batch.episodeId,
+      episodeId: task.batch.episode.id,
       stage: task.stage,
       entityId: task.id,
       version: payload.attempt,
@@ -388,7 +388,7 @@ async function runSegmentedStoryboard(
       const objectKey = buildObjectKey({
         tenantId: task.organizationId,
         projectId: task.batch.episode.project.id,
-        episodeId: task.batch.episodeId,
+        episodeId: task.batch.episode.id,
         stage: task.stage,
         // 段号进 objectKey:同一任务同一次尝试的各段产物互不覆盖,审计能对回每一次调用。
         entityId: `${task.id}-seg${index + 1}`,

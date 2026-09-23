@@ -1,4 +1,5 @@
 import type { ContentLocale } from '@studio/domain'
+import type { StylePreset } from './styles/index.js'
 
 /**
  * The prompt text for the stages that *write content* (script, storyboard, music
@@ -97,7 +98,7 @@ export function buildFilmScriptPrompt(locale: ContentLocale, bookContent: string
   return withDirective(locale, ['根据以下整部小说，提炼改编为一部完整电影的拍摄剧本。', '', ...distill, ...duration, ...sceneRules(), '', '小说原文：', bookContent].join('\n'))
 }
 
-export function buildStoryboardPrompt(locale: ContentLocale, scriptContent: string, targetShotMs = 5_000, shotBudget?: number): string {
+export function buildStoryboardPrompt(locale: ContentLocale, scriptContent: string, targetShotMs = 5_000, shotBudget?: number, style?: StylePreset): string {
   // 单镜容量随绑定视频模型的能力伸缩:5 秒的免费档一镜一句,30 秒的模型一镜
   // 能承载一整段对话。台词预算按自然语速(约 3.5 字/秒)折算,不让拆分写死在
   // 任何一个模型上。
@@ -106,6 +107,7 @@ export function buildStoryboardPrompt(locale: ContentLocale, scriptContent: stri
   // 分段分镜(4b)传入的整集预算折算值:长剧本按段调用时,每段拿到自己那份
   // 镜头配额,防止每段都按"一集"的规模自由发挥导致总镜头数失控。
   const budgetRule = shotBudget === undefined ? '' : `\n- 镜头数量预算：本段剧本约拆 ${shotBudget} 个镜头（按整集目标时长对本段折算）。允许略有出入，但不得为凑数注水，也不得把多个视听瞬间塞进同一镜来压缩数量。`
+  const styleTone = style ? `\n\n风格要求：${style.tone}` : ''
   return withDirective(locale, [
     '把以下剧本拆分成连续的分镜镜头，并从中提取这一集要用到的角色、道具和场景。',
     '只输出一个 JSON 对象，不要任何其它说明，结构如下：',
@@ -123,7 +125,7 @@ export function buildStoryboardPrompt(locale: ContentLocale, scriptContent: stri
     '',
     '剧本：',
     scriptContent,
-  ].join('\n'))
+  ].join('\n') + styleTone)
 }
 
 /**

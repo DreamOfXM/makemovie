@@ -89,7 +89,7 @@ beforeAll(async () => {
   await env.register('gen-editor@example.com', 'Generation Editor Org')
   await env.register('gen-viewer@example.com', 'Generation Viewer Org')
   for (const [email, role] of [['gen-editor@example.com', 'EDITOR'], ['gen-viewer@example.com', 'VIEWER']] as const) {
-    const added = await env.app.inject({ method: 'POST', url: '/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
+    const added = await env.app.inject({ method: 'POST', url: '/api/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
     expect(added.statusCode).toBe(201)
     const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email, password: 'password123', organizationId } })
     expect(login.statusCode).toBe(200)
@@ -97,31 +97,31 @@ beforeAll(async () => {
     else viewerToken = login.json().token as string
   }
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Generation Drama' } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Generation Drama' } })
   expect(project.statusCode).toBe(201)
   projectId = project.json().id as string
 
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
   for (const [number, title, description] of [[1, 'SB1', 'Opening scene'], [2, 'SB2', 'Chase scene']] as const) {
     const storyboard = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
       payload: { number, title, durationMs: 8000, description, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(storyboard.statusCode).toBe(201)
     storyboardIds.push(storyboard.json().id as string)
   }
 
-  const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: env.authHeaders(ownerToken), payload: { provider: 'mock', name: 'gen-main', apiKey: 'test-key' } })
+  const connection = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: env.authHeaders(ownerToken), payload: { provider: 'mock', name: 'gen-main', apiKey: 'test-key' } })
   expect(connection.statusCode).toBe(201)
   const capabilities = (connection.json() as Connection).capabilities
-  const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: env.authHeaders(ownerToken) })
+  const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${(connection.json() as Connection).id}/probe`, headers: env.authHeaders(ownerToken) })
   expect(probe.statusCode).toBe(200)
   for (const [slot, model] of [['script_text', 'mock-text'], ['video_t2v', 'mock-t2v']] as const) {
     const binding = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: env.authHeaders(ownerToken),
+      method: 'POST', url: '/api/bindings', headers: env.authHeaders(ownerToken),
       payload: { slot, capabilityId: capabilities.find(capability => capability.model === model)!.id },
     })
     expect(binding.statusCode).toBe(201)
@@ -143,14 +143,14 @@ const authHeaders = (token: string) => env.authHeaders(token)
 
 describe('generation trigger', () => {
   it('refuses viewers and unknown episodes', async () => {
-    const forbidden = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken), payload: { stage: 'SCRIPT' } })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken), payload: { stage: 'SCRIPT' } })
     expect(forbidden.statusCode).toBe(403)
     expect(forbidden.json().error).toMatch(/generation:trigger/)
 
-    const missing = await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/generations', headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/generations', headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(missing.statusCode).toBe(404)
 
-    const badStage = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'DELIVERY' } })
+    const badStage = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'DELIVERY' } })
     expect(badStage.statusCode).toBe(400)
   })
 
@@ -158,7 +158,7 @@ describe('generation trigger', () => {
     const sourceContent = '原小说：雨夜的滨江老城区，一桩离奇失踪案。'
     await env.db.sourceDocumentVersion.create({ data: { episodeId, version: 1, content: sourceContent, checksum: 'src-ep1', status: 'APPROVED' } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     expect(batch.stage).toBe('SCRIPT')
@@ -198,7 +198,7 @@ describe('generation trigger', () => {
     // is generated, so the shared episode needs one before this VIDEO trigger.
     await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: 'approved script for media', checksum: 'media-script', status: 'APPROVED' } })
     const res = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken),
       payload: { stage: 'VIDEO', storyboardIds: [storyboardIds[1]] },
     })
     expect(res.statusCode).toBe(201)
@@ -230,14 +230,14 @@ describe('generation trigger', () => {
     expect(linked.storyboards.map(storyboard => storyboard.id)).toEqual([storyboardIds[1]])
 
     const foreign = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken),
       payload: { stage: 'VIDEO', storyboardIds: ['not-this-episode'] },
     })
     expect(foreign.statusCode).toBe(400)
   })
 
   it('returns the existing batch on a duplicate submit', async () => {
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(200)
     expect(res.json().batch.id).toBe(scriptBatchId)
     expect(await env.db.generationTask.count({ where: { batchId: scriptBatchId } })).toBe(1)
@@ -248,7 +248,7 @@ describe('generation trigger', () => {
     // 一键重试失败项的契约底座:幂等撞库时死任务重置排队、活任务不动、批次不新增。
     await env.db.generationTask.update({ where: { id: scriptTaskId }, data: { status: 'FAILED', attempts: 3, provider: 'mock', model: 'mock-text', errorSnapshot: 'quota exhausted after 3 attempts' } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(200)
     expect(res.json().batch.id).toBe(scriptBatchId)
 
@@ -263,7 +263,7 @@ describe('generation trigger', () => {
 
   it('rejects a stage whose slot has no verified binding', async () => {
     for (const stage of ['IMAGE', 'AUDIO']) {
-      const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+      const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
       expect(res.statusCode).toBe(409)
       expect(res.json().error).toMatch(/no verified candidates for slot/)
     }
@@ -273,7 +273,7 @@ describe('generation trigger', () => {
 
 describe('generation listing', () => {
   it('lists batches with tasks that have no artifacts or quality checks yet', async () => {
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     const body = res.json() as { batches: BatchDto[]; composition: CompositionDto | null }
     expect(body.composition).toBeNull()
@@ -288,33 +288,33 @@ describe('generation listing', () => {
       }
     }
 
-    const missing = await env.app.inject({ method: 'GET', url: '/episodes/does-not-exist/generations', headers: authHeaders(viewerToken) })
+    const missing = await env.app.inject({ method: 'GET', url: '/api/episodes/does-not-exist/generations', headers: authHeaders(viewerToken) })
     expect(missing.statusCode).toBe(404)
   })
 })
 
 describe('task cancellation', () => {
   it('cancels a queued task once and refuses a second cancel', async () => {
-    const forbidden = await env.app.inject({ method: 'POST', url: `/generations/tasks/${videoTaskId}/cancel`, headers: authHeaders(viewerToken) })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/api/generations/tasks/${videoTaskId}/cancel`, headers: authHeaders(viewerToken) })
     expect(forbidden.statusCode).toBe(403)
 
-    const res = await env.app.inject({ method: 'POST', url: `/generations/tasks/${scriptTaskId}/cancel`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/generations/tasks/${scriptTaskId}/cancel`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
     expect((res.json().task as TaskDto).status).toBe('CANCELLED')
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: scriptTaskId } })
     expect(stored.status).toBe('CANCELLED')
 
-    const again = await env.app.inject({ method: 'POST', url: `/generations/tasks/${scriptTaskId}/cancel`, headers: authHeaders(editorToken) })
+    const again = await env.app.inject({ method: 'POST', url: `/api/generations/tasks/${scriptTaskId}/cancel`, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
 
-    const missing = await env.app.inject({ method: 'POST', url: '/generations/tasks/does-not-exist/cancel', headers: authHeaders(editorToken) })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/generations/tasks/does-not-exist/cancel', headers: authHeaders(editorToken) })
     expect(missing.statusCode).toBe(404)
   })
 })
 
 describe('batch cancellation', () => {
   it('cancels only the queued tasks of a batch, refuses a second stop, and audits it', async () => {
-    const missing = await env.app.inject({ method: 'POST', url: '/generations/batches/no-such-batch/cancel', headers: authHeaders(editorToken) })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/generations/batches/no-such-batch/cancel', headers: authHeaders(editorToken) })
     expect(missing.statusCode).toBe(404)
 
     const batch = await env.db.generationBatch.create({
@@ -327,10 +327,10 @@ describe('batch cancellation', () => {
         ] },
       },
     })
-    const forbidden = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(viewerToken) })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/api/generations/batches/${batch.id}/cancel`, headers: authHeaders(viewerToken) })
     expect(forbidden.statusCode).toBe(403)
 
-    const res = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
     const body = res.json() as { cancelled: number; batch: BatchDto }
     expect(body.cancelled).toBe(2)
@@ -341,7 +341,7 @@ describe('batch cancellation', () => {
     expect(running.status).toBe('RUNNING')
     expect((await env.db.generationBatch.findUniqueOrThrow({ where: { id: batch.id } })).status).toBe('RUNNING')
 
-    const again = await env.app.inject({ method: 'POST', url: `/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
+    const again = await env.app.inject({ method: 'POST', url: `/api/generations/batches/${batch.id}/cancel`, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
 
     const event = await env.db.auditEvent.findFirst({ where: { organizationId, action: 'generation.cancel', entityType: 'generation-batch' }, orderBy: { createdAt: 'desc' } })
@@ -356,17 +356,17 @@ describe('batch cancellation', () => {
 
 describe('prompt guards on trigger', () => {
   async function newProject(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
 
   async function addShot(targetEpisodeId: string, number: number, title: string, description: string): Promise<string> {
     const created = await env.app.inject({
-      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number, title, durationMs: 5000, description, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(created.statusCode).toBe(201)
@@ -383,23 +383,23 @@ describe('prompt guards on trigger', () => {
     unboundShotId = await addShot(episodeId, 2, '空巷', '夜色下的青石板路')
     await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '守夜人点睛', checksum: `guard-${randomUUID()}`, status: 'APPROVED' } })
 
-    const asset = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'character', name: '关师傅', description: '六十岁老匠人，灰白长须，粗布对襟衫' } })
+    const asset = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'character', name: '关师傅', description: '六十岁老匠人，灰白长须，粗布对襟衫' } })
     expect(asset.statusCode).toBe(201)
     const assetId = asset.json().asset.id as string
     await env.db.asset.update({ where: { id: assetId }, data: { status: 'APPROVED' } })
     await env.db.storyboardAsset.create({ data: { storyboardId: anchoredShotId, assetId, role: 'character' } })
 
-    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'guard-gen', apiKey: 'test-key' } })
+    const connection = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'guard-gen', apiKey: 'test-key' } })
     const capabilities = (connection.json() as Connection).capabilities
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     const binding = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(ownerToken),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken),
       payload: { slot: 'image_gen', capabilityId: capabilities.find(capability => capability.model === 'mock-image')!.id, projectId: guardProjectId },
     })
     expect(binding.statusCode).toBe(201)
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     expect(batch.plannedCount).toBe(2)
@@ -426,12 +426,12 @@ describe('prompt guards on trigger', () => {
   })
 
   it('revives the blocked shot through the retry path once a human binds an asset', async () => {
-    const scene = await env.app.inject({ method: 'POST', url: `/episodes/${guardEpisodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'scene', name: '青石巷', description: '夜色下的青石板路' } })
+    const scene = await env.app.inject({ method: 'POST', url: `/api/episodes/${guardEpisodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'scene', name: '青石巷', description: '夜色下的青石板路' } })
     const sceneId = scene.json().asset.id as string
     await env.db.asset.update({ where: { id: sceneId }, data: { status: 'APPROVED' } })
     await env.db.storyboardAsset.create({ data: { storyboardId: unboundShotId, assetId: sceneId, role: 'scene' } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${guardEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${guardEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
     expect(res.statusCode).toBe(200)
     const blockedBefore = await env.db.generationTask.findFirstOrThrow({ where: { storyboardId: unboundShotId, stage: 'FIRST_FRAME' } })
     expect(blockedBefore.status).toBe('QUEUED')
@@ -453,7 +453,7 @@ describe('artifact content', () => {
     const artifact = await env.db.mediaArtifact.create({
       data: { organizationId, taskId: videoTaskId, stage: 'VIDEO', objectKey, checksum: 'checksum-1', mimeType: 'image/png', version: 1, width: 320, height: 240 },
     })
-    const res = await env.app.inject({ method: 'GET', url: `/artifacts/${artifact.id}/content`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/artifacts/${artifact.id}/content`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-type']).toBe('image/png')
     expect(res.headers['content-length']).toBe(String(bytes.length))
@@ -462,14 +462,14 @@ describe('artifact content', () => {
     const missing = await env.db.mediaArtifact.create({
       data: { organizationId, objectKey: `${organizationId}/gone/v1.mp4`, checksum: 'checksum-2', mimeType: 'video/mp4', version: 1 },
     })
-    expect((await env.app.inject({ method: 'GET', url: `/artifacts/${missing.id}/content`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/artifacts/${missing.id}/content`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
 
     const foreign = await env.db.mediaArtifact.create({
       data: { organizationId: 'another-org', objectKey, checksum: 'checksum-3', mimeType: 'image/png', version: 2 },
     })
-    expect((await env.app.inject({ method: 'GET', url: `/artifacts/${foreign.id}/content`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'GET', url: '/artifacts/does-not-exist/content', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'GET', url: `/artifacts/${artifact.id}/content` })).statusCode).toBe(401)
+    expect((await env.app.inject({ method: 'GET', url: `/api/artifacts/${foreign.id}/content`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: '/api/artifacts/does-not-exist/content', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/artifacts/${artifact.id}/content` })).statusCode).toBe(401)
   })
 
   it('surfaces artifacts and their latest quality check through the batch DTO', async () => {
@@ -477,7 +477,7 @@ describe('artifact content', () => {
     for (const [kind, score] of [['visual', 0.4], ['visual', 0.9]] as const) {
       await env.db.qualityCheck.create({ data: { status: 'COMPLETED', kind, score, report: '{}', artifactId: artifact.id, batchId: null } })
     }
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     const body = res.json() as { batches: BatchDto[] }
     const task = body.batches.flatMap(batch => batch.tasks).find(candidate => candidate.id === videoTaskId)!
     expect(task.artifacts).toEqual([{
@@ -496,7 +496,7 @@ describe('artifact content', () => {
     await env.db.qualityCheck.create({
       data: { status: 'NEEDS_REVIEW', kind: 'visual-audit', score: null, report: '{}', artifactId: artifact.id, batchId: null },
     })
-    const unjudged = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const unjudged = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     const unjudgedTask = (unjudged.json() as { batches: BatchDto[] }).batches
       .flatMap(batch => batch.tasks)
       .find(candidate => candidate.id === videoTaskId)!
@@ -506,10 +506,10 @@ describe('artifact content', () => {
 
 describe('episode composition', () => {
   it('creates a running composition and enqueues the compose job', async () => {
-    const forbidden = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(viewerToken) })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(viewerToken) })
     expect(forbidden.statusCode).toBe(403)
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     const composition = res.json().composition as CompositionDto
     expect(composition.status).toBe('RUNNING')
@@ -522,7 +522,7 @@ describe('episode composition', () => {
     const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
     expect(JSON.parse(stored.manifest)).toEqual({ storyboardIds })
 
-    const listed = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const listed = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     expect((listed.json() as { composition: CompositionDto | null }).composition?.id).toBe(composition.id)
   })
 
@@ -544,7 +544,7 @@ describe('episode composition', () => {
       data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: master.id, subtitleArtifactId: subtitleArtifact.id, scoreArtifactId: score.id },
     })
 
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     const composition = (res.json() as { composition: CompositionDto | null }).composition!
     expect(composition.id).toBe(finished.id)
@@ -555,20 +555,20 @@ describe('episode composition', () => {
     await env.db.mediaArtifact.create({
       data: { organizationId, stage: 'MUSIC', objectKey: `${organizationId}/comp/score/v2.m4a`, checksum: 'score-bought-later', mimeType: 'audio/mp4', version: 2, durationMs: 6000 },
     })
-    const relisted = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    const relisted = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
     expect((relisted.json() as { composition: CompositionDto | null }).composition?.score).toMatchObject({
       id: score.id,
       objectKey: `${organizationId}/comp/score/v1.m4a`,
       downloadUrl: `/artifacts/${score.id}/content`,
     })
 
-    const downloaded = await env.app.inject({ method: 'GET', url: `/artifacts/${subtitleArtifact.id}/content`, headers: authHeaders(viewerToken) })
+    const downloaded = await env.app.inject({ method: 'GET', url: `/api/artifacts/${subtitleArtifact.id}/content`, headers: authHeaders(viewerToken) })
     expect(downloaded.statusCode).toBe(200)
     expect(downloaded.rawPayload.toString('utf8')).toBe(cues)
   })
 
   it('records trigger, cancel and composition events in the audit trail', async () => {
-    const res = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
     const events = res.json().events as { action: string; entityType: string }[]
     expect(events.some(event => event.action === 'generation.trigger' && event.entityType === 'generation-batch')).toBe(true)
@@ -582,17 +582,17 @@ describe('episode composition', () => {
 // generation side, on fresh episodes so the shared-episode assertions above hold.
 describe('generation candidate resolution', () => {
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
 
   async function addStoryboard(targetEpisodeId: string): Promise<void> {
     const storyboard = await env.app.inject({
-      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'Rooftop chase', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(storyboard.statusCode).toBe(201)
@@ -604,7 +604,7 @@ describe('generation candidate resolution', () => {
   async function bindSceneTo(targetEpisodeId: string, name: string): Promise<void> {
     const storyboard = await env.db.storyboard.findFirstOrThrow({ where: { episodeId: targetEpisodeId } })
     const created = await env.app.inject({
-      method: 'POST', url: `/episodes/${targetEpisodeId}/assets`, headers: authHeaders(editorToken),
+      method: 'POST', url: `/api/episodes/${targetEpisodeId}/assets`, headers: authHeaders(editorToken),
       payload: { kind: 'scene', name, description: `${name}，夜景` },
     })
     expect(created.statusCode).toBe(201)
@@ -614,16 +614,16 @@ describe('generation candidate resolution', () => {
   }
 
   async function newConnection(name: string): Promise<Connection> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     return connection
   }
 
   async function bindSlot(slot: string, capabilityId: string, scope?: string, priority = 0): Promise<void> {
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
     expect(binding.statusCode).toBe(201)
   }
 
@@ -645,7 +645,7 @@ describe('generation candidate resolution', () => {
     await bindSlot('image_gen', image(first), undefined, 5)
     await bindSlot('image_gen', image(second), undefined, 0)
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${freshEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${freshEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
     expect(res.statusCode).toBe(201)
     const task = (res.json().batch as BatchDto).tasks[0]
     const payload = (await queue.getJob(`run-${task.id}-1`))?.data as RunTaskPayload
@@ -668,13 +668,13 @@ describe('generation candidate resolution', () => {
     await bindSlot('image_gen', capabilityOf(connection, 'mock-image'))
     await bindSlot('tts_voice', capabilityOf(connection, 'mock-tts'))
 
-    const whileEnabled = await env.app.inject({ method: 'POST', url: `/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
+    const whileEnabled = await env.app.inject({ method: 'POST', url: `/api/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'IMAGE' } })
     expect(whileEnabled.statusCode).toBe(201)
 
-    const disabled = await env.app.inject({ method: 'PATCH', url: `/providers/connections/${connection.id}`, headers: authHeaders(ownerToken), payload: { enabled: false } })
+    const disabled = await env.app.inject({ method: 'PATCH', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(ownerToken), payload: { enabled: false } })
     expect(disabled.statusCode).toBe(200)
     // A different stage on the same episode, so the idempotency key cannot mask the 409.
-    const afterDisable = await env.app.inject({ method: 'POST', url: `/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    const afterDisable = await env.app.inject({ method: 'POST', url: `/api/episodes/${connectionEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
     expect(afterDisable.statusCode).toBe(409)
     expect(afterDisable.json().error).toBe('no verified candidates for slot tts_voice')
 
@@ -686,7 +686,7 @@ describe('generation candidate resolution', () => {
     // Revoke both tiers: the connection probe's credential stamp and any model-level belief.
     await env.db.modelCapability.update({ where: { id: capabilityId }, data: { entitlementVerifiedAt: null, credentialVerifiedAt: null } })
 
-    const afterRevoke = await env.app.inject({ method: 'POST', url: `/episodes/${entitlementEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    const afterRevoke = await env.app.inject({ method: 'POST', url: `/api/episodes/${entitlementEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
     expect(afterRevoke.statusCode).toBe(409)
     expect(afterRevoke.json().error).toBe('no verified candidates for slot storyboard_text')
   })
@@ -694,25 +694,25 @@ describe('generation candidate resolution', () => {
 
 describe('asset generation trigger', () => {
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
 
   async function newConnection(name: string): Promise<Connection> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     return connection
   }
 
   async function bindSlot(slot: string, capabilityId: string, scope?: string, priority = 0): Promise<void> {
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope, priority } })
     expect(binding.statusCode).toBe(201)
   }
 
@@ -736,12 +736,12 @@ describe('asset generation trigger', () => {
     await bindSlot('image_gen', capabilityOf(connection, 'mock-image'), projectId)
 
     for (const seed of assetSeeds) {
-      const created = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: seed })
+      const created = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/assets`, headers: authHeaders(editorToken), payload: seed })
       expect(created.statusCode).toBe(201)
       assetIds.push(created.json().asset.id as string)
     }
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     expect(batch.stage).toBe('ASSET')
@@ -789,20 +789,20 @@ describe('asset generation trigger', () => {
   })
 
   it('returns the existing batch on a duplicate asset trigger', async () => {
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${assetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${assetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
     expect(res.statusCode).toBe(200)
     expect(res.json().batch.id).toBe(assetBatchId)
     expect(await env.db.generationTask.count({ where: { batchId: assetBatchId } })).toBe(2)
   })
 
   it('refuses viewers and episodes without assets', async () => {
-    const forbidden = await env.app.inject({ method: 'POST', url: `/episodes/${assetEpisodeId}/generations`, headers: authHeaders(viewerToken), payload: { stage: 'ASSET' } })
+    const forbidden = await env.app.inject({ method: 'POST', url: `/api/episodes/${assetEpisodeId}/generations`, headers: authHeaders(viewerToken), payload: { stage: 'ASSET' } })
     expect(forbidden.statusCode).toBe(403)
     expect(forbidden.json().error).toMatch(/generation:trigger/)
 
-    const empty = await env.app.inject({ method: 'POST', url: `/projects/${assetProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 2, title: 'Asset Drama EP2' } })
+    const empty = await env.app.inject({ method: 'POST', url: `/api/projects/${assetProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 2, title: 'Asset Drama EP2' } })
     expect(empty.statusCode).toBe(201)
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${empty.json().id as string}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${empty.json().id as string}/generations`, headers: authHeaders(editorToken), payload: { stage: 'ASSET' } })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'episode has no assets to generate' })
   })
@@ -810,14 +810,14 @@ describe('asset generation trigger', () => {
 
 describe('storyboard media', () => {
   it('exposes each storyboard\'s latest succeeded first-frame and video, and null when absent', async () => {
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 7, title: 'Media EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 7, title: 'Media EP' } })
     expect(episode.statusCode).toBe(201)
     const mediaEpisodeId = episode.json().id as string
 
     const storyboardIdsLocal: string[] = []
     for (const [number, title] of [[1, 'Media SB1'], [2, 'Media SB2']] as const) {
       const created = await env.app.inject({
-        method: 'POST', url: `/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        method: 'POST', url: `/api/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
         payload: { number, title, durationMs: 5000, description: 'a quiet street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
       })
       expect(created.statusCode).toBe(201)
@@ -839,7 +839,7 @@ describe('storyboard media', () => {
       data: { organizationId, taskId: videoTask.id, stage: 'VIDEO', objectKey: `${organizationId}/media-ep/video/v1.mp4`, checksum: 'v-1', mimeType: 'video/mp4', version: 1, durationMs: 5000 },
     })
 
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${mediaEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     const rows = res.json() as Array<{ id: string; firstFrame: ArtifactDto | null; video: ArtifactDto | null }>
     const populated = rows.find(row => row.id === withMedia)!
@@ -862,21 +862,21 @@ describe('storyboard media', () => {
       ],
     })
 
-    const res = await env.app.inject({ method: 'GET', url: `/generations/tasks/${logTask.id}/logs`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/generations/tasks/${logTask.id}/logs`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     const body = res.json() as { logs: Array<{ event: string; level: string; message: string }> }
     expect(body.logs.map(log => log.event)).toEqual(['task.start', 'candidate.skip'])
 
-    const missing = await env.app.inject({ method: 'GET', url: '/generations/tasks/nope/logs', headers: authHeaders(viewerToken) })
+    const missing = await env.app.inject({ method: 'GET', url: '/api/generations/tasks/nope/logs', headers: authHeaders(viewerToken) })
     expect(missing.statusCode).toBe(404)
   })
 
   it('prefers the latest revision when a storyboard has been regenerated', async () => {
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 8, title: 'Revision EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 8, title: 'Revision EP' } })
     expect(episode.statusCode).toBe(201)
     const revisionEpisodeId = episode.json().id as string
     const created = await env.app.inject({
-      method: 'POST', url: `/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'Rev SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(created.statusCode).toBe(201)
@@ -901,7 +901,7 @@ describe('storyboard media', () => {
       data: { organizationId, taskId: regenTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/rev/ff-regen.png`, checksum: 'rev-regen', mimeType: 'image/png', version: 1, width: 320, height: 240 },
     })
 
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${revisionEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     const rows = res.json() as Array<{ id: string; firstFrame: ArtifactDto | null }>
     const row = rows.find(candidate => candidate.id === sbId)!
@@ -910,11 +910,11 @@ describe('storyboard media', () => {
   })
 
   it('clears a stage error the moment a newer take succeeds, and shows a newer failure over an older win', async () => {
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 10, title: 'Error Cleared EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 10, title: 'Error Cleared EP' } })
     expect(episode.statusCode).toBe(201)
     const errorEpisodeId = episode.json().id as string
     const created = await env.app.inject({
-      method: 'POST', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'Err SB1', durationMs: 5000, description: 'a lane', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(created.statusCode).toBe(201)
@@ -933,36 +933,36 @@ describe('storyboard media', () => {
 
     // 旧失败:额度耗尽,横幅出现在首帧列。
     await createTask('FIRST_FRAME', 'FAILED', '2024-01-01T00:00:00Z', '', '["quota gone"]')
-    let rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    let rows = (await env.app.inject({ method: 'GET', url: `/api/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
     expect(rows.find(row => row.id === sbId)!.firstFrameError).toContain('quota gone')
 
     // 重生成成功:产物落位,旧失败横幅必须随之消失。
     const okTask = await createTask('FIRST_FRAME', 'SUCCEEDED', '2024-06-01T00:00:00Z', ':r1')
     await env.db.mediaArtifact.create({ data: { organizationId, taskId: okTask.id, stage: 'FIRST_FRAME', objectKey: `${organizationId}/err/ff.png`, checksum: 'err-ff', mimeType: 'image/png', version: 1, width: 320, height: 240 } })
-    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    rows = (await env.app.inject({ method: 'GET', url: `/api/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
     const cleared = rows.find(row => row.id === sbId)!
     expect(cleared.firstFrame).not.toBeNull()
     expect(cleared.firstFrameError).toBeNull()
 
     // 成功之后又失败:显示的是新失败,而不是继续挂着旧失败。
     await createTask('FIRST_FRAME', 'FAILED', '2024-09-01T00:00:00Z', ':r2', '["new failure"]')
-    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    rows = (await env.app.inject({ method: 'GET', url: `/api/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
     const refailed = rows.find(row => row.id === sbId)!
     expect(refailed.firstFrameError).toContain('new failure')
     expect(refailed.firstFrameError).not.toContain('quota gone')
 
     // 点了重新生成:一次更新的尝试在途,旧失败横幅退场(进行中的展示由 busy 指示负责)。
     await createTask('FIRST_FRAME', 'QUEUED', '2024-12-01T00:00:00Z', ':r3')
-    rows = (await env.app.inject({ method: 'GET', url: `/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
+    rows = (await env.app.inject({ method: 'GET', url: `/api/episodes/${errorEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })).json() as Array<{ id: string; firstFrameError: string | null; firstFrame: unknown }>
     expect(rows.find(row => row.id === sbId)!.firstFrameError).toBeNull()
   })
 
   it('files a hand-added shot in the live revision and scopes number conflicts to it', async () => {
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 9, title: 'Hand Add EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 9, title: 'Hand Add EP' } })
     expect(episode.statusCode).toBe(201)
     const handEpisodeId = episode.json().id as string
     const first = await env.app.inject({
-      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'Hand SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(first.statusCode).toBe(201)
@@ -977,7 +977,7 @@ describe('storyboard media', () => {
     })
 
     const added = await env.app.inject({
-      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 2, title: 'Hand SB2', durationMs: 5000, description: 'an alley', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(added.statusCode).toBe(201)
@@ -987,13 +987,13 @@ describe('storyboard media', () => {
     // Number 1 is taken in the live revision but free in the archived one, so
     // the conflict is reported against the revision, not the episode.
     const clash = await env.app.inject({
-      method: 'POST', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'Hand SB1 dup', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(clash.statusCode).toBe(409)
     expect(clash.json().error).toContain('already exists in this revision')
 
-    const live = await env.app.inject({ method: 'GET', url: `/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    const live = await env.app.inject({ method: 'GET', url: `/api/episodes/${handEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
     const rows = live.json() as Array<{ revision: number; number: number }>
     expect(rows.map(row => `${row.revision}.${row.number}`).sort()).toEqual(['2.1', '2.2'])
   })
@@ -1001,34 +1001,34 @@ describe('storyboard media', () => {
 
 describe('AI content stage gating', () => {
   it('refuses SCRIPT generation without an approved source', async () => {
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 20, title: 'No Source EP' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 20, title: 'No Source EP' } })
     const epId = ep.json().id as string
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toBe('generations:noApprovedSource')
   })
 
   it('refuses STORYBOARD generation without an approved script', async () => {
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 21, title: 'No Script EP' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 21, title: 'No Script EP' } })
     const epId = ep.json().id as string
     await env.db.sourceDocumentVersion.create({ data: { episodeId: epId, version: 1, content: 'a source', checksum: 'gate-src', status: 'APPROVED' } })
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toBe('generations:noApprovedScript')
   })
 
   it('refuses media stages without an approved script', async () => {
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 23, title: 'No Script Media EP' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 23, title: 'No Script Media EP' } })
     const epId = ep.json().id as string
     // A storyboard so IMAGE/VIDEO reach the script gate rather than the
     // "no storyboards to generate" 400.
     const sb = await env.app.inject({
-      method: 'POST', url: `/episodes/${epId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${epId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(sb.statusCode).toBe(201)
     for (const stage of ['IMAGE', 'VIDEO', 'AUDIO']) {
-      const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+      const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
       expect(res.statusCode).toBe(409)
       expect(res.json().error).toBe('generations:noApprovedScript')
     }
@@ -1036,13 +1036,13 @@ describe('AI content stage gating', () => {
 
   it('links generated storyboards to the approved script in the request snapshot', async () => {
     const capability = await env.db.modelCapability.findFirstOrThrow({ where: { model: 'mock-text', connection: { organizationId } } })
-    await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id } })
+    await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id } })
 
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 22, title: 'Script EP' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 22, title: 'Script EP' } })
     const epId = ep.json().id as string
     const script = await env.db.scriptVersion.create({ data: { episodeId: epId, version: 1, content: 'the approved script', checksum: 'gate-script', status: 'APPROVED' } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${epId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: batch.tasks[0].id } })
@@ -1054,12 +1054,12 @@ describe('AI content stage gating', () => {
 
 describe('run-pipeline', () => {
   it('refuses when nothing is runnable and advances to SCRIPT once a source is approved', async () => {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Pipeline Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Pipeline Drama' } })
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
     const episodeId = episode.json().id as string
 
-    const nothing = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const nothing = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(nothing.statusCode).toBe(409)
     expect(nothing.json().error).toBe('pipeline:nothingRunnable')
 
@@ -1067,35 +1067,35 @@ describe('run-pipeline', () => {
     // starts the chain itself, and this test is about the button doing the advancing.
     await env.db.sourceDocumentVersion.create({ data: { episodeId, version: 1, content: 'a source document', checksum: 'pipeline-src', status: 'APPROVED' } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('SCRIPT')
     expect((res.json().batch as BatchDto).stage).toBe('SCRIPT')
 
     // Clicking again does not buy the same stage twice.
-    const again = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const again = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
     expect(again.json().error).toBe('pipeline:nothingRunnable')
   })
 
   it('advances past IMAGE to VIDEO once first frames already ran', async () => {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Advance Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Advance Drama' } })
     const advanceProjectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${advanceProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${advanceProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP' } })
     const advanceEpisodeId = episode.json().id as string
     // An approved script and a storyboard make IMAGE and VIDEO eligible; mark
     // SCRIPT, STORYBOARD and FIRST_FRAME (the DB value for IMAGE) as already run
     // so the next runnable stage is VIDEO, not a re-run of IMAGE.
     await env.db.scriptVersion.create({ data: { episodeId: advanceEpisodeId, version: 1, content: 'a script', checksum: 'advance-script', status: 'APPROVED' } })
     await env.app.inject({
-      method: 'POST', url: `/episodes/${advanceEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${advanceEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     for (const stage of ['SCRIPT', 'STORYBOARD', 'FIRST_FRAME'] as const) {
       await env.db.generationBatch.create({ data: { organizationId, episodeId: advanceEpisodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
     }
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${advanceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${advanceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('VIDEO')
   })
@@ -1103,24 +1103,24 @@ describe('run-pipeline', () => {
 
 describe('regenerate', () => {
   it('creates a new revision batch with suffixed keys, leaves the base intact, and audits distinctly', async () => {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Regenerate Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Regenerate Drama' } })
     expect(project.statusCode).toBe(201)
     const regenProjectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${regenProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Regen EP' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${regenProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Regen EP' } })
     expect(episode.statusCode).toBe(201)
     const regenEpisodeId = episode.json().id as string
     // SCRIPT is gated on an approved source.
     await env.db.sourceDocumentVersion.create({ data: { episodeId: regenEpisodeId, version: 1, content: 'a source', checksum: 'regen-src', status: 'APPROVED' } })
 
     // Base run: no revision suffix.
-    const base = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
+    const base = await env.app.inject({ method: 'POST', url: `/api/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(base.statusCode).toBe(201)
     const baseBatch = base.json().batch as BatchDto
     const baseTask = await env.db.generationTask.findUniqueOrThrow({ where: { id: baseBatch.tasks[0].id } })
     expect(baseTask.idempotencyKey).toBe(`${regenEpisodeId}:SCRIPT:${regenEpisodeId}`)
 
     // First regenerate: revision 1 → ':r1', a brand-new batch and task.
-    const regen = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
+    const regen = await env.app.inject({ method: 'POST', url: `/api/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
     expect(regen.statusCode).toBe(201)
     const regenBatch = regen.json().batch as BatchDto
     expect(regenBatch.id).not.toBe(baseBatch.id)
@@ -1135,7 +1135,7 @@ describe('regenerate', () => {
     expect(await env.db.generationTask.count({ where: { batchId: baseBatch.id } })).toBe(1)
 
     // A second regenerate increments the revision instead of colliding with ':r1'.
-    const regen2 = await env.app.inject({ method: 'POST', url: `/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
+    const regen2 = await env.app.inject({ method: 'POST', url: `/api/episodes/${regenEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT', regenerate: true } })
     expect(regen2.statusCode).toBe(201)
     const regen2Batch = regen2.json().batch as BatchDto
     const regen2Task = await env.db.generationTask.findUniqueOrThrow({ where: { id: regen2Batch.tasks[0].id } })
@@ -1146,7 +1146,7 @@ describe('regenerate', () => {
 
     // Regenerating is audited as generation.regenerate, carrying the revision;
     // the plain trigger is not.
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
     expect(audit.statusCode).toBe(200)
     const events = audit.json().events as { entityId: string; payload: { stage: string; revision: number } }[]
     const byBatch = new Map(events.map(event => [event.entityId, event]))
@@ -1170,10 +1170,10 @@ describe('storyboard revisions', () => {
   const supersededStamp = new Date('2026-03-01T00:00:00Z')
 
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
@@ -1182,7 +1182,7 @@ describe('storyboard revisions', () => {
     const ids: string[] = []
     for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
       const created = await env.app.inject({
-        method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        method: 'POST', url: `/api/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
         payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '', ...(scriptVersionId ? { scriptVersionId } : {}) },
       })
       expect(created.statusCode).toBe(201)
@@ -1215,16 +1215,16 @@ describe('storyboard revisions', () => {
   }
 
   async function newConnection(name: string): Promise<Connection> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     return connection
   }
 
   async function bindSlot(slot: string, capabilityId: string, scope?: string): Promise<void> {
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: scope } })
     expect(binding.statusCode).toBe(201)
   }
 
@@ -1236,14 +1236,14 @@ describe('storyboard revisions', () => {
     const { superseded, live } = await regenerateShots(historyEpisodeId, 2)
     expect(superseded).toEqual(firstRevision)
 
-    const listed = await env.app.inject({ method: 'GET', url: `/episodes/${historyEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    const listed = await env.app.inject({ method: 'GET', url: `/api/episodes/${historyEpisodeId}/storyboards`, headers: authHeaders(viewerToken) })
     expect(listed.statusCode).toBe(200)
     const rows = listed.json() as StoryboardRowDto[]
     expect(rows.map(row => row.id)).toEqual(live)
     expect(rows.map(row => [row.revision, row.number])).toEqual([[2, 1], [2, 2]])
     expect(rows.every(row => row.supersededAt === null && row.generationTaskId === null)).toBe(true)
 
-    const history = await env.app.inject({ method: 'GET', url: `/episodes/${historyEpisodeId}/storyboards?includeSuperseded=true`, headers: authHeaders(viewerToken) })
+    const history = await env.app.inject({ method: 'GET', url: `/api/episodes/${historyEpisodeId}/storyboards?includeSuperseded=true`, headers: authHeaders(viewerToken) })
     expect(history.statusCode).toBe(200)
     const all = history.json() as StoryboardRowDto[]
     expect(all.map(row => [row.revision, row.number])).toEqual([[1, 1], [1, 2], [2, 1], [2, 2]])
@@ -1252,7 +1252,7 @@ describe('storyboard revisions', () => {
 
     // The episode's nested shot list is what the console counts, so it describes the
     // breakdown in use rather than its history.
-    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${historyProjectId}/episodes`, headers: authHeaders(viewerToken) })
+    const episodes = await env.app.inject({ method: 'GET', url: `/api/projects/${historyProjectId}/episodes`, headers: authHeaders(viewerToken) })
     expect(episodes.statusCode).toBe(200)
     expect((episodes.json() as { id: string; storyboards: StoryboardRowDto[] }[])[0].storyboards.map(shot => shot.id)).toEqual(live)
   })
@@ -1268,7 +1268,7 @@ describe('storyboard revisions', () => {
     const { superseded, live } = await regenerateShots(mediaEpisodeId, 2)
 
     for (const stage of ['IMAGE', 'VIDEO'] as const) {
-      const res = await env.app.inject({ method: 'POST', url: `/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+      const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
       expect(res.statusCode).toBe(201)
       const batch = res.json().batch as BatchDto
       expect(batch.plannedCount).toBe(2)
@@ -1284,7 +1284,7 @@ describe('storyboard revisions', () => {
     }
 
     const explicit = await env.app.inject({
-      method: 'POST', url: `/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken),
+      method: 'POST', url: `/api/episodes/${mediaEpisodeId}/generations`, headers: authHeaders(editorToken),
       payload: { stage: 'VIDEO', storyboardIds: [superseded[0]] },
     })
     expect(explicit.statusCode).toBe(400)
@@ -1296,7 +1296,7 @@ describe('storyboard revisions', () => {
     await addShots(composeEpisodeId)
     const { superseded, live } = await regenerateShots(composeEpisodeId, 2)
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${composeEpisodeId}/compositions`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${composeEpisodeId}/compositions`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     const composition = res.json().composition as CompositionDto
     const stored = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
@@ -1309,10 +1309,10 @@ describe('storyboard revisions', () => {
 
 describe('pipeline advance to composition', () => {
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
@@ -1321,7 +1321,7 @@ describe('pipeline advance to composition', () => {
     const ids: string[] = []
     for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
       const created = await env.app.inject({
-        method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        method: 'POST', url: `/api/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
         payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
       })
       expect(created.statusCode).toBe(201)
@@ -1346,11 +1346,11 @@ describe('pipeline advance to composition', () => {
 
   it('re-runs a media stage whose shots were all superseded', async () => {
     const { projectId: staleProjectId, episodeId: staleEpisodeId } = await newEpisode('Stale Media Drama')
-    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'stale-media', apiKey: 'test-key' } })
+    const connection = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'stale-media', apiKey: 'test-key' } })
     expect(connection.statusCode).toBe(201)
     const capabilities = (connection.json() as Connection).capabilities
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'image_gen', capabilityId: capabilities.find(capability => capability.model === 'mock-image')!.id, projectId: staleProjectId } })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot: 'image_gen', capabilityId: capabilities.find(capability => capability.model === 'mock-image')!.id, projectId: staleProjectId } })
     expect(binding.statusCode).toBe(201)
 
     await env.db.scriptVersion.create({ data: { episodeId: staleEpisodeId, version: 1, content: 'a script', checksum: 'stale-media-script', status: 'APPROVED' } })
@@ -1367,7 +1367,7 @@ describe('pipeline advance to composition', () => {
     })
     await env.db.storyboard.updateMany({ where: { id: { in: firstRevision } }, data: { supersededAt: new Date('2026-03-01T00:00:00Z') } })
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${staleEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${staleEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('IMAGE')
     const batch = res.json().batch as BatchDto
@@ -1390,13 +1390,13 @@ describe('pipeline advance to composition', () => {
     // A shot without a clip leaves the pipeline idle: composing now would only park
     // the master in BLOCKED.
     await seedClip(terminalEpisodeId, live[0])
-    const idle = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const idle = await env.app.inject({ method: 'POST', url: `/api/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(idle.statusCode).toBe(409)
     expect(idle.json().error).toBe('pipeline:nothingRunnable')
     expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(0)
 
     await seedClip(terminalEpisodeId, live[1])
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     expect(res.json().stage).toBe('COMPOSITION')
     const composition = res.json().composition as CompositionDto
@@ -1410,7 +1410,7 @@ describe('pipeline advance to composition', () => {
 
     // Composition is the terminal step, so a second advance has nothing left to do
     // rather than re-making a master that already exists.
-    const again = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const again = await env.app.inject({ method: 'POST', url: `/api/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
     expect(again.json().error).toBe('pipeline:nothingRunnable')
     expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(1)
@@ -1428,7 +1428,7 @@ describe('pipeline advance to composition', () => {
     })
     await env.db.storyboard.update({ where: { id: live[0] }, data: { dialogue: '这条街不能待了。', speaker: '林澈' } })
 
-    const recutAfterVoice = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const recutAfterVoice = await env.app.inject({ method: 'POST', url: `/api/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(recutAfterVoice.statusCode).toBe(201)
     expect(recutAfterVoice.json().stage).toBe('COMPOSITION')
     expect((recutAfterVoice.json().composition as CompositionDto).id).not.toBe(composition.id)
@@ -1446,7 +1446,7 @@ describe('pipeline advance to composition', () => {
     }
     for (const storyboardId of revised) await seedClip(terminalEpisodeId, storyboardId)
 
-    const recut = await env.app.inject({ method: 'POST', url: `/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const recut = await env.app.inject({ method: 'POST', url: `/api/episodes/${terminalEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(recut.statusCode).toBe(201)
     expect(recut.json().stage).toBe('COMPOSITION')
     const second = recut.json().composition as CompositionDto
@@ -1455,7 +1455,7 @@ describe('pipeline advance to composition', () => {
     // Superseded masters are not deleted: each is the record of what was delivered.
     expect(await env.db.composition.count({ where: { episodeId: terminalEpisodeId } })).toBe(3)
 
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=pipeline.advance', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=pipeline.advance', headers: authHeaders(ownerToken) })
     expect(audit.statusCode).toBe(200)
     const events = audit.json().events as { entityId: string; payload: { step?: string; compositionId?: string; storyboards?: number } }[]
     expect(events.some(event => event.entityId === terminalEpisodeId && event.payload.step === 'COMPOSITION' && event.payload.compositionId === composition.id && event.payload.storyboards === 2)).toBe(true)
@@ -1467,30 +1467,30 @@ describe('script approval cascade', () => {
   let approvedScriptId: string
 
   it('re-runs STORYBOARD as a regenerate when the live shots trace an older script version', async () => {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Cascade Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Cascade Drama' } })
     expect(project.statusCode).toBe(201)
     const cascadeProjectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${cascadeProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Cascade EP1' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${cascadeProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Cascade EP1' } })
     expect(episode.statusCode).toBe(201)
     cascadeEpisodeId = episode.json().id as string
 
-    const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'cascade-gen', apiKey: 'test-key' } })
+    const connection = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'cascade-gen', apiKey: 'test-key' } })
     expect(connection.statusCode).toBe(201)
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${(connection.json() as Connection).id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     const capability = (connection.json() as Connection).capabilities.find(candidate => candidate.model === 'mock-text')!
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id, projectId: cascadeProjectId } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot: 'storyboard_text', capabilityId: capability.id, projectId: cascadeProjectId } })
     expect(binding.statusCode).toBe(201)
 
     const scriptV1 = await env.db.scriptVersion.create({ data: { episodeId: cascadeEpisodeId, version: 1, content: '第一版剧本', checksum: 'cascade-v1', status: 'APPROVED' } })
-    const base = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
+    const base = await env.app.inject({ method: 'POST', url: `/api/episodes/${cascadeEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'STORYBOARD' } })
     expect(base.statusCode).toBe(201)
     const baseBatch = base.json().batch as BatchDto
 
     // The worker wrote the breakdown out of version 1.
     for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
       const created = await env.app.inject({
-        method: 'POST', url: `/episodes/${cascadeEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        method: 'POST', url: `/api/episodes/${cascadeEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
         payload: { number, title, durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '', scriptVersionId: scriptV1.id },
       })
       expect(created.statusCode).toBe(201)
@@ -1498,7 +1498,7 @@ describe('script approval cascade', () => {
 
     // A human edits the script and approves the edit.
     await env.db.scriptVersion.create({ data: { episodeId: cascadeEpisodeId, version: 2, content: '第二版剧本：追逐戏改到天台', checksum: 'cascade-v2', status: 'DRAFT' } })
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
     expect(res.json().cascaded).toBe(true)
     expect(res.json().storyboardsUpdated).toBe(0)
@@ -1528,14 +1528,14 @@ describe('script approval cascade', () => {
     expect(cascadeSnapshot.scriptVersionId).toBe(approvedScriptId)
     expect(cascadeSnapshot.input.prompt).toContain('第二版剧本')
 
-    const cascadeAudit = await env.app.inject({ method: 'GET', url: '/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
+    const cascadeAudit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
     expect(cascadeAudit.statusCode).toBe(200)
     const cascadeEvents = cascadeAudit.json().events as { entityId: string; entityType: string; payload: { episodeId: string; stage: string; batchId: string } }[]
     const cascadeEvent = cascadeEvents.filter(event => event.entityId === approvedScriptId)
     expect(cascadeEvent).toHaveLength(1)
     expect(cascadeEvent[0]).toMatchObject({ entityType: 'ScriptVersion', payload: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD', batchId: cascadeBatchId } })
 
-    const regenerateAudit = await env.app.inject({ method: 'GET', url: '/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
+    const regenerateAudit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=generation.regenerate', headers: authHeaders(ownerToken) })
     const regenerateEvents = regenerateAudit.json().events as { entityId: string; payload: { stage: string } }[]
     expect(regenerateEvents.some(event => event.entityId === cascadeBatchId && event.payload.stage === 'STORYBOARD')).toBe(true)
   })
@@ -1545,12 +1545,12 @@ describe('script approval cascade', () => {
     // are the ones broken out of version 2, so there is nothing left to regenerate.
     await env.db.storyboard.updateMany({ where: { episodeId: cascadeEpisodeId, supersededAt: null }, data: { scriptVersionId: approvedScriptId } })
 
-    const edited = await env.app.inject({ method: 'PATCH', url: `/episodes/${cascadeEpisodeId}/script-versions/2`, headers: authHeaders(editorToken), payload: { content: '第二版剧本：只改一句台词' } })
+    const edited = await env.app.inject({ method: 'PATCH', url: `/api/episodes/${cascadeEpisodeId}/script-versions/2`, headers: authHeaders(editorToken), payload: { content: '第二版剧本：只改一句台词' } })
     expect(edited.statusCode).toBe(200)
     expect(edited.json().version.status).toBe('DRAFT')
 
     const batchesBefore = await env.db.generationBatch.count({ where: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD' } })
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${cascadeEpisodeId}/script-versions/2/approve`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
     expect(res.json().cascaded).toBe(false)
     expect(res.json().storyboardsUpdated).toBe(2)
@@ -1558,7 +1558,7 @@ describe('script approval cascade', () => {
     // same shots again.
     expect(await env.db.generationBatch.count({ where: { episodeId: cascadeEpisodeId, stage: 'STORYBOARD' } })).toBe(batchesBefore)
 
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=script.approve.cascade', headers: authHeaders(ownerToken) })
     const events = audit.json().events as { entityId: string }[]
     expect(events.filter(event => event.entityId === approvedScriptId)).toHaveLength(1)
   })
@@ -1566,10 +1566,10 @@ describe('script approval cascade', () => {
 
 describe('approval opens the next step', () => {
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
@@ -1577,14 +1577,14 @@ describe('approval opens the next step', () => {
   // Project scope, so these tests do not ride on the org-wide bindings the suite
   // header made for other stages.
   async function bindContentSlots(targetProjectId: string, name: string): Promise<void> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     for (const [slot, model] of [['script_text', 'mock-script'], ['storyboard_text', 'mock-storyboard']] as const) {
       const capability = connection.capabilities.find(candidate => candidate.model === model)!
-      const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+      const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
       expect(binding.statusCode).toBe(201)
     }
   }
@@ -1605,11 +1605,11 @@ describe('approval opens the next step', () => {
     const { projectId: sourceProjectId, episodeId: sourceEpisodeId } = await newEpisode('Approval Source Drama')
     await bindContentSlots(sourceProjectId, 'approval-source')
 
-    const uploaded = await env.app.inject({ method: 'POST', url: `/episodes/${sourceEpisodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: '雨夜，滨江老城区。半张烧焦的老照片躺在积水里。' } })
+    const uploaded = await env.app.inject({ method: 'POST', url: `/api/episodes/${sourceEpisodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: '雨夜，滨江老城区。半张烧焦的老照片躺在积水里。' } })
     expect(uploaded.statusCode).toBe(201)
     expect(await env.db.generationBatch.count({ where: { episodeId: sourceEpisodeId } })).toBe(0)
 
-    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${sourceEpisodeId}/source-versions/1/approve`, headers: authHeaders(editorToken) })
+    const approved = await env.app.inject({ method: 'POST', url: `/api/episodes/${sourceEpisodeId}/source-versions/1/approve`, headers: authHeaders(editorToken) })
     expect(approved.statusCode).toBe(200)
 
     // Uploading is not a decision, approving is — so the chain starts here, without a
@@ -1634,11 +1634,11 @@ describe('approval opens the next step', () => {
     // A script the human produced themselves: derived from the approved source, so no
     // SCRIPT batch exists for the chain to skip past.
     await env.db.sourceDocumentVersion.create({ data: { episodeId: scriptEpisodeId, version: 1, content: '雨夜追踪的源文档', checksum: 'approval-src', status: 'APPROVED' } })
-    const derived = await env.app.inject({ method: 'POST', url: `/episodes/${scriptEpisodeId}/script-versions`, headers: authHeaders(editorToken), payload: { sourceVersion: 1 } })
+    const derived = await env.app.inject({ method: 'POST', url: `/api/episodes/${scriptEpisodeId}/script-versions`, headers: authHeaders(editorToken), payload: { sourceVersion: 1 } })
     expect(derived.statusCode).toBe(201)
     const scriptVersionId = (derived.json().version as { id: string }).id
 
-    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${scriptEpisodeId}/script-versions/1/approve`, headers: authHeaders(editorToken) })
+    const approved = await env.app.inject({ method: 'POST', url: `/api/episodes/${scriptEpisodeId}/script-versions/1/approve`, headers: authHeaders(editorToken) })
     expect(approved.statusCode).toBe(200)
     expect(approved.json().storyboardsUpdated).toBe(0)
 
@@ -1661,14 +1661,14 @@ describe('approval opens the next step', () => {
     // A second organization: none of the suite's slot bindings reach it, so SCRIPT has
     // no verified candidate to run on.
     const other = await env.register('approval-unbound@example.com', 'Approval Unbound Org')
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(other.token), payload: { name: 'Approval Unbound Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(other.token), payload: { name: 'Approval Unbound Drama' } })
     expect(project.statusCode).toBe(201)
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${project.json().id as string}/episodes`, headers: authHeaders(other.token), payload: { number: 1, title: 'EP1' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${project.json().id as string}/episodes`, headers: authHeaders(other.token), payload: { number: 1, title: 'EP1' } })
     expect(episode.statusCode).toBe(201)
     const unboundEpisodeId = episode.json().id as string
 
-    await env.app.inject({ method: 'POST', url: `/episodes/${unboundEpisodeId}/source-versions`, headers: authHeaders(other.token), payload: { content: 'a source with nowhere to run' } })
-    const approved = await env.app.inject({ method: 'POST', url: `/episodes/${unboundEpisodeId}/source-versions/1/approve`, headers: authHeaders(other.token) })
+    await env.app.inject({ method: 'POST', url: `/api/episodes/${unboundEpisodeId}/source-versions`, headers: authHeaders(other.token), payload: { content: 'a source with nowhere to run' } })
+    const approved = await env.app.inject({ method: 'POST', url: `/api/episodes/${unboundEpisodeId}/source-versions/1/approve`, headers: authHeaders(other.token) })
     // The approval is already persisted by the time the chain is asked to move, so a
     // step that could not be started is logged, never thrown back as a failed approval.
     expect(approved.statusCode).toBe(200)
@@ -1697,29 +1697,29 @@ describe('per-shot voice', () => {
   }
 
   async function newEpisode(name: string): Promise<{ projectId: string; episodeId: string }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     return { projectId, episodeId: episode.json().id as string }
   }
 
   // Project scope, so these bindings cannot change what the earlier tests resolve.
   async function bindAudioSlot(targetProjectId: string, slot: 'tts_voice' | 'music_gen', model: string, name: string): Promise<void> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     const capability = connection.capabilities.find(candidate => candidate.model === model)!
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
     expect(binding.statusCode).toBe(201)
   }
 
   async function addShot(targetEpisodeId: string, number: number, dialogue: string, speaker?: string): Promise<string> {
     const created = await env.app.inject({
-      method: 'POST', url: `/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${targetEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number, title: `SB${number}`, durationMs: 5000, description: 'a street', dialogue, speaker, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(created.statusCode).toBe(201)
@@ -1759,7 +1759,7 @@ describe('per-shot voice', () => {
     speakingIds.push(await addShot(episodeId, 2, '我跟你走。'))
     silentIds.push(await addShot(episodeId, 3, ''))
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     expect(batch.stage).toBe('AUDIO')
@@ -1794,11 +1794,11 @@ describe('per-shot voice', () => {
   })
 
   it('re-triggering reuses the batch and only a regenerate buys fresh keys', async () => {
-    const again = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    const again = await env.app.inject({ method: 'POST', url: `/api/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
     expect(again.statusCode).toBe(200)
     expect((again.json().batch as BatchDto).id).toBe(audioBatchId)
 
-    const regenerated = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO', regenerate: true } })
+    const regenerated = await env.app.inject({ method: 'POST', url: `/api/episodes/${voiceEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO', regenerate: true } })
     expect(regenerated.statusCode).toBe(201)
     const fresh = regenerated.json().batch as BatchDto
     expect(fresh.id).not.toBe(audioBatchId)
@@ -1814,7 +1814,7 @@ describe('per-shot voice', () => {
     await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: '纯动作，无台词', checksum: 'silent-script', status: 'APPROVED' } })
     await addShot(episodeId, 1, '')
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'AUDIO' } })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toBe('episode has no shots with dialogue to voice')
     expect(await env.db.generationBatch.count({ where: { episodeId } })).toBe(0)
@@ -1823,7 +1823,7 @@ describe('per-shot voice', () => {
   it('exposes the line, its speaker and the shot voice, and lets a human rewrite them', async () => {
     await seedMedia(voiceEpisodeId, 'AUDIO', speakingIds[0])
 
-    const listed = await env.app.inject({ method: 'GET', url: `/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
+    const listed = await env.app.inject({ method: 'GET', url: `/api/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
     expect(listed.statusCode).toBe(200)
     const shots = listed.json() as ShotDto[]
     expect(shots).toHaveLength(3)
@@ -1834,21 +1834,21 @@ describe('per-shot voice', () => {
     expect(shots[1]!.voice).toBeNull()
     expect(shots[2]!.dialogue).toBe('')
 
-    const edited = await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '  你先走。 ', speaker: '沈亦' } })
+    const edited = await env.app.inject({ method: 'PATCH', url: `/api/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '  你先走。 ', speaker: '沈亦' } })
     expect(edited.statusCode).toBe(200)
     expect(edited.json().dialogue).toBe('你先走。')
     expect(edited.json().speaker).toBe('沈亦')
 
-    const cleared = await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '', speaker: null } })
+    const cleared = await env.app.inject({ method: 'PATCH', url: `/api/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '', speaker: null } })
     expect(cleared.statusCode).toBe(200)
     expect(cleared.json()).toMatchObject({ dialogue: '', speaker: null })
 
     // Put the line back: the composition assertions below depend on two speaking shots.
-    await env.app.inject({ method: 'PATCH', url: `/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '我跟你走。', speaker: '' } })
-    const afterEdit = await env.app.inject({ method: 'GET', url: `/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
+    await env.app.inject({ method: 'PATCH', url: `/api/storyboards/${speakingIds[1]}`, headers: authHeaders(editorToken), payload: { dialogue: '我跟你走。', speaker: '' } })
+    const afterEdit = await env.app.inject({ method: 'GET', url: `/api/episodes/${voiceEpisodeId}/storyboards`, headers: authHeaders(editorToken) })
     expect((afterEdit.json() as ShotDto[])[1]).toMatchObject({ dialogue: '我跟你走。', speaker: null })
 
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=storyboard.update', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=storyboard.update', headers: authHeaders(ownerToken) })
     const events = audit.json().events as { entityId: string; payload: { fields: string[] } }[]
     expect(events.some(event => event.entityId === speakingIds[1] && event.payload.fields.includes('dialogue'))).toBe(true)
   })
@@ -1862,7 +1862,7 @@ describe('per-shot voice', () => {
 
     // With a TTS bound, a shot whose line has no audio would compose into a master
     // where that line is simply missing — so the chain waits instead.
-    const blocked = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const blocked = await env.app.inject({ method: 'POST', url: `/api/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(blocked.statusCode).toBe(409)
     expect(blocked.json().error).toBe('pipeline:nothingRunnable')
     // The generic error says the chain has no next step; the reason says what is missing.
@@ -1870,7 +1870,7 @@ describe('per-shot voice', () => {
     expect(await env.db.composition.count({ where: { episodeId: voiceEpisodeId } })).toBe(0)
 
     await seedMedia(voiceEpisodeId, 'AUDIO', speakingIds[1])
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${voiceEpisodeId}/run-pipeline`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
     // music_gen is unbound here, so the chain walks past the music step rather than
     // stalling on a capability this installation never signed up for.
@@ -1890,7 +1890,7 @@ describe('per-shot voice', () => {
       await env.db.generationBatch.create({ data: { organizationId, episodeId, stage, status: 'COMPLETED', plannedCount: 1 } })
     }
 
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'MUSIC' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'MUSIC' } })
     expect(res.statusCode).toBe(201)
     const batch = res.json().batch as BatchDto
     expect(batch.stage).toBe('MUSIC')
@@ -1909,7 +1909,7 @@ describe('per-shot voice', () => {
 describe('project content language', () => {
   async function newProject(name: string, contentLocale?: string): Promise<string> {
     const res = await env.app.inject({
-      method: 'POST', url: '/projects', headers: authHeaders(ownerToken),
+      method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken),
       payload: { name, ...(contentLocale ? { contentLocale } : {}) },
     })
     expect(res.statusCode).toBe(201)
@@ -1919,7 +1919,7 @@ describe('project content language', () => {
   async function newEpisode(name: string, contentLocale?: string): Promise<{ projectId: string; episodeId: string }> {
     const projectId = await newProject(name, contentLocale)
     const episode = await env.app.inject({
-      method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: `${name} EP1` },
     })
     expect(episode.statusCode).toBe(201)
@@ -1928,18 +1928,18 @@ describe('project content language', () => {
 
   // Project scope, so these cannot disturb what the earlier tests resolve.
   async function bindSlot(targetProjectId: string, slot: string, model: string, name: string): Promise<void> {
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name, apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     const capability = connection.capabilities.find(candidate => candidate.model === model)!
-    const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
+    const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId: capability.id, projectId: targetProjectId } })
     expect(binding.statusCode).toBe(201)
   }
 
   async function trigger(targetEpisodeId: string, stage: string): Promise<BatchDto> {
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${targetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${targetEpisodeId}/generations`, headers: authHeaders(editorToken), payload: { stage } })
     expect(res.statusCode).toBe(201)
     return res.json().batch as BatchDto
   }
@@ -1954,19 +1954,19 @@ describe('project content language', () => {
     expect((await env.db.project.findUniqueOrThrow({ where: { id: plainProjectId } })).contentLocale).toBe('zh')
     expect(await newProject('Locale English Drama', 'en')).toBeTruthy()
 
-    const unsupported = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Locale French Drama', contentLocale: 'fr' } })
+    const unsupported = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Locale French Drama', contentLocale: 'fr' } })
     expect(unsupported.statusCode).toBe(400)
     expect(unsupported.json().error).toContain('contentLocale')
 
-    const renamed = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { name: 'Renamed In Place' } })
+    const renamed = await env.app.inject({ method: 'PATCH', url: `/api/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { name: 'Renamed In Place' } })
     expect(renamed.statusCode).toBe(200)
     expect(renamed.json()).toMatchObject({ name: 'Renamed In Place', contentLocale: 'zh' })
 
-    const languageOnly = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { contentLocale: 'en' } })
+    const languageOnly = await env.app.inject({ method: 'PATCH', url: `/api/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: { contentLocale: 'en' } })
     expect(languageOnly.statusCode).toBe(200)
     expect(languageOnly.json()).toMatchObject({ name: 'Renamed In Place', contentLocale: 'en' })
 
-    const empty = await env.app.inject({ method: 'PATCH', url: `/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: {} })
+    const empty = await env.app.inject({ method: 'PATCH', url: `/api/projects/${plainProjectId}`, headers: authHeaders(ownerToken), payload: {} })
     expect(empty.statusCode).toBe(400)
   })
 
@@ -1999,7 +1999,7 @@ describe('project content language', () => {
     expect(board.prompt).toContain('## Output language (highest priority)')
 
     const shot = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: {
         number: 1, title: 'Half a Photograph', durationMs: 4000, description: 'a torn photograph in a gloved hand',
         dialogue: 'There is writing on the back.', speaker: 'Shen Yi', sourceExcerpt: 'a photograph', continuityIn: '', continuityOut: '',
@@ -2025,14 +2025,14 @@ describe('project content language', () => {
 
 describe('composition selection gate', () => {
   async function newEpisodeWithClips(name: string, clipCount: number): Promise<{ episodeId: string; shotId: string; clips: string[] }> {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name } })
     expect(project.statusCode).toBe(201)
     const projectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: `${name} EP1` } })
     expect(episode.statusCode).toBe(201)
     const episodeId = episode.json().id as string
     const shot = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
       payload: { number: 1, title: 'SB1', durationMs: 5000, description: 'a street', sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(shot.statusCode).toBe(201)
@@ -2051,31 +2051,31 @@ describe('composition selection gate', () => {
 
   it('holds a manual compose while a multi-clip shot has no pick, and releases once a human chooses', async () => {
     const { episodeId, shotId, clips } = await newEpisodeWithClips('Gate Drama', 2)
-    const held = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    const held = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
     expect(held.statusCode).toBe(409)
     expect(held.json().error).toBe('composition:selectionOpen')
     expect(held.json().reasons).toEqual(['#1 SB1'])
     expect(await env.db.composition.count({ where: { episodeId } })).toBe(0)
 
-    const pick = await env.app.inject({ method: 'POST', url: `/storyboards/${shotId}/video-selection`, headers: authHeaders(editorToken), payload: { artifactId: clips[0] } })
+    const pick = await env.app.inject({ method: 'POST', url: `/api/storyboards/${shotId}/video-selection`, headers: authHeaders(editorToken), payload: { artifactId: clips[0] } })
     expect(pick.statusCode).toBe(200)
-    const go = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    const go = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
     expect(go.statusCode).toBe(201)
     expect((go.json().composition as CompositionDto).status).toBe('RUNNING')
   })
 
   it('leaves a single-clip shot ungated: one version is not a choice', async () => {
     const { episodeId } = await newEpisodeWithClips('Single Clip Drama', 1)
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(201)
   })
 
   it('lets allowAuto through the gate but records the escape in the audit trail', async () => {
     const { episodeId } = await newEpisodeWithClips('Auto Escape Drama', 2)
-    const res = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken), payload: { allowAuto: true } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/compositions`, headers: authHeaders(editorToken), payload: { allowAuto: true } })
     expect(res.statusCode).toBe(201)
     const composition = res.json().composition as CompositionDto
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=composition.trigger', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=composition.trigger', headers: authHeaders(ownerToken) })
     const events = audit.json().events as { entityId: string; payload: { allowAuto?: boolean } }[]
     expect(events.some(event => event.entityId === composition.id && event.payload.allowAuto === true)).toBe(true)
   })
@@ -2105,7 +2105,7 @@ describe('retry trace on the task DTO', () => {
       data: { organizationId, batchId: batch.id, stage: 'AUDIO', status: 'SUCCEEDED', storyboardId: storyboardIds[1] },
     })
 
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/generations`, headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(ownerToken) })
     const tasks = (res.json() as { batches: BatchDto[] }).batches.flatMap(item => item.tasks)
     const winnerDto = tasks.find(candidate => candidate.id === winner.id)!
     expect(winnerDto.retryTrace).not.toBeNull()
@@ -2135,7 +2135,7 @@ describe('generation plan pre-flight', () => {
   }
 
   async function plan(token: string, ep: string, query: string): Promise<{ statusCode: number; body: { plan?: PlanDto; error?: string; reasons?: string[] } }> {
-    const res = await env.app.inject({ method: 'GET', url: `/episodes/${ep}/generation-plan?${query}`, headers: authHeaders(token) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${ep}/generation-plan?${query}`, headers: authHeaders(token) })
     return { statusCode: res.statusCode, body: res.json() as { plan?: PlanDto; error?: string; reasons?: string[] } }
   }
 
@@ -2143,30 +2143,30 @@ describe('generation plan pre-flight', () => {
   let planStoryboardIds: string[] = []
 
   it('refuses unknown stages and episodes, and mirrors the trigger gate before promising a run', async () => {
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Plan Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Plan Drama' } })
     expect(project.statusCode).toBe(201)
     const planProjectId = project.json().id as string
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${planProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Plan EP1' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${planProjectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Plan EP1' } })
     expect(episode.statusCode).toBe(201)
     planEpisodeId = episode.json().id as string
     for (const [number, dialogue] of [['1', '我有台词。'], ['2', '我也有一句。'], ['3', '']] as const) {
       const storyboard = await env.app.inject({
-        method: 'POST', url: `/episodes/${planEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
+        method: 'POST', url: `/api/episodes/${planEpisodeId}/storyboards`, headers: authHeaders(ownerToken),
         payload: { number: Number(number), title: `Plan SB${number}`, durationMs: number === '1' ? 3000 : number === '2' ? 5000 : 4000, description: `镜头 ${number}`, dialogue, ...(dialogue ? { speaker: '小雨' } : {}) },
       })
       expect(storyboard.statusCode).toBe(201)
       planStoryboardIds.push(storyboard.json().id as string)
     }
-    const created = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'plan-gen', apiKey: 'test-key' } })
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'plan-gen', apiKey: 'test-key' } })
     expect(created.statusCode).toBe(201)
     const connection = created.json() as Connection
     const capabilities = connection.capabilities
-    const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
+    const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })
     expect(probe.statusCode).toBe(200)
     for (const [slot, model] of [['image_gen', 'mock-image'], ['tts_voice', 'mock-tts']] as const) {
       const capabilityId = capabilities.find(capability => capability.model === model)?.id
       if (!capabilityId) continue
-      const binding = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: planProjectId } })
+      const binding = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken), payload: { slot, capabilityId, projectId: planProjectId } })
       expect(binding.statusCode).toBe(201)
     }
 
@@ -2221,10 +2221,10 @@ describe('generation plan pre-flight', () => {
   })
 
   it('blocks behind the same asset gate the IMAGE trigger refuses, and clears once approved', async () => {
-    const assetRes = await env.app.inject({ method: 'POST', url: `/episodes/${planEpisodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'character', name: '阿墨', description: '黑衣剑客' } })
+    const assetRes = await env.app.inject({ method: 'POST', url: `/api/episodes/${planEpisodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'character', name: '阿墨', description: '黑衣剑客' } })
     expect(assetRes.statusCode).toBe(201)
     const assetId = assetRes.json().asset.id as string
-    const link = await env.app.inject({ method: 'PUT', url: `/storyboards/${planStoryboardIds[2]}/assets`, headers: authHeaders(ownerToken), payload: { assets: [{ assetId, role: 'lead' }] } })
+    const link = await env.app.inject({ method: 'PUT', url: `/api/storyboards/${planStoryboardIds[2]}/assets`, headers: authHeaders(ownerToken), payload: { assets: [{ assetId, role: 'lead' }] } })
     expect(link.statusCode).toBe(200)
 
     const blocked = await plan(ownerToken, planEpisodeId, 'stage=IMAGE')

@@ -19,7 +19,7 @@ interface SessionContextValue {
   api<T>(path: string, init?: RequestInit): Promise<T>
   signIn(token: string): Promise<MeResponse>
   signOut(): Promise<void>
-  switchOrganization(organizationId: string): Promise<void>
+  switchOrganization(organizationId: string): Promise<{ token: string; role: string }>
   refresh(): Promise<void>
 }
 
@@ -75,13 +75,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const switchOrganization = useCallback(
     async (organizationId: string) => {
-      const result = await request<{ token: string }>('/auth/switch-organization', {
+      const result = await request<{ token: string; role: string }>('/auth/switch-organization', {
         method: 'POST',
         body: JSON.stringify({ organizationId }),
         token,
       })
       persistToken(result.token)
       await loadMe(result.token)
+      return { token: result.token, role: result.role } as const
     },
     [token, loadMe],
   )

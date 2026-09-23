@@ -133,4 +133,72 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(204).send()
     },
   )
+
+  // POST /projects/:projectId/apply-style
+  app.post<{ Params: { projectId: string }; Body: { styleId?: string | null } }>(
+    '/projects/:projectId/apply-style',
+    { preHandler: requirePermission('project:update') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+
+      const styleId = request.body?.styleId ?? null
+      let style = null
+      if (styleId) {
+        style = await app.db.stylePreset.findFirst({
+          where: { id: styleId, OR: [{ organizationId: null }, { organizationId: auth.organizationId }] },
+        })
+        if (!style) return reply.code(400).send({ error: 'styleId references a non-existent or inaccessible style' })
+      }
+
+      const updated = await app.db.project.update({
+        where: { id: project.id },
+        data: { stylePresetId: styleId },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'project.applyStyle',
+        entityType: 'Project',
+        entityId: project.id,
+        payload: { previousStyleId: project.stylePresetId, newStyleId: styleId },
+      })
+      return { ...updated, appliedStyle: style }
+    },
+  )
+
+  // POST /projects/:projectId/apply-pipeline
+  app.post<{ Params: { projectId: string }; Body: { pipelineId?: string | null } }>(
+    '/projects/:projectId/apply-pipeline',
+    { preHandler: requirePermission('project:update') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+
+      const pipelineId = request.body?.pipelineId ?? null
+      let pipeline = null
+      if (pipelineId) {
+        pipeline = await app.db.pipelineConfig.findFirst({
+          where: { id: pipelineId },
+        })
+        if (!pipeline) return reply.code(400).send({ error: 'pipelineId references a non-existent pipeline' })
+      }
+
+      const updated = await app.db.project.update({
+        where: { id: project.id },
+        data: { pipelineConfigId: pipelineId },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'project.applyPipeline',
+        entityType: 'Project',
+        entityId: project.id,
+        payload: { previousPipelineId: project.pipelineConfigId, newPipelineId: pipelineId },
+      })
+      return { ...updated, appliedPipeline: pipeline }
+    },
+  )
 }

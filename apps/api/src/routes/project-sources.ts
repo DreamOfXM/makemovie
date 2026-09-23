@@ -345,7 +345,7 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       const segment = await app.db.sourceSegment.findFirst({
-        where: { id: request.params.segmentId, version: { projectId: project.id } },
+        where: { id: request.params.segmentId, projectSourceVersion: { projectId: project.id } },
       })
       if (!segment) return reply.code(404).send({ error: 'Segment not found' })
       return {
@@ -372,7 +372,7 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       const segment = await app.db.sourceSegment.findFirst({
-        where: { id: request.params.segmentId, version: { projectId: project.id } },
+        where: { id: request.params.segmentId, projectSourceVersion: { projectId: project.id } },
       })
       if (!segment) return reply.code(404).send({ error: 'Segment not found' })
       const content = request.body?.content
@@ -417,7 +417,7 @@ export async function projectSourceRoutes(app: FastifyInstance): Promise<void> {
       const project = await findProjectInOrg(app.db, request.params.projectId, auth.organizationId)
       if (!project) return reply.code(404).send({ error: 'Project not found' })
       const segment = await app.db.sourceSegment.findFirst({
-        where: { id: request.params.segmentId, version: { projectId: project.id } },
+        where: { id: request.params.segmentId, projectSourceVersion: { projectId: project.id } },
       })
       if (!segment) return reply.code(404).send({ error: 'Segment not found' })
       await app.db.sourceSegment.delete({ where: { id: segment.id } })

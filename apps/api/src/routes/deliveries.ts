@@ -90,7 +90,7 @@ interface DeliveryDto {
 type RejectBody = { reason?: string }
 
 // Newest task first so a manifest reads as "what we would ship today" downwards.
-type SucceededTask = GenerationTask & { artifacts: MediaArtifact[] }
+type SucceededTask = GenerationTask & { mediaArtifacts: MediaArtifact[] }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
@@ -140,7 +140,7 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
       // artifacts under each of its shots.
       const succeededTasks: SucceededTask[] = await app.db.generationTask.findMany({
         where: { status: 'SUCCEEDED', storyboardId: { not: null }, batch: { episodeId: episode.id } },
-        include: { artifacts: true },
+        include: { mediaArtifacts: true },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       })
       const tasksOf = (storyboardId: string): SucceededTask[] =>
@@ -219,7 +219,7 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
           number: storyboard.number,
           title: storyboard.title,
           durationMs: storyboard.durationMs,
-          artifacts: tasksOf(storyboard.id).flatMap(task => task.artifacts.map(toManifestArtifact)),
+          artifacts: tasksOf(storyboard.id).flatMap(task => task.mediaArtifacts.map(toManifestArtifact)),
         })),
         composition: {
           objectKey: master.objectKey,

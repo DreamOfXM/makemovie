@@ -10,10 +10,12 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
-const options = [
+const themeOptions = [
   { value: 'light', icon: SunIcon, labelKey: 'theme.light' },
   { value: 'dark', icon: MoonIcon, labelKey: 'theme.dark' },
   { value: 'system', icon: MonitorIcon, labelKey: 'theme.system' },
@@ -36,14 +38,16 @@ export function ThemeToggle() {
           <MoonIcon className="absolute size-4.5 scale-90 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-40">
-        {options.map(option => {
+      <DropdownMenuContent align="end" className="min-w-[280px]">
+        <DropdownMenuLabel>{t('theme.label')}</DropdownMenuLabel>
+        
+        {themeOptions.map(option => {
           const Icon = option.icon
           return (
             <DropdownMenuItem key={option.value} onClick={() => setTheme(option.value)}>
               <Icon className="text-muted-foreground" />
-              {t(option.labelKey)}
-              <CheckIcon className={cn('ml-auto', mounted && theme === option.value ? 'opacity-100' : 'opacity-0')} />
+              <span className="flex-1">{t(option.labelKey)}</span>
+              {mounted && theme === option.value && <CheckIcon className="ml-auto size-4 text-muted-foreground" />}
             </DropdownMenuItem>
           )
         })}

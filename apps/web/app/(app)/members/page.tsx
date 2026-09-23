@@ -2,7 +2,7 @@
 
 import { useCallback, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { CrownIcon, Trash2Icon, UserPlusIcon, UsersIcon } from 'lucide-react'
+import { CheckIcon, CircleAlertIcon, CrownIcon, Trash2Icon, UserPlusIcon, UsersIcon } from 'lucide-react'
 import { roles, type Role } from '@studio/domain'
 import type { Member } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
@@ -40,6 +40,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 
 /** The API refuses OWNER as a target role — ownership is granted at registration. */
 const assignableRoles = roles.filter(role => role !== 'OWNER')
@@ -299,6 +300,69 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
   const [memberRole, setMemberRole] = useState<Role>('EDITOR')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [userExists, setUserExists] = useState<boolean | null>(null)
+  const [existingMembership, setExistingMembership] = useState<{ role: string; joinedAt: string } | null>(null)
+
+  // Search for user by fuzzy email match before showing full dialog
+  async function checkUserEmail() {
+    if (!email || !email.includes('@')) return
+    
+    setChecking(true)
+    setError('')
+    setUserExists(null)
+    setExistingMembership(null)
+    
+    try {
+      console.log('🔍 Searching members with email filter:', email.toLowerCase())
+      
+      // Call the backend fuzzy search endpoint: GET /members?email=xxx
+      const searchResults = await api<Member[]>('/members?email=' + encodeURIComponent(email.toLowerCase())) as Member[] | undefined
+      
+      console.log('✅ Search results:', searchResults)
+      console.log('📊 Results length:', searchResults?.length)
+      if (searchResults) {
+        console.log('📝 Full results:', JSON.stringify(searchResults, null, 2))
+      }
+      
+      // Filter results client-side for fuzzy matching (defense in depth)
+      const fuzzyMatched = searchResults?.filter(m => 
+        m.email.toLowerCase().includes(email.toLowerCase())
+      )
+      
+      console.log('🎯 Fuzzy matched count:', fuzzyMatched?.length)
+      
+      if (fuzzyMatched && fuzzyMatched.length > 0) {
+        // Found matching users - check if any are already members of this org
+        const alreadyMember = fuzzyMatched.find(m => 
+          m.email === email.toLowerCase() // Exact match first
+        )
+        
+        console.log('🔖 Already member check:', alreadyMember)
+        
+        if (alreadyMember) {
+          setExistingMembership({ 
+            role: alreadyMember.role, 
+            joinedAt: '' // Would need to fetch from membership table
+          })
+          setUserExists(true)
+        } else {
+          // User exists but not in this org
+          setUserExists(true)
+        }
+      } else {
+        // No fuzzy match found - user likely doesn't exist
+        console.log('❌ No matches found for', email)
+        setUserExists(false)
+      }
+    } catch (err) {
+      console.error('❌ Search error:', err)
+      setError(err instanceof Error ? err.message : '')
+      setUserExists(false)
+    } finally {
+      setChecking(false)
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -309,7 +373,17 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
       toast.success(t('members.added', { email, role: t(`role.${memberRole}`) }))
       onDone()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      // Handle common error messages
+      const errorMsg = err instanceof Error ? err.message : t('error.generic')
+      setError(errorMsg)
+      
+      // If user exists but not in org, show better message
+      if (errorMsg.includes('already a member')) {
+        setExistingMembership({ role: '', joinedAt: '' })
+      } else if (errorMsg.includes('No registered user')) {
+        setUserExists(false)
+        setExistingMembership(null)
+      }
     } finally {
       setBusy(false)
     }
@@ -323,39 +397,87 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
           <DialogDescription>{t('members.addHint')}</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
-          <Field label={t('members.email')} htmlFor="memberEmail" required error={error}>
-            <Input
-              id="memberEmail"
-              type="email"
-              value={email}
-              onChange={event => setEmail(event.target.value)}
-              placeholder={t('members.emailPlaceholder')}
-              required
-              autoFocus
-              autoComplete="off"
-            />
+          <Field 
+            label={t('members.email')} 
+            htmlFor="memberEmail" 
+            required 
+            error={error && !existingMembership ? error : undefined}
+            hint={checking ? '正在查找...' : t('members.searchHint')}
+          >
+            <div className="flex gap-2">
+              <Input
+                id="memberEmail"
+                type="email"
+                value={email}
+                onChange={async (event) => {
+                  setEmail(event.target.value)
+                  // Debounced fuzzy search on every keystroke
+                  if (event.target.value.includes('@') && event.target.value.length >= 3) {
+                    await checkUserEmail()
+                  } else {
+                    setUserExists(null)
+                    setExistingMembership(null)
+                    setError('')
+                  }
+                }}
+                placeholder={t('members.emailPlaceholder')}
+                required
+                autoFocus
+                autoComplete="off"
+                disabled={existingMembership !== null}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => checkUserEmail()}
+                disabled={!email.includes('@') || checking}
+              >
+                {checking ? t('common.loading') : t('members.search')}
+              </Button>
+            </div>
+            
+            {/* Search Results */}
+            {userExists === false && (
+              <Alert variant="destructive">
+                <CircleAlertIcon className="size-4" />
+                <AlertDescription>
+                  该邮箱尚未注册，请先告知用户完成注册后再添加。
+                </AlertDescription>
+              </Alert>
+            )}
+            
+            {existingMembership && (
+              <Alert>
+                <CheckIcon className="size-4 text-success" />
+                <AlertDescription>
+                  该用户已是组织成员（角色：{t(`role.${existingMembership.role}`)}）。
+                </AlertDescription>
+              </Alert>
+            )}
           </Field>
 
-          <Field label={t('members.role')} htmlFor="memberRole" hint={t(`role.${memberRole}.hint`)}>
-            <Select value={memberRole} onValueChange={value => setMemberRole(value as Role)}>
-              <SelectTrigger id="memberRole" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {assignableRoles.map(item => (
-                  <SelectItem key={item} value={item}>
-                    {t(`role.${item}`)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
+          {!existingMembership && (
+            <Field label={t('members.role')} htmlFor="memberRole" hint={t(`role.${memberRole}.hint`)}>
+              <Select value={memberRole} onValueChange={value => setMemberRole(value as Role)}>
+                <SelectTrigger id="memberRole" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {assignableRoles.map(item => (
+                    <SelectItem key={item} value={item}>
+                      {t(`role.${item}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !email.trim()}>
+            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null}>
               {busy ? t('common.saving') : t('members.add')}
             </Button>
           </DialogFooter>

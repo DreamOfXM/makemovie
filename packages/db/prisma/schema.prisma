@@ -7,494 +7,514 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// One axis, three shapes: a series and a short drama run the same pipeline and
-// differ only in per-episode target duration; a film is a one-episode project.
-// The pipeline never reads this directly — it reads Episode.targetDurationMs,
-// seeded from these shapes at episode creation.
-enum ProjectFormat {
-  SHORT_DRAMA
-  SERIES
-  FILM
-}
-
-enum MemberRole {
-  OWNER
-  ADMIN
-  EDITOR
-  REVIEWER
-  VIEWER
-}
-
-enum WorkflowStatus {
-  DRAFT
-  READY
-  RUNNING
-  NEEDS_REVIEW
-  APPROVED
-  BLOCKED
-  COMPLETED
-  CANCELLED
-}
-
-enum Stage {
-  SOURCE_AUDIT
-  SCRIPT
-  ASSET
-  STORYBOARD
-  FIRST_FRAME
-  VIDEO
-  AUDIO
-  MUSIC
-  SUBTITLE
-  COMPOSITION
-  DELIVERY
-}
-
-enum TaskStatus {
-  QUEUED
-  RUNNING
-  SUCCEEDED
-  FAILED
-  BLOCKED
-  CANCELLED
-}
-
-model User {
-  id String @id @default(cuid())
-  email String @unique
-  name String?
-  passwordHash String
-  locale String @default("en")
-  createdAt DateTime @default(now())
-  memberships OrganizationMember[]
-  auditEvents AuditEvent[]
-  sessions Session[]
-}
-
-model Organization {
-  id String @id @default(cuid())
-  name String
-  slug String @unique
-  createdAt DateTime @default(now())
-  memberships OrganizationMember[]
-  projects Project[]
-  providerConnections ProviderConnection[]
-  auditEvents AuditEvent[]
-  sessions Session[]
-  capabilityBindings CapabilityBinding[]
-  usage UsageLedger[]
-}
-
-model OrganizationMember {
-  organizationId String
-  userId String
-  role MemberRole @default(VIEWER)
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@id([organizationId, userId])
-}
-
-model Project {
-  id String @id @default(cuid())
-  organizationId String
-  name String
-  status WorkflowStatus @default(DRAFT)
-  contentLocale String @default("zh")
-  format ProjectFormat @default(SHORT_DRAMA)
-  // The project's own default for its episodes' target duration; null means the
-  // format constant seeds episodes instead. Episodes may still override.
-  targetDurationMs Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  projectAssets ProjectAsset[]
-  projectSourceVersions ProjectSourceVersion[]
-  episodes Episode[]
-  providerConnections ProviderConnection[]
-  capabilityBindings CapabilityBinding[]
-}
-
-model Episode {
-  id String @id @default(cuid())
-  projectId String
-  number Int
-  title String
-  status WorkflowStatus @default(DRAFT)
-  // The pipeline-facing truth for "how long should this episode be". Seeded from
-  // the project format's default at creation, overridable per episode.
-  targetDurationMs Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  sourceVersions SourceDocumentVersion[]
-  scriptVersions ScriptVersion[]
-  assets Asset[]
-  storyboards Storyboard[]
-  batches GenerationBatch[]
-  compositions Composition[]
-  deliveries Delivery[]
-  segmentAllocations SegmentAllocation[]
-  @@unique([projectId, number])
-}
-
-// Whole-book source at the project level: the novel as uploaded, versioned and
-// governed like the per-episode SourceDocumentVersion. Splitting a new upload
-// produces a fresh version's segments; allocations always reference the latest.
-model ProjectSourceVersion {
-  id String @id @default(cuid())
-  projectId String
-  version Int
-  filename String
-  content String
-  checksum String
-  charCount Int
-  status WorkflowStatus @default(DRAFT)
-  archivedAt DateTime?
-  createdAt DateTime @default(now())
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  segments SourceSegment[]
-  @@unique([projectId, version])
-}
-
-// One mechanically-detected chapter or trailing unmarked run of the book.
-// Content is stored inline (immutable, same total size as the book) so the
-// allocation UI never depends on offset arithmetic against the source text.
-model SourceSegment {
-  id String @id @default(cuid())
-  projectSourceVersionId String
-  index Int
-  title String?
-  marked Boolean @default(true)
-  content String
-  charCount Int
-  createdAt DateTime @default(now())
-  version ProjectSourceVersion @relation(fields: [projectSourceVersionId], references: [id], onDelete: Cascade)
-  allocation SegmentAllocation?
-  @@unique([projectSourceVersionId, index])
-}
-
-// The chapter-to-episode map as first-class data: the r01 matrix is a view over
-// this table, and moving a chapter between episodes is an update to one row.
-model SegmentAllocation {
-  id String @id @default(cuid())
-  segmentId String @unique
-  episodeId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  segment SourceSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
-  episode Episode? @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-}
-
-model SourceDocumentVersion {
-  id String @id @default(cuid())
-  episodeId String
-  version Int
-  content String
-  checksum String
-  status WorkflowStatus @default(DRAFT)
-  archivedAt DateTime?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  auditChecks QualityCheck[]
-  @@unique([episodeId, version])
-}
-
-model ScriptVersion {
-  id String @id @default(cuid())
-  episodeId String
-  version Int
-  content String
-  checksum String
-  status WorkflowStatus @default(DRAFT)
-  archivedAt DateTime?
-  generationTaskId String?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
-  storyboards Storyboard[]
-  @@unique([episodeId, version])
-}
-
 model Asset {
-  id String @id @default(cuid())
-  episodeId String
-  kind String
-  name String
-  description String
-  status WorkflowStatus @default(DRAFT)
-  projectAssetId String?
-  projectAsset ProjectAsset? @relation(fields: [projectAssetId], references: [id], onDelete: SetNull)
+  id               String            @id @default(cuid())
+  episodeId        String
+  kind             String
+  name             String
+  status           WorkflowStatus    @default(DRAFT)
+  description      String
   generationTaskId String?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  generationTask GenerationTask? @relation(fields: [generationTaskId], references: [id])
-  versions AssetVersion[]
-  storyboardLinks StoryboardAsset[]
+  projectAssetId   String?
+  episode          Episode           @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  generationTask   GenerationTask?   @relation(fields: [generationTaskId], references: [id])
+  projectAsset     ProjectAsset?     @relation(fields: [projectAssetId], references: [id])
+  versions         AssetVersion[]
+  storyboardAssets StoryboardAsset[]
+
   @@unique([episodeId, kind, name])
 }
 
 model AssetVersion {
-  id String @id @default(cuid())
-  assetId String
-  version Int
-  description String
+  id             String         @id @default(cuid())
+  assetId        String
+  version        Int
+  description    String
   promptSnapshot String?
-  artifactId String?
-  status WorkflowStatus @default(DRAFT)
-  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+  artifactId     String?
+  status         WorkflowStatus @default(DRAFT)
+  artifact       MediaArtifact? @relation("AssetVersionArtifact", fields: [artifactId], references: [id])
+  asset          Asset          @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
   @@unique([assetId, version])
 }
 
-// The project-level asset library: a character/prop/scene's identity lives here, once,
-// and every episode links to it instead of re-inventing the same cast (the reuse model
-// LTX Elements, 可灵主体库 and novelvids all converged on). Reference images accumulate
-// as versions so a face can be re-mastered without silently changing shipped episodes.
+model AuditEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String?
+  action         String
+  entityType     String
+  entityId       String
+  payload        String
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, createdAt])
+}
+
+model CapabilityBinding {
+  id              String          @id @default(cuid())
+  organizationId  String
+  projectId       String?
+  slot            CapabilitySlot
+  capabilityId    String
+  priority        Int             @default(0)
+  enabled         Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  capability      ModelCapability @relation(fields: [capabilityId], references: [id], onDelete: Cascade)
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project         Project?        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([capabilityId])
+  @@index([organizationId, slot])
+  @@index([projectId, slot])
+}
+
+model Composition {
+  id                 String         @id @default(cuid())
+  episodeId          String
+  status             WorkflowStatus @default(DRAFT)
+  manifest           String
+  artifactId         String?
+  subtitleArtifactId String?
+  scoreArtifactId    String?
+  episode            Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
+
+model Delivery {
+  id         String         @id @default(cuid())
+  episodeId  String
+  status     WorkflowStatus @default(DRAFT)
+  manifest   String
+  artifactId String?
+  episode    Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+}
+
+model Episode {
+  id                    String                  @id @default(cuid())
+  projectId             String
+  number                Int
+  title                 String
+  status                WorkflowStatus          @default(DRAFT)
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime @updatedAt
+  targetDurationMs      Int?
+  assets                Asset[]
+  compositions          Composition[]
+  deliveries            Delivery[]
+  project               Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  generationBatches     GenerationBatch[]
+  scriptVersions        ScriptVersion[]
+  segmentAllocations    SegmentAllocation[]
+  sourceVersions        SourceDocumentVersion[] @relation("EpisodeSourceVersions")
+  storyboards           Storyboard[]
+
+  @@unique([projectId, number])
+}
+
+model GenerationBatch {
+  id             String           @id @default(cuid())
+  organizationId String
+  episodeId      String
+  stage          Stage
+  status         WorkflowStatus   @default(DRAFT)
+  plannedCount   Int
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  episode        Episode          @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  tasks          GenerationTask[]
+  qualityChecks  QualityCheck[]
+  storyboards    Storyboard[]
+
+  @@index([organizationId, stage, status])
+}
+
+model GenerationLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  taskId         String
+  batchId        String
+  episodeId      String
+  stage          String
+  level          String
+  event          String
+  message        String
+  data           Json?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([taskId, createdAt])
+}
+
+model GenerationTask {
+  id                                                     String          @id @default(cuid())
+  organizationId                                         String
+  batchId                                                String
+  stage                                                  Stage
+  status                                                 TaskStatus      @default(QUEUED)
+  idempotencyKey                                         String?         @unique
+  provider                                               String?
+  model                                                  String?
+  capabilitySnapshot                                     String?
+  requestSnapshot                                        String?
+  responseSnapshot                                       String?
+  errorSnapshot                                          String?
+  attempts                                               Int             @default(0)
+  createdAt                                              DateTime        @default(now())
+  updatedAt                                              DateTime        @updatedAt
+  storyboardId                                           String?
+  assets                                                 Asset[]
+  batch                                                  GenerationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  storyboard                                             Storyboard?     @relation("GenerationTask_storyboardIdToStoryboard", fields: [storyboardId], references: [id])
+  mediaArtifacts                                         MediaArtifact[]
+  scriptVersions                                         ScriptVersion[]
+  storyboards                                            Storyboard[]    @relation("Storyboard_generationTaskIdToGenerationTask")
+
+  @@index([batchId, status])
+  @@index([organizationId, status])
+  @@index([storyboardId, stage, status])
+}
+
+model MediaArtifact {
+  id                  String                @id @default(cuid())
+  organizationId      String
+  taskId              String?
+  stage               Stage?
+  objectKey           String
+  checksum            String
+  mimeType            String
+  version             Int
+  width               Int?
+  height              Int?
+  durationMs          Int?
+  metadata            String?
+  createdAt           DateTime              @default(now())
+  assetVersions       AssetVersion[]        @relation("AssetVersionArtifact")
+  task                                        GenerationTask?   @relation(fields: [taskId], references: [id])
+  projectAssetVersions ProjectAssetVersion[]
+  qualityChecks       QualityCheck[]
+
+  @@unique([objectKey, version])
+  @@index([organizationId, stage])
+}
+
+model ModelCapability {
+  id                     String              @id @default(cuid())
+  connectionId           String
+  model                  String
+  displayName            String?
+  modality               String
+  acceptsFirstFrame      Boolean             @default(false)
+  acceptsReferenceImages Boolean             @default(false)
+  maxReferenceImages     Int                 @default(0)
+  spec                   Json?
+  probeStatus            String              @default("unverified")
+  probeMessage           String?
+  entitlementVerifiedAt  DateTime?
+  lastProbedAt           DateTime?
+  credentialVerifiedAt   DateTime?
+  bindings               CapabilityBinding[]
+  connection             ProviderConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, model, modality])
+}
+
+model Organization {
+  id                 String               @id @default(cuid())
+  name               String
+  slug               String               @unique
+  createdAt          DateTime             @default(now())
+  auditEvents        AuditEvent[]
+  capabilityBindings CapabilityBinding[]
+  members            OrganizationMember[]
+  projects           Project[]
+  providerConnections ProviderConnection[]
+  sessions           Session[]
+  usageLedger        UsageLedger[]
+}
+
+model OrganizationMember {
+  organizationId String
+  userId         String
+  role           MemberRole   @default(VIEWER)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation("Memberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([organizationId, userId])
+}
+
+model Project {
+  id                   String                 @id @default(cuid())
+  organizationId       String
+  name                 String
+  status               WorkflowStatus         @default(DRAFT)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime @updatedAt
+  contentLocale        String                 @default("zh")
+  format               ProjectFormat          @default(SHORT_DRAMA)
+  targetDurationMs     Int?
+  stylePresetId        String?
+  pipelineConfigId     String?
+  capabilityBindings   CapabilityBinding[]
+  episodes             Episode[]
+  organization         Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pipelineConfig       PipelineConfig?        @relation(fields: [pipelineConfigId], references: [id])
+  projectAssets        ProjectAsset[]
+  projectSourceVersions ProjectSourceVersion[]
+  providerConnections  ProviderConnection[]
+  stylePreset          StylePreset?           @relation(fields: [stylePresetId], references: [id])
+}
+
 model ProjectAsset {
-  id String @id @default(cuid())
-  projectId String
-  kind String
-  name String
-  description String @default("")
-  status WorkflowStatus @default(DRAFT)
-  generationTaskId String?
-  archivedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  versions ProjectAssetVersion[]
-  episodeAssets Asset[]
+  id                  String                @id @default(cuid())
+  projectId           String
+  kind                String
+  name                String
+  description         String                @default("")
+  status              WorkflowStatus        @default(DRAFT)
+  generationTaskId    String?
+  archivedAt          DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  assets              Asset[]
+  project             Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions            ProjectAssetVersion[]
+
   @@unique([projectId, kind, name])
 }
 
 model ProjectAssetVersion {
-  id String @id @default(cuid())
+  id             String         @id @default(cuid())
   projectAssetId String
-  version Int
-  description String
+  version        Int
+  description    String
   promptSnapshot String?
-  artifactId String?
-  status WorkflowStatus @default(DRAFT)
-  projectAsset ProjectAsset @relation(fields: [projectAssetId], references: [id], onDelete: Cascade)
-  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+  artifactId     String?
+  status         WorkflowStatus @default(DRAFT)
+  artifact       MediaArtifact? @relation(fields: [artifactId], references: [id])
+  projectAsset   ProjectAsset   @relation(fields: [projectAssetId], references: [id], onDelete: Cascade)
+
   @@unique([projectAssetId, version])
 }
 
-model Storyboard {
-  id String @id @default(cuid())
-  episodeId String
-  scriptVersionId String?
+model ProjectSourceVersion {
+  id            String          @id @default(cuid())
+  projectId     String
+  version       Int
+  filename      String
+  content       String
+  checksum      String
+  charCount     Int
+  status        WorkflowStatus  @default(DRAFT)
+  archivedAt    DateTime?
+  createdAt     DateTime        @default(now())
+  project       Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceSegments SourceSegment[]
+
+  @@unique([projectId, version])
+}
+
+model ProviderConnection {
+  id                 String            @id @default(cuid())
+  organizationId     String
+  projectId          String?
+  provider           String
+  name               String
+  encryptedSecret    String
+  baseUrl            String
+  enabled            Boolean           @default(true)
+  lastError          String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime @updatedAt
+  accessKeyEncrypted String?
+  capabilities       ModelCapability[]
+  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project            Project?          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, name])
+}
+
+model QualityCheck {
+  id                      String                 @id @default(cuid())
+  status                  WorkflowStatus
+  kind                    String
+  score                   Float?
+  report                  String
+  sourceDocumentVersionId String?
+  storyboardId            String?
+  batchId                 String?
+  artifactId              String?
+  artifact                MediaArtifact?         @relation(fields: [artifactId], references: [id])
+  batch                   GenerationBatch?       @relation(fields: [batchId], references: [id])
+  sourceDocumentVersion   SourceDocumentVersion? @relation(fields: [sourceDocumentVersionId], references: [id])
+  storyboard              Storyboard?            @relation(fields: [storyboardId], references: [id])
+}
+
+model ScriptVersion {
+  id               String          @id @default(cuid())
+  episodeId        String
+  version          Int
+  content          String
+  checksum         String
+  status           WorkflowStatus  @default(DRAFT)
   generationTaskId String?
-  revision Int @default(1)
-  number Int
-  title String
-  durationMs Int
-  description String
-  dialogue String @default("")
-  speaker String?
-  sourceExcerpt String
-  continuityIn String
-  continuityOut String
-  status WorkflowStatus @default(DRAFT)
-  supersededAt DateTime?
-  /// 选优门:人工为这一镜钦定的成片版本(MediaArtifact.id,stage=VIDEO)。裸 id 与
-  /// UsageLedger.taskId 同一先例——产物行永不删除,读侧仍会校验归属,悬空即回退
-  /// "最新成功任务"。null 表示未选定,compose 按旧规则取最新。
-  selectedVideoArtifactId String?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  scriptVersion ScriptVersion? @relation(fields: [scriptVersionId], references: [id])
-  generationTask GenerationTask? @relation("StoryboardAuthor", fields: [generationTaskId], references: [id])
-  mediaTasks GenerationTask[] @relation("ShotMedia")
-  assets StoryboardAsset[]
-  batches GenerationBatch[]
+  archivedAt       DateTime?
+  episode          Episode         @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  generationTask   GenerationTask? @relation(fields: [generationTaskId], references: [id])
+  storyboards      Storyboard[]
+
+  @@unique([episodeId, version])
+}
+
+model SegmentAllocation {
+  id            String        @id @default(cuid())
+  segmentId     String        @unique
+  episodeId     String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime @updatedAt
+  episode       Episode?      @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  segment       SourceSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+}
+
+model Session {
+  id             String       @id @default(cuid())
+  tokenHash      String       @unique
+  userId         String
+  organizationId String
+  expiresAt      DateTime
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+model SourceDocumentVersion {
+  id           String         @id @default(cuid())
+  episodeId    String
+  version      Int
+  content      String
+  checksum     String
+  status       WorkflowStatus @default(DRAFT)
+  archivedAt   DateTime?
   qualityChecks QualityCheck[]
+  episode      Episode        @relation("EpisodeSourceVersions", fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@unique([episodeId, version])
+}
+
+model SourceSegment {
+  id                     String               @id @default(cuid())
+  projectSourceVersionId String
+  index                  Int
+  title                  String?
+  marked                 Boolean              @default(true)
+  content                String
+  charCount              Int
+  createdAt              DateTime             @default(now())
+  allocation             SegmentAllocation?
+  projectSourceVersion   ProjectSourceVersion @relation(fields: [projectSourceVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([projectSourceVersionId, index])
+}
+
+model Storyboard {
+  id                                                         String            @id @default(cuid())
+  episodeId                                                  String
+  scriptVersionId                                            String?
+  number                                                     Int
+  title                                                      String
+  durationMs                                                 Int
+  description                                                String
+  sourceExcerpt                                              String
+  continuityIn                                               String
+  continuityOut                                              String
+  status                                                     WorkflowStatus    @default(DRAFT)
+  generationTaskId                                           String?
+  revision                                                   Int               @default(1)
+  supersededAt                                               DateTime?
+  dialogue                                                   String            @default("")
+  speaker                                                    String?
+  selectedVideoArtifactId                                    String?
+  assets                                                     StoryboardAsset[]
+  generationTasks                                            GenerationTask[]  @relation("GenerationTask_storyboardIdToStoryboard")
+  qualityChecks                                              QualityCheck[]
+  episode                                                    Episode           @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  generationTask                                             GenerationTask?   @relation("Storyboard_generationTaskIdToGenerationTask", fields: [generationTaskId], references: [id])
+  scriptVersion                                              ScriptVersion?    @relation(fields: [scriptVersionId], references: [id])
+  batch                                                      GenerationBatch[]
+
   @@unique([episodeId, revision, number])
   @@index([episodeId, supersededAt])
 }
 
 model StoryboardAsset {
   storyboardId String
-  assetId String
-  role String
-  storyboard Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
-  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  assetId      String
+  role         String
+  asset        Asset      @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  storyboard   Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+
   @@id([storyboardId, assetId])
 }
 
-model GenerationBatch {
-  id String @id @default(cuid())
+model UsageLedger {
+  id             String       @id @default(cuid())
   organizationId String
-  episodeId String
-  stage Stage
-  status WorkflowStatus @default(DRAFT)
-  plannedCount Int
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-  storyboards Storyboard[]
-  tasks GenerationTask[]
-  qualityChecks QualityCheck[]
-  @@index([organizationId, stage, status])
-}
+  taskId         String?
+  provider       String
+  model          String
+  modality       String
+  inputUnits     Int          @default(0)
+  outputUnits    Int          @default(0)
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-model GenerationTask {
-  id String @id @default(cuid())
-  organizationId String
-  batchId String
-  stage Stage
-  status TaskStatus @default(QUEUED)
-  idempotencyKey String? @unique
-  /// The shot a FIRST_FRAME, VIDEO or AUDIO task was made for. A batch covers every shot it was
-  /// planned against, so without this the newest clip of a three-shot batch looks like the
-  /// clip of all three — and composition would cut one shot three times, while the console
-  /// could not tell which voice belongs to which line.
-  storyboardId String?
-  provider String?
-  model String?
-  capabilitySnapshot String?
-  requestSnapshot String?
-  responseSnapshot String?
-  errorSnapshot String?
-  attempts Int @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  batch GenerationBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  storyboard Storyboard? @relation("ShotMedia", fields: [storyboardId], references: [id])
-  artifacts MediaArtifact[]
-  scriptVersions ScriptVersion[]
-  generatedStoryboards Storyboard[] @relation("StoryboardAuthor")
-  generatedAssets Asset[]
-  @@index([organizationId, status])
-  @@index([batchId, status])
-  @@index([storyboardId, stage, status])
-}
-
-model GenerationLog {
-  id String @id @default(cuid())
-  organizationId String
-  taskId String
-  batchId String
-  episodeId String
-  stage String
-  /// info | warn | error
-  level String
-  /// task.start / candidate.start / candidate.params / candidate.skip / candidate.error / qc.verdict / task.success / task.fail
-  event String
-  message String
-  data Json?
-  createdAt DateTime @default(now())
-
-  @@index([taskId, createdAt])
   @@index([organizationId, createdAt])
 }
 
-model MediaArtifact {
-  id String @id @default(cuid())
-  organizationId String
-  taskId String?
-  stage Stage?
-  objectKey String
-  checksum String
-  mimeType String
-  version Int
-  width Int?
-  height Int?
-  durationMs Int?
-  metadata String?
-  createdAt DateTime @default(now())
-  task GenerationTask? @relation(fields: [taskId], references: [id])
-  assetVersions AssetVersion[]
-  projectAssetVersions ProjectAssetVersion[]
-  qualityChecks QualityCheck[]
-  @@unique([objectKey, version])
-  @@index([organizationId, stage])
+model User {
+  id                 String               @id @default(cuid())
+  email              String               @unique
+  name               String?
+  passwordHash       String
+  locale             String               @default("en")
+  createdAt          DateTime             @default(now())
+  auditEvents        AuditEvent[]
+  memberships        OrganizationMember[] @relation("Memberships")
+  sessions           Session[]
 }
 
-model QualityCheck {
-  id String @id @default(cuid())
-  status WorkflowStatus
-  kind String
-  score Float?
-  report String
-  sourceDocumentVersionId String?
-  storyboardId String?
-  batchId String?
-  artifactId String?
-  sourceDocumentVersion SourceDocumentVersion? @relation(fields: [sourceDocumentVersionId], references: [id])
-  storyboard Storyboard? @relation(fields: [storyboardId], references: [id])
-  batch GenerationBatch? @relation(fields: [batchId], references: [id])
-  artifact MediaArtifact? @relation(fields: [artifactId], references: [id])
+model StylePreset {
+  id             String    @id @default(cuid())
+  organizationId String?
+  name           String
+  description    String    @default("")
+  isOfficial     Boolean   @default(false)
+  visualStyle    String?
+  tone           String?
+  colorPalette   String?
+  cameraStyle    String?
+  extraPrompt    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime @updatedAt
+  projects       Project[]
 }
 
-model Composition {
-  id String @id @default(cuid())
-  episodeId String
-  status WorkflowStatus @default(DRAFT)
-  manifest String
-  artifactId String?
-  subtitleArtifactId String?
-  scoreArtifactId String?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-}
-
-model Delivery {
-  id String @id @default(cuid())
-  episodeId String
-  status WorkflowStatus @default(DRAFT)
-  manifest String
-  artifactId String?
-  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
-}
-
-model ProviderConnection {
-  id String @id @default(cuid())
-  organizationId String
-  projectId String?
-  provider String
-  name String
-  encryptedSecret String
-  accessKeyEncrypted String?
-  baseUrl String
-  enabled Boolean @default(true)
-  lastError String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  capabilities ModelCapability[]
-  @@unique([organizationId, name])
-}
-
-model ModelCapability {
-  id String @id @default(cuid())
-  connectionId String
-  model String
-  displayName String?
-  modality String
-  acceptsFirstFrame Boolean @default(false)
-  acceptsReferenceImages Boolean @default(false)
-  maxReferenceImages Int @default(0)
-  spec Json?
-  probeStatus String @default("unverified")
-  probeMessage String?
-  entitlementVerifiedAt DateTime?
-  credentialVerifiedAt DateTime?
-  lastProbedAt DateTime?
-  connection ProviderConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  bindings CapabilityBinding[]
-  // One vendor model_name answers both video dialects: Kling serves text2video and
-  // image2video for `kling-v2-5-turbo`, and Seedance's pro models take a text-only or an
-  // image-bearing content array under one id.
-  @@unique([connectionId, model, modality])
-}
-
-model AuditEvent {
-  id String @id @default(cuid())
-  organizationId String
-  userId String?
-  action String
-  entityType String
-  entityId String
-  payload String
-  createdAt DateTime @default(now())
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user User? @relation(fields: [userId], references: [id])
-  @@index([organizationId, createdAt])
+model PipelineConfig {
+  id          String    @id @default(cuid())
+  name        String
+  description String    @default("")
+  isDefault   Boolean   @default(false)
+  isOfficial  Boolean   @default(false)
+  styleId     String?
+  config      Json
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime @updatedAt
+  projects    Project[]
 }
 
 enum CapabilitySlot {
@@ -509,46 +529,50 @@ enum CapabilitySlot {
   VISUAL_AUDIT
 }
 
-model Session {
-  id String @id @default(cuid())
-  tokenHash String @unique
-  userId String
-  organizationId String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  @@index([userId])
-  @@index([expiresAt])
+enum MemberRole {
+  OWNER
+  ADMIN
+  EDITOR
+  REVIEWER
+  VIEWER
 }
 
-model CapabilityBinding {
-  id String @id @default(cuid())
-  organizationId String
-  projectId String?
-  slot CapabilitySlot
-  capabilityId String
-  priority Int @default(0)
-  enabled Boolean @default(true)
-  createdAt DateTime @default(now())
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  capability ModelCapability @relation(fields: [capabilityId], references: [id], onDelete: Cascade)
-  @@index([organizationId, slot])
-  @@index([projectId, slot])
-  @@index([capabilityId])
+enum ProjectFormat {
+  SHORT_DRAMA
+  SERIES
+  FILM
 }
 
-model UsageLedger {
-  id String @id @default(cuid())
-  organizationId String
-  taskId String?
-  provider String
-  model String
-  modality String
-  inputUnits Int @default(0)
-  outputUnits Int @default(0)
-  createdAt DateTime @default(now())
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  @@index([organizationId, createdAt])
+enum Stage {
+  SOURCE_AUDIT
+  SCRIPT
+  ASSET
+  STORYBOARD
+  FIRST_FRAME
+  VIDEO
+  AUDIO
+  COMPOSITION
+  DELIVERY
+  MUSIC
+  SUBTITLE
+}
+
+enum TaskStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  CANCELLED
+}
+
+enum WorkflowStatus {
+  DRAFT
+  READY
+  RUNNING
+  NEEDS_REVIEW
+  APPROVED
+  BLOCKED
+  COMPLETED
+  CANCELLED
 }

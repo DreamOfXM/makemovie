@@ -5,7 +5,8 @@ import type { CapabilitySlot, ContentLocale } from '@studio/domain'
 import { isContentLocale, planVideoModels } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
 import { buildFilmScriptPrompt, buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
-import { DEFAULT_PROMPT_GUARDS, runPromptGuards, type GuardCharacterInfo, type GuardFinding } from './guards.js'
+import { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE, type GuardCharacterInfo, type GuardFinding } from './guards.js'
+import { applyStyleToPrompt, getStyleById, type StylePreset } from './styles/index.js'
 
 /**
  * Generation orchestration shared by the API (a human triggers a stage) and the
@@ -39,6 +40,24 @@ export {
   shouldSplitStoryboard,
 } from './storyboard.js'
 export type { ExtractedAsset, ParsedStoryboard, StoryboardSegment } from './storyboard.js'
+
+// 风格预设系统:影响 STORYBOARD/IMAGE/VIDEO 阶段的 prompt
+export {
+  OFFICIAL_STYLES,
+  getOfficialStyles,
+  getStyleById,
+  isValidStyleId,
+  getStyleVisualDirective,
+  getStyleToneDirective,
+  registerCustomStyle,
+  unregisterCustomStyle,
+  getAllStyles,
+} from './styles/index.js'
+export type { StylePreset } from './styles/index.js'
+export { applyStyleToPrompt, isStageAffectedByStyle } from './styles/index.js'
+
+// 官方风格幂等种子
+export { seedOfficialStyles } from './seed-official-styles.js'
 
 /** The stages the pipeline advances through on its own, in order. */
 export const PIPELINE_STAGES = ['SCRIPT', 'STORYBOARD', 'ASSET', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
@@ -138,13 +157,14 @@ export async function liveStoryboards(db: PrismaClient, episodeId: string): Prom
  * of them had a clip.
  */
 export async function composedStoryboardIds(db: PrismaClient, episodeId: string): Promise<Set<string>> {
+  const batchIds = (await db.generationBatch.findMany({ where: { episodeId }, select: { id: true } })).map(b => b.id)
   const tasks = await db.generationTask.findMany({
     where: {
       status: 'SUCCEEDED',
       stage: 'VIDEO',
       storyboardId: { not: null },
-      batch: { episodeId },
-      artifacts: { some: { stage: 'VIDEO' } },
+      batchId: { in: batchIds },
+      mediaArtifacts: { some: { stage: 'VIDEO' } },
     },
     select: { storyboardId: true },
   })
@@ -158,13 +178,14 @@ export async function composedStoryboardIds(db: PrismaClient, episodeId: string)
  * voice track.
  */
 export async function voicedStoryboardIds(db: PrismaClient, episodeId: string): Promise<Set<string>> {
+  const batchIds = (await db.generationBatch.findMany({ where: { episodeId }, select: { id: true } })).map(b => b.id)
   const tasks = await db.generationTask.findMany({
     where: {
       status: 'SUCCEEDED',
       stage: 'AUDIO',
       storyboardId: { not: null },
-      batch: { episodeId },
-      artifacts: { some: { stage: 'AUDIO' } },
+      batchId: { in: batchIds },
+      mediaArtifacts: { some: { stage: 'AUDIO' } },
     },
     select: { storyboardId: true },
   })
@@ -248,8 +269,9 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
     // in whichever voices had landed when it ran, so a line voiced since then is
     // missing from the file: the old master is a stale render, not finished work.
     // Neither model carries a usable timestamp, and cuid ids sort chronologically.
+    const voicedBatchIds = (await db.generationBatch.findMany({ where: { episodeId }, select: { id: true } })).map(b => b.id)
     const voicedSince = await db.generationTask.count({
-      where: { batch: { episodeId }, stage: 'AUDIO', status: 'SUCCEEDED', id: { gt: latest.id }, artifacts: { some: { stage: 'AUDIO' } } },
+      where: { batchId: { in: voicedBatchIds }, stage: 'AUDIO', status: 'SUCCEEDED', id: { gt: latest.id }, mediaArtifacts: { some: { stage: 'AUDIO' } } },
     })
     if (voicedSince === 0 && !(await selectionChanged(db, episodeId, latest.manifest))) {
       return { ready: false, reason: 'composition:alreadyPlanned' }
@@ -338,6 +360,7 @@ export async function usableFirstFrames(
   storyboardIds: string[],
 ): Promise<Map<string, string>> {
   if (storyboardIds.length === 0) return new Map()
+  const batchIds = (await db.generationBatch.findMany({ where: { episodeId }, select: { id: true } })).map(b => b.id)
   const artifacts = await db.mediaArtifact.findMany({
     where: {
       organizationId,
@@ -346,7 +369,7 @@ export async function usableFirstFrames(
       task: {
         status: 'SUCCEEDED',
         storyboardId: { in: storyboardIds },
-        batch: { episodeId },
+        batchId: { in: batchIds },
       },
     },
     select: { id: true, task: { select: { storyboardId: true } } },
@@ -498,7 +521,7 @@ export async function triggerStage(
   userId: string | null,
   episodeId: string,
   stage: GenerationStage,
-  options: { storyboardIds?: string[]; assetIds?: string[]; promptNote?: string; regenerate?: boolean } = {},
+  options: { storyboardIds?: string[]; assetIds?: string[]; promptNote?: string; regenerate?: boolean; styleId?: string } = {},
 ): Promise<TriggerResult> {
   const { db } = store
   const episode = await db.episode.findFirst({
@@ -507,7 +530,9 @@ export async function triggerStage(
     // belonging to a breakdown the episode no longer uses, and connecting them to
     // the batch would make the composition walk shots that were replaced.
     include: {
-      project: { select: { contentLocale: true, format: true } },
+      project: {
+        include: { stylePreset: true },
+      },
       storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] },
       assets: { orderBy: { id: 'asc' } },
     },
@@ -516,6 +541,55 @@ export async function triggerStage(
   // Read off the project rather than passed in, so a human triggering a stage and
   // the worker advancing into it build the same prompt for the same episode.
   const locale: ContentLocale = isContentLocale(episode.project.contentLocale) ? episode.project.contentLocale : 'zh'
+
+  // 风格预设解析:显式传入优先,其次回落项目默认风格,都找不到则报错
+  let style: StylePreset | undefined
+  if (options.styleId) {
+    // 1. 代码内置
+    style = getStyleById(options.styleId)
+    // 2. DB(官方+本组织)
+    if (!style) {
+      const dbStyle = await db.stylePreset.findFirst({
+        where: {
+          id: options.styleId,
+          OR: [{ isOfficial: true }, { organizationId }],
+        },
+      })
+      if (dbStyle) {
+        style = {
+          id: dbStyle.id,
+          name: dbStyle.name,
+          description: dbStyle.description,
+          isOfficial: dbStyle.isOfficial,
+          visualStyle: dbStyle.visualStyle ?? '',
+          tone: dbStyle.tone ?? '',
+          colorPalette: dbStyle.colorPalette ?? undefined,
+          cameraStyle: dbStyle.cameraStyle ?? undefined,
+          extraPrompt: dbStyle.extraPrompt ?? undefined,
+        }
+      }
+    }
+    // 3. 显式传入但解析不到 → 报错
+    if (!style) return { ok: false, code: 400, error: 'styles:notFound' }
+  } else if (episode.project.stylePresetId) {
+    // 回落:使用项目默认风格
+    if (episode.project.stylePreset) {
+      const sp = episode.project.stylePreset
+      style = {
+        id: sp.id,
+        name: sp.name,
+        description: sp.description,
+        isOfficial: sp.isOfficial,
+        visualStyle: sp.visualStyle ?? '',
+        tone: sp.tone ?? '',
+        colorPalette: sp.colorPalette ?? undefined,
+        cameraStyle: sp.cameraStyle ?? undefined,
+        extraPrompt: sp.extraPrompt ?? undefined,
+      }
+    } else {
+      style = getStyleById(episode.project.stylePresetId)
+    }
+  }
 
   const perStoryboard = stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO'
   const perAsset = stage === 'ASSET'
@@ -636,7 +710,7 @@ export async function triggerStage(
     const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, orderBy: { version: 'desc' } })
     if (!script) return { ok: false, code: 409, error: 'generations:noApprovedScript' }
     scriptVersionId = script.id
-    contentPrompt = buildStoryboardPrompt(locale, script.content, await targetShotDurationMs(db, organizationId, episode.projectId))
+    contentPrompt = buildStoryboardPrompt(locale, script.content, await targetShotDurationMs(db, organizationId, episode.projectId), undefined, style)
   }
   if (stage === 'IMAGE' || stage === 'VIDEO' || stage === 'AUDIO' || stage === 'MUSIC') {
     const script = await db.scriptVersion.findFirst({ where: { episodeId: episode.id, status: 'APPROVED' }, select: { id: true, content: true } })
@@ -707,7 +781,7 @@ export async function triggerStage(
   // 落 BLOCKED 不排队;所有留痕随请求快照入库——审计要能回答"这条 prompt 被动过吗、为什么"。
   // 守卫链是有序数组(DEFAULT_PROMPT_GUARDS),增减规则不碰这里。
   const shotById = new Map(selected.map(storyboard => [storyboard.id, storyboard]))
-  const promptedTargets: GenerationTarget[] = stage === 'IMAGE' || stage === 'VIDEO'
+  let promptedTargets: GenerationTarget[] = stage === 'IMAGE' || stage === 'VIDEO'
     ? notedTargets.map(target => {
         const info = target.storyboardId ? shotGuardInfo.get(target.storyboardId) : undefined
         const shot = target.storyboardId ? shotById.get(target.storyboardId) : undefined
@@ -724,6 +798,14 @@ export async function triggerStage(
         }
       })
     : notedTargets
+
+  // 风格预设应用到 IMAGE/VIDEO 阶段:在守卫处理之后追加视觉风格描述
+  if (style && (stage === 'IMAGE' || stage === 'VIDEO')) {
+    promptedTargets = promptedTargets.map(target => ({
+      ...target,
+      prompt: applyStyleToPrompt(stage, target.prompt, style),
+    }))
+  }
 
   // A frame is only looked up when a model was bound that can take it: resolving one for a
   // request that would have to drop it spends a query to produce a number nobody reads.
@@ -747,7 +829,7 @@ export async function triggerStage(
     const inflight = await db.storyboard.findMany({
       where: {
         id: { in: selected.map(storyboard => storyboard.id) },
-        mediaTasks: { some: { stage: 'FIRST_FRAME', status: { in: ['QUEUED', 'RUNNING'] } } },
+        generationTasks: { some: { stage: 'FIRST_FRAME', status: { in: ['QUEUED', 'RUNNING'] } } },
       },
       select: { number: true },
       orderBy: { number: 'asc' },
@@ -956,6 +1038,8 @@ export async function buildGenerationPlan(
   organizationId: string,
   episodeId: string,
   stage: GenerationStage,
+  // The plan is a readiness/cost preview — it never renders prompts, so there is
+  // nothing for a style to affect; carrying a styleId here would be a silent no-op.
   options: { storyboardIds?: string[]; assetIds?: string[]; regenerate?: boolean } = {},
 ): Promise<PlanResult> {
   const episode = await db.episode.findFirst({
@@ -1018,7 +1102,7 @@ export async function buildGenerationPlan(
       const inflight = await db.storyboard.findMany({
         where: {
           id: { in: voiced.map(storyboard => storyboard.id) },
-          mediaTasks: { some: { stage: 'FIRST_FRAME', status: { in: ['QUEUED', 'RUNNING'] } } },
+          generationTasks: { some: { stage: 'FIRST_FRAME', status: { in: ['QUEUED', 'RUNNING'] } } },
         },
         select: { number: true },
         orderBy: { number: 'asc' },

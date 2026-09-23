@@ -270,7 +270,7 @@ export function isLiveStoryboard(storyboard: Storyboard): boolean {
  * a shot list's history without a second request or a hand-edited URL.
  */
 export function storyboardsPath(episodeId: string, includeSuperseded: boolean): string {
-  return `/episodes/${episodeId}/storyboards${includeSuperseded ? '?includeSuperseded=true' : ''}`
+  return `/api/episodes/${episodeId}/storyboards${includeSuperseded ? '?includeSuperseded=true' : ''}`
 }
 
 /* -------------------------------------------------------------------------- */
@@ -294,7 +294,7 @@ export interface CreateProjectInput {
 }
 
 export function createProject(api: ApiClient, input: CreateProjectInput): Promise<Project> {
-  return api<Project>('/projects', { method: 'POST', body: JSON.stringify(input) })
+  return api<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) })
 }
 
 export interface ProjectPage {
@@ -307,7 +307,7 @@ export interface ProjectPage {
 export function listProjectPage(api: ApiClient, limit: number, before?: string): Promise<ProjectPage> {
   const query = new URLSearchParams({ limit: String(limit) })
   if (before) query.set('before', before)
-  return api<ProjectPage>(`/projects?${query.toString()}`)
+  return api<ProjectPage>(`/api/projects?${query.toString()}`)
 }
 
 export interface CreateEpisodeInput {
@@ -318,7 +318,7 @@ export interface CreateEpisodeInput {
 }
 
 export function createEpisode(api: ApiClient, projectId: string, input: CreateEpisodeInput): Promise<Episode> {
-  return api<Episode>(`/projects/${projectId}/episodes`, { method: 'POST', body: JSON.stringify(input) })
+  return api<Episode>(`/api/projects/${projectId}/episodes`, { method: 'POST', body: JSON.stringify(input) })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -398,7 +398,7 @@ export function getProjectSourceSegment(
   projectId: string,
   segmentId: string,
 ): Promise<{ segment: ProjectSourceSegmentDetail }> {
-  return api<{ segment: ProjectSourceSegmentDetail }>(`/projects/${projectId}/source/segments/${segmentId}`)
+  return api<{ segment: ProjectSourceSegmentDetail }>(`/api/projects/${projectId}/source/segments/${segmentId}`)
 }
 
 /** PATCH /projects/:id/source/segments/:segmentId — fix a chapter's text in place. */
@@ -408,7 +408,7 @@ export function updateProjectSourceSegment(
   segmentId: string,
   content: string,
 ): Promise<{ segment: ProjectSourceSegmentDetail }> {
-  return api<{ segment: ProjectSourceSegmentDetail }>(`/projects/${projectId}/source/segments/${segmentId}`, {
+  return api<{ segment: ProjectSourceSegmentDetail }>(`/api/projects/${projectId}/source/segments/${segmentId}`, {
     method: 'PATCH',
     body: JSON.stringify({ content }),
   })
@@ -416,13 +416,13 @@ export function updateProjectSourceSegment(
 
 /** DELETE — drop a junk chapter from the book; later applies never see it. */
 export function deleteProjectSourceSegment(api: ApiClient, projectId: string, segmentId: string): Promise<void> {
-  return api<void>(`/projects/${projectId}/source/segments/${segmentId}`, { method: 'DELETE' })
+  return api<void>(`/api/projects/${projectId}/source/segments/${segmentId}`, { method: 'DELETE' })
 }
 
 /** DELETE an episode that is still a shell (text drafts only); refused with
  *  `episodes:notDeletable` once shots, batches, compositions or deliveries exist. */
 export function deleteEpisode(api: ApiClient, projectId: string, episodeId: string): Promise<void> {
-  return api<void>(`/projects/${projectId}/episodes/${episodeId}`, { method: 'DELETE' })
+  return api<void>(`/api/projects/${projectId}/episodes/${episodeId}`, { method: 'DELETE' })
 }
 
 /** Multipart upload; `request` leaves the content type to the browser so the boundary is set. */
@@ -431,12 +431,12 @@ export function deleteEpisode(api: ApiClient, projectId: string, episodeId: stri
 export function uploadProjectSource(api: ApiClient, projectId: string, files: File[]): Promise<UploadProjectSourceResult> {
   const body = new FormData()
   for (const file of files) body.append('file', file)
-  return api<UploadProjectSourceResult>(`/projects/${projectId}/source/upload`, { method: 'POST', body })
+  return api<UploadProjectSourceResult>(`/api/projects/${projectId}/source/upload`, { method: 'POST', body })
 }
 
 /** The paste door to the same intake — for webviews without a file picker, or text already on the clipboard. */
 export function pasteProjectSource(api: ApiClient, projectId: string, content: string): Promise<UploadProjectSourceResult> {
-  return api<UploadProjectSourceResult>(`/projects/${projectId}/source`, { method: 'POST', body: JSON.stringify({ content }) })
+  return api<UploadProjectSourceResult>(`/api/projects/${projectId}/source`, { method: 'POST', body: JSON.stringify({ content }) })
 }
 
 /** One-click presets: budget packs unassigned chapters by target duration,
@@ -447,14 +447,14 @@ export function autoSplitSource(
   projectId: string,
   mode?: 'budget' | 'per_chapter',
 ): Promise<{ episodesCreated: number; allocated: number }> {
-  return api<{ episodesCreated: number; allocated: number }>(`/projects/${projectId}/source/auto-split`, {
+  return api<{ episodesCreated: number; allocated: number }>(`/api/projects/${projectId}/source/auto-split`, {
     method: 'POST',
     body: JSON.stringify(mode ? { mode } : {}),
   })
 }
 
 export function getProjectSource(api: ApiClient, projectId: string): Promise<ProjectSourceResponse> {
-  return api<ProjectSourceResponse>(`/projects/${projectId}/source`)
+  return api<ProjectSourceResponse>(`/api/projects/${projectId}/source`)
 }
 
 /** One row per segment (a single changed row is fine); the whole map survives a reload. */
@@ -463,7 +463,7 @@ export function updateSourceAllocations(
   projectId: string,
   allocations: Array<{ segmentId: string; episodeId: string | null }>,
 ): Promise<{ updated: number }> {
-  return api<{ updated: number }>(`/projects/${projectId}/source/allocations`, {
+  return api<{ updated: number }>(`/api/projects/${projectId}/source/allocations`, {
     method: 'PATCH',
     body: JSON.stringify({ allocations }),
   })
@@ -474,7 +474,7 @@ export function applyProjectSource(
   api: ApiClient,
   projectId: string,
 ): Promise<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }> {
-  return api<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }>(`/projects/${projectId}/source/apply`, { method: 'POST' })
+  return api<{ results: ApplyProjectSourceResultItem[]; pendingSegments: number }>(`/api/projects/${projectId}/source/apply`, { method: 'POST' })
 }
 
 export interface AuditEvent {
@@ -698,7 +698,7 @@ export interface UsageReport {
  */
 export function artifactHref(downloadUrl: string): string {
   if (/^https?:\/\//i.test(downloadUrl)) return downloadUrl
-  return `${apiBase}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
+  return `${apiBase}/api${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`
 }
 
 /* -------------------------------------------------------------------------- */

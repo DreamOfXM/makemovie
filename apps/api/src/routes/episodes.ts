@@ -39,7 +39,7 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
   const taskIds = new Map<string, string[]>()
   const tasks = await db.generationTask.findMany({
     where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO', 'AUDIO'] }, storyboardId: { not: null }, status: { in: ['SUCCEEDED', 'FAILED', 'QUEUED', 'RUNNING'] } },
-    include: { artifacts: { orderBy: { version: 'desc' }, take: 1 } },
+    include: { mediaArtifacts: { orderBy: { version: 'desc' }, take: 1 } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
   // 事件序(旧→新)遍历:成功写入产物并清掉同阶段的失败——重生成成功的那一刻,
@@ -52,7 +52,7 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
     ids.push(task.id)
     taskIds.set(task.storyboardId, ids)
     if (task.status === 'SUCCEEDED') {
-      const artifact = task.artifacts[0]
+      const artifact = task.mediaArtifacts[0]
       if (!artifact) continue
       if (task.stage === 'FIRST_FRAME') {
         firstFrame.set(task.storyboardId, toArtifactDto(artifact))

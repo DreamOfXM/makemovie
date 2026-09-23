@@ -39,7 +39,7 @@ beforeAll(async () => {
   await env.register('asset-editor@example.com', 'Asset Editor Org')
   await env.register('asset-viewer@example.com', 'Asset Viewer Org')
   for (const [email, role] of [['asset-editor@example.com', 'EDITOR'], ['asset-viewer@example.com', 'VIEWER']] as const) {
-    const added = await env.app.inject({ method: 'POST', url: '/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
+    const added = await env.app.inject({ method: 'POST', url: '/api/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
     expect(added.statusCode).toBe(201)
     const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email, password: 'password123', organizationId } })
     expect(login.statusCode).toBe(200)
@@ -48,24 +48,24 @@ beforeAll(async () => {
   }
 
   const rival = await env.register('asset-rival@example.com', 'Rival Org')
-  const rivalProject = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(rival.token), payload: { name: 'Rival Drama' } })
+  const rivalProject = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(rival.token), payload: { name: 'Rival Drama' } })
   expect(rivalProject.statusCode).toBe(201)
   const rivalEpisode = await env.app.inject({
-    method: 'POST', url: `/projects/${rivalProject.json().id as string}/episodes`,
+    method: 'POST', url: `/api/projects/${rivalProject.json().id as string}/episodes`,
     headers: env.authHeaders(rival.token), payload: { number: 1, title: 'Rival EP1' },
   })
   expect(rivalEpisode.statusCode).toBe(201)
   rivalEpisodeId = rivalEpisode.json().id as string
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Asset Drama' } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Asset Drama' } })
   expect(project.statusCode).toBe(201)
   projectId = project.json().id as string
 
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
-  assetsUrl = `/episodes/${episodeId}/assets`
+  assetsUrl = `/api/episodes/${episodeId}/assets`
 }, 300_000)
 
 afterAll(async () => {
@@ -85,12 +85,12 @@ describe('episode assets', () => {
     expect(forbidden.statusCode).toBe(403)
     expect(forbidden.json().error).toMatch(/episode:write/)
 
-    const missing = await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/assets', headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/assets', headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(missing.statusCode).toBe(404)
 
-    const foreign = await env.app.inject({ method: 'GET', url: `/episodes/${rivalEpisodeId}/assets`, headers: authHeaders(editorToken) })
+    const foreign = await env.app.inject({ method: 'GET', url: `/api/episodes/${rivalEpisodeId}/assets`, headers: authHeaders(editorToken) })
     expect(foreign.statusCode).toBe(404)
-    const foreignWrite = await env.app.inject({ method: 'POST', url: `/episodes/${rivalEpisodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
+    const foreignWrite = await env.app.inject({ method: 'POST', url: `/api/episodes/${rivalEpisodeId}/assets`, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(foreignWrite.statusCode).toBe(404)
 
     // Reads only need membership.
@@ -239,18 +239,18 @@ describe('asset version approval', () => {
     expect((await env.app.inject({ method: 'POST', url: `${assetsUrl}/does-not-exist/versions/1/approve`, headers: authHeaders(editorToken) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'POST', url: `${assetsUrl}/${approvedAssetId}/versions/99/approve`, headers: authHeaders(editorToken) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'POST', url: `${assetsUrl}/${approvedAssetId}/versions/abc/approve`, headers: authHeaders(editorToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/assets/x/versions/1/approve', headers: authHeaders(editorToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/assets/x/versions/1/approve', headers: authHeaders(editorToken) })).statusCode).toBe(404)
 
     // An asset on a rival episode stays invisible and unapprovable.
     const rivalAsset = await env.db.asset.create({ data: { episodeId: rivalEpisodeId, kind: 'character', name: 'Rival Lead', description: '对手角色' } })
     const rivalVersion = await env.db.assetVersion.create({ data: { assetId: rivalAsset.id, version: 1, description: '对手版本', status: 'DRAFT' } })
-    const foreign = await env.app.inject({ method: 'POST', url: `/episodes/${rivalEpisodeId}/assets/${rivalAsset.id}/versions/1/approve`, headers: authHeaders(editorToken) })
+    const foreign = await env.app.inject({ method: 'POST', url: `/api/episodes/${rivalEpisodeId}/assets/${rivalAsset.id}/versions/1/approve`, headers: authHeaders(editorToken) })
     expect(foreign.statusCode).toBe(404)
     expect((await env.db.assetVersion.findUniqueOrThrow({ where: { id: rivalVersion.id } })).status).toBe('DRAFT')
   })
 
   it('records the asset events in the audit trail', async () => {
-    const res = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
     const events = res.json().events as { action: string; entityType: string }[]
     expect(events.some(event => event.action === 'asset.create' && event.entityType === 'Asset')).toBe(true)

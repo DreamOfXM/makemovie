@@ -40,6 +40,7 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { LocaleSwitcher } from '@/components/locale-switcher'
+import { SkinSelector } from '@/components/ui/skin-selector'
 import { ThemeToggle } from '@/components/theme-toggle'
 
 /** Which way the rail sits is a per-device habit, not account data. */
@@ -413,6 +414,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <OrgSwitcher />
           <div className="flex items-center gap-1">
             <LocaleSwitcher />
+            <SkinSelector />
             <ThemeToggle />
             <Separator orientation="vertical" className="mx-1 h-6" />
             <UserMenu />

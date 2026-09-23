@@ -19,11 +19,17 @@ import { ThemeToggle } from '@/components/theme-toggle'
 
 type Mode = 'login' | 'register'
 
+interface Membership {
+  organizationId: string
+  organizationName: string
+  role: string
+}
+
 const heroPoints = ['auth.heroPoint1', 'auth.heroPoint2', 'auth.heroPoint3'] as const
 
 export default function LoginPage() {
   const { t } = useI18n()
-  const { status, signIn } = useSession()
+  const { status, signIn, switchOrganization } = useSession()
   const router = useRouter()
 
   const [mode, setMode] = useState<Mode>('register')
@@ -33,6 +39,14 @@ export default function LoginPage() {
   const [organizationName, setOrganizationName] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  
+  // Show org picker when user belongs to multiple organizations
+  const [showOrgPicker, setShowOrgPicker] = useState(false)
+  const [allMemberships, setAllMemberships] = useState<Array<{
+    organizationId: string
+    organizationName: string
+    role: string
+  }>>([])
 
   useEffect(() => {
     if (status === 'authenticated') router.replace('/projects')
@@ -44,21 +58,53 @@ export default function LoginPage() {
     event.preventDefault()
     setBusy(true)
     setError('')
+    
     try {
-      const data =
-        mode === 'register'
-          ? await request<{ token: string }>('/auth/register', {
-              method: 'POST',
-              body: JSON.stringify({ email, password, organizationName, name: name.trim() || undefined }),
-            })
-          : await request<{ token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
-      await signIn(data.token)
-      toast.success(t('auth.welcome'))
-      router.replace('/projects')
+      if (mode === 'register') {
+        const data = await request<{ token: string }>('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({ email, password, organizationName, name: name.trim() || undefined }),
+        })
+        await signIn(data.token)
+        toast.success(t('auth.welcome'))
+        router.replace('/projects')
+      } else {
+        const data = await request<{ token: string; memberships: Membership[] }>('/auth/login', { 
+          method: 'POST', 
+          body: JSON.stringify({ email, password }) 
+        })
+        
+        // Check if user has multiple organizations
+        if (data.memberships && data.memberships.length > 1) {
+          setAllMemberships(data.memberships)
+          setShowOrgPicker(true)
+          setError('')
+        } else {
+          await signIn(data.token)
+          toast.success(t('auth.welcome'))
+          router.replace('/projects')
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t('error.generic'))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function switchToOrg(organizationId: string) {
+    try {
+      await switchOrganization(organizationId)
+      // Find organization name from allMemberships for toast message
+      const org = allMemberships.find(m => m.organizationId === organizationId)
+      if (org) {
+        toast.success(`切换到 ${org.organizationName}`)
+      } else {
+        toast.success('组织切换成功')
+      }
+      router.replace('/projects')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('error.generic'))
     }
   }
 
@@ -193,6 +239,39 @@ export default function LoginPage() {
           </Card>
         </div>
       </section>
+
+      {/* Organization Picker Modal */}
+      {showOrgPicker && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <Card className="w-full max-w-md p-6 space-y-4">
+            <CardHeader>
+              <CardTitle>选择组织</CardTitle>
+              <CardDescription>您属于多个组织，请选择要登录的组织</CardDescription>
+            </CardHeader>
+            <div className="space-y-2">
+              {allMemberships.map(membership => (
+                <Button
+                  key={membership.organizationId}
+                  onClick={() => switchToOrg(membership.organizationId)}
+                  className="w-full h-12 text-left px-4"
+                  variant="outline"
+                  disabled={busy}
+                >
+                  <span className="font-medium">{membership.organizationName}</span>
+                  <span className="text-muted-foreground ml-auto text-xs">{t(`role.${membership.role}`)}</span>
+                </Button>
+              ))}
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => setShowOrgPicker(false)}
+              disabled={busy}
+            >
+              取消
+            </Button>
+          </Card>
+        </div>
+      )}
     </div>
   )
 }

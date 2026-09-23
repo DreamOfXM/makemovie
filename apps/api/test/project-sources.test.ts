@@ -19,7 +19,7 @@ function multipartBody(filename: string, bytes: Buffer): { headers: Record<strin
 
 async function uploadBook(projectId: string, filename: string, bytes: Buffer) {
   const { headers, payload } = multipartBody(filename, bytes)
-  return env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/upload`, headers: { ...authHeaders(), ...headers }, payload })
+  return env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/upload`, headers: { ...authHeaders(), ...headers }, payload })
 }
 
 /** A dropped folder arrives as many parts: one per chapter file. */
@@ -34,7 +34,7 @@ function uploadFolder(projectId: string, files: Array<{ filename: string; bytes:
   chunks.push(Buffer.from(`--${boundary}--\r\n`))
   return env.app.inject({
     method: 'POST',
-    url: `/projects/${projectId}/source/upload`,
+    url: `/api/projects/${projectId}/source/upload`,
     headers: { ...authHeaders(), 'content-type': `multipart/form-data; boundary=${boundary}` },
     payload: Buffer.concat(chunks),
   })
@@ -58,7 +58,7 @@ afterAll(async () => {
 })
 
 async function createProject(format: string): Promise<string> {
-  const res = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: `书项目 ${format}`, format } })
+  const res = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: `书项目 ${format}`, format } })
   expect(res.statusCode).toBe(201)
   return (res.json() as { id: string }).id
 }
@@ -66,73 +66,73 @@ async function createProject(format: string): Promise<string> {
 describe('project format', () => {
   it('paginates the project list on demand without touching the default shape', async () => {
     for (let i = 0; i < 3; i += 1) {
-      const res = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: `分页测压-${i}`, format: 'series' } })
+      const res = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: `分页测压-${i}`, format: 'series' } })
       expect(res.statusCode).toBe(201)
     }
-    const page1 = await env.app.inject({ method: 'GET', url: '/projects?limit=2', headers: authHeaders() })
+    const page1 = await env.app.inject({ method: 'GET', url: '/api/projects?limit=2', headers: authHeaders() })
     expect(page1.statusCode).toBe(200)
     const first = page1.json() as { projects: Array<{ id: string }>; nextCursor: string | null }
     expect(first.projects).toHaveLength(2)
     expect(first.nextCursor).toBe(first.projects[1].id)
 
-    const page2 = await env.app.inject({ method: 'GET', url: `/projects?limit=2&before=${first.nextCursor}`, headers: authHeaders() })
+    const page2 = await env.app.inject({ method: 'GET', url: `/api/projects?limit=2&before=${first.nextCursor}`, headers: authHeaders() })
     const second = page2.json() as { projects: Array<{ id: string }>; nextCursor: string | null }
     expect(second.projects.length).toBeGreaterThanOrEqual(1)
     expect(second.projects.map(p => p.id)).not.toContain(first.projects[0].id)
 
-    const bad = await env.app.inject({ method: 'GET', url: '/projects?limit=0', headers: authHeaders() })
+    const bad = await env.app.inject({ method: 'GET', url: '/api/projects?limit=0', headers: authHeaders() })
     expect(bad.statusCode).toBe(400)
 
     // The no-parameter call keeps the bare array every existing consumer reads.
-    const legacy = await env.app.inject({ method: 'GET', url: '/projects', headers: authHeaders() })
+    const legacy = await env.app.inject({ method: 'GET', url: '/api/projects', headers: authHeaders() })
     expect(Array.isArray(legacy.json())).toBe(true)
   })
 
   it('locks a film project to the single episode it is born with', async () => {
     const projectId = await createProject('film')
-    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const episodes = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders() })
     expect(episodes.statusCode).toBe(200)
     const list = episodes.json() as Array<{ number: number; targetDurationMs: number | null }>
     expect(list).toHaveLength(1)
     expect(list[0].targetDurationMs).toBe(120 * 60_000)
 
-    const extra = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '多余的一集' } })
+    const extra = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '多余的一集' } })
     expect(extra.statusCode).toBe(409)
     expect(extra.json()).toMatchObject({ error: 'episodes:filmLockedToOne' })
   })
 
   it('seeds series episodes with the 45-minute default and honours an explicit override', async () => {
     const projectId = await createProject('series')
-    const seeded = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '首集' } })
+    const seeded = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '首集' } })
     expect(seeded.statusCode).toBe(201)
     expect((seeded.json() as { targetDurationMs: number }).targetDurationMs).toBe(45 * 60_000)
 
-    const override = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '大结局', targetDurationMs: 90 * 60_000 } })
+    const override = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '大结局', targetDurationMs: 90 * 60_000 } })
     expect(override.statusCode).toBe(201)
     expect((override.json() as { targetDurationMs: number }).targetDurationMs).toBe(90 * 60_000)
   })
 
   it('accepts a project-level custom duration inside the format range and rejects outside it', async () => {
     // 90-second episodes: today's short-drama shape, not the 8-minute constant.
-    const custom = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '九十秒短剧', format: 'short_drama', targetDurationMs: 90_000 } })
+    const custom = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: '九十秒短剧', format: 'short_drama', targetDurationMs: 90_000 } })
     expect(custom.statusCode).toBe(201)
     const projectId = (custom.json() as { id: string }).id
-    const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第一集' } })
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第一集' } })
     expect((episode.json() as { targetDurationMs: number }).targetDurationMs).toBe(90_000)
 
-    const tooShort = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '超短', format: 'short_drama', targetDurationMs: 5_000 } })
+    const tooShort = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: '超短', format: 'short_drama', targetDurationMs: 5_000 } })
     expect(tooShort.statusCode).toBe(400)
-    const tooLong = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '超长', format: 'film', targetDurationMs: 400 * 60_000 } })
+    const tooLong = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: '超长', format: 'film', targetDurationMs: 400 * 60_000 } })
     expect(tooLong.statusCode).toBe(400)
 
     // The film born with a 95-minute cut seeds its single episode accordingly.
-    const film = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '九十五分钟电影', format: 'film', targetDurationMs: 95 * 60_000 } })
+    const film = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: '九十五分钟电影', format: 'film', targetDurationMs: 95 * 60_000 } })
     expect(film.statusCode).toBe(201)
-    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${(film.json() as { id: string }).id}/episodes`, headers: authHeaders() })
+    const episodes = await env.app.inject({ method: 'GET', url: `/api/projects/${(film.json() as { id: string }).id}/episodes`, headers: authHeaders() })
     expect(((episodes.json() as Array<{ targetDurationMs: number }>)[0]).targetDurationMs).toBe(95 * 60_000)
 
     // Per-episode overrides are range-checked against the project's format.
-    const badEpisode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '越界', targetDurationMs: 60 * 60_000 } })
+    const badEpisode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '越界', targetDurationMs: 60 * 60_000 } })
     expect(badEpisode.statusCode).toBe(400)
   })
 })
@@ -146,7 +146,7 @@ describe('whole-book upload', () => {
     expect(created.version.version).toBe(1)
     expect(created.segments).toBe(3)
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     expect(matrix.statusCode).toBe(200)
     const payload = matrix.json() as {
       version: { version: number } | null
@@ -164,7 +164,7 @@ describe('whole-book upload', () => {
     const projectId = await createProject('series')
     const paste = await env.app.inject({
       method: 'POST',
-      url: `/projects/${projectId}/source`,
+      url: `/api/projects/${projectId}/source`,
       headers: authHeaders(),
       payload: { content: BOOK },
     })
@@ -174,11 +174,11 @@ describe('whole-book upload', () => {
     expect(created.version.filename).toBe('粘贴的整本.txt')
     expect(created.segments).toBe(3)
 
-    const dup = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: BOOK } })
+    const dup = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source`, headers: authHeaders(), payload: { content: BOOK } })
     expect(dup.statusCode).toBe(409)
     expect(dup.json()).toMatchObject({ error: 'projectSources:duplicate' })
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     expect(((matrix.json() as { segments: unknown[] }).segments)).toHaveLength(3)
   })
 
@@ -186,11 +186,11 @@ describe('whole-book upload', () => {
     const projectId = await createProject('series')
     // Just past the ceiling: the business check must answer with a readable 400
     // — not a transport 413 from Fastify's default 1 MB JSON cap.
-    const over = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(1_000_001) } })
+    const over = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(1_000_001) } })
     expect(over.statusCode).toBe(400)
     expect(over.json()).toMatchObject({ error: 'projectSources:tooLarge' })
     // Inside the ceiling (~2.5 MB of UTF-8) the door holds.
-    const within = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(900_000) } })
+    const within = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source`, headers: authHeaders(), payload: { content: '章'.repeat(900_000) } })
     expect(within.statusCode).toBe(201)
   })
 
@@ -205,14 +205,14 @@ describe('whole-book upload', () => {
   it('rejects a repeated segment in one allocation payload instead of a raw 500', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第 1 集' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '第 1 集' } })
     const episodeId = (ep.json() as { id: string }).id
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const segmentId = (matrix.json() as { segments: Array<{ id: string }> }).segments[0].id
 
     const dup = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [
         { segmentId, episodeId },
@@ -235,26 +235,26 @@ describe('whole-book upload', () => {
 
   it('auto-splits by target duration into new episodes and lands the whole book', async () => {
     // 1-minute target × 350 chars/min: chapters of 200/200/100 pack as [200] + [200,100].
-    const custom = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(), payload: { name: '自动拆分靶', format: 'short_drama', targetDurationMs: 60_000 } })
+    const custom = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(), payload: { name: '自动拆分靶', format: 'short_drama', targetDurationMs: 60_000 } })
     const projectId = (custom.json() as { id: string }).id
     const book = '第一章 灯\n' + '灯下有人。'.repeat(40) + '\n\n第二章 巷\n' + '巷口风大。'.repeat(40) + '\n\n第三章 归\n' + '有人归来。'.repeat(20)
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(book, 'utf8'))).statusCode).toBe(201)
 
-    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    const split = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/auto-split`, headers: authHeaders() })
     expect(split.statusCode).toBe(200)
     expect(split.json()).toMatchObject({ episodesCreated: 2, allocated: 3 })
 
-    const applied = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    const applied = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect(applied.statusCode).toBe(200)
     expect(applied.json()).toMatchObject({ pendingSegments: 0 })
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     expect((matrix.json() as { version: { status: string } }).version.status).toBe('APPROVED')
 
     // Presets never touch groups already placed: with everything allocated a
     // re-run has nothing to do (it used to re-pack the whole book).
-    const splitAgain = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    const splitAgain = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/auto-split`, headers: authHeaders() })
     expect(splitAgain.statusCode).toBe(409)
-    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const episodes = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders() })
     const list = episodes.json() as Array<{ number: number; title: string }>
     expect(list.map(e => e.number)).toEqual([1, 2])
     // Episodes are numbered artifacts, not chapter digests: the first chapter's
@@ -266,22 +266,22 @@ describe('whole-book upload', () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
     // One chapter is manually grouped first — the preset must leave it alone.
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '手工集' } })).statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '手工集' } })).statusCode).toBe(201)
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string; number: number }> }
     const manual = episodes.find(e => e.number === 1)!.id
     await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [{ segmentId: segments[0].id, episodeId: manual }] },
     })
 
-    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders(), payload: { mode: 'per_chapter' } })
+    const split = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/auto-split`, headers: authHeaders(), payload: { mode: 'per_chapter' } })
     expect(split.statusCode).toBe(200)
     expect(split.json()).toMatchObject({ episodesCreated: 2, allocated: 2 })
 
-    const after = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const after = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const data = after.json() as { segments: Array<{ id: string; episodeId: string | null }>; episodes: Array<{ id: string; number: number }> }
     // The manually placed chapter still points at the hand-made episode; each
     // other chapter got an episode of its own.
@@ -294,40 +294,40 @@ describe('whole-book upload', () => {
   it('auto-split lands a film in its single born episode', async () => {
     const projectId = await createProject('film')
     expect((await uploadBook(projectId, 'film.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const split = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/auto-split`, headers: authHeaders() })
+    const split = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/auto-split`, headers: authHeaders() })
     expect(split.statusCode).toBe(200)
     expect(split.json()).toMatchObject({ episodesCreated: 0, allocated: 3 })
-    const episodes = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const episodes = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders() })
     expect((episodes.json() as unknown[]).length).toBe(1)
   })
 
   it('keeps the whole book in draft while chapters remain unallocated', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string }> }
     // Only the first marked chapter goes in this round.
     expect((await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [{ segmentId: segments[1].id, episodeId: episodes[0].id }] },
     })).statusCode).toBe(200)
 
-    const partial = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    const partial = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect(partial.statusCode).toBe(200)
     expect(partial.json()).toMatchObject({ pendingSegments: 2 })
-    const stillDraft = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const stillDraft = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     expect((stillDraft.json() as { version: { status: string } }).version.status).toBe('DRAFT')
 
     // Place every remaining segment (unmarked lead included) and apply again.
     const rest = segments.filter(segment => segment.id !== segments[1].id).map(segment => ({ segmentId: segment.id, episodeId: episodes[0].id }))
-    expect((await env.app.inject({ method: 'PATCH', url: `/projects/${projectId}/source/allocations`, headers: authHeaders(), payload: { allocations: rest } })).statusCode).toBe(200)
-    const complete = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    expect((await env.app.inject({ method: 'PATCH', url: `/api/projects/${projectId}/source/allocations`, headers: authHeaders(), payload: { allocations: rest } })).statusCode).toBe(200)
+    const complete = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect(complete.json()).toMatchObject({ pendingSegments: 0 })
-    const approved = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const approved = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     expect((approved.json() as { version: { status: string } }).version.status).toBe('APPROVED')
   })
 
@@ -335,7 +335,7 @@ describe('whole-book upload', () => {
     const projectId = await createProject('series')
     const res = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}`,
+      url: `/api/projects/${projectId}`,
       headers: authHeaders(),
       payload: { name: '改名', format: 'film' },
     })
@@ -347,7 +347,7 @@ describe('whole-book upload', () => {
     // 纸巷 in GBK: invalid as UTF-8, decodable as GB18030.
     const upload = await uploadBook(projectId, 'gbk.txt', Buffer.from([0xd6, 0xbd, 0xcf, 0xef]))
     expect(upload.statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const payload = matrix.json() as { segments: Array<{ charCount: number }> }
     expect(payload.segments).toHaveLength(1)
     expect(payload.segments[0].charCount).toBe(2)
@@ -376,12 +376,12 @@ describe('whole-book upload', () => {
     expect(res.statusCode).toBe(201)
     expect(res.json()).toMatchObject({ files: 3, segments: 3 })
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
     // Natural order: 第2章 sorts before 第10章 (lexicographic would flip them).
     expect(segments.map(segment => segment.title)).toEqual(['第1章 雨夜寻人', '第2章 奶奶的葬礼', '第10章 巷底的灯'])
 
-    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const detail = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
     const content = (detail.json() as { segment: { content: string } }).segment.content
     expect(content).toContain('雨夜的正文。')
     expect(content).not.toContain('第一章 雨夜寻人')
@@ -395,12 +395,12 @@ describe('whole-book upload', () => {
       { filename: '1.txt', bytes: Buffer.from('甲的内容。', 'utf8') },
     ])
     expect(res.statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
     // 1, 2, 10 — not 1, 10, 2 — and each file's body rides its position's chapter.
     expect(segments.map(segment => segment.title)).toEqual(['第1章', '第2章', '第3章'])
     const details = await Promise.all(segments.map(segment =>
-      env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segment.id}`, headers: authHeaders() })))
+      env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/${segment.id}`, headers: authHeaders() })))
     const bodies = await Promise.all(details.map(d => (d.json() as { segment: { content: string } }).segment.content))
     expect(bodies[0]).toContain('甲的内容。')
     expect(bodies[2]).toContain('丙的内容。')
@@ -446,12 +446,12 @@ describe('whole-book upload', () => {
     expect(res.statusCode).toBe(201)
     expect(res.json()).toMatchObject({ files: 4, segments: 4 })
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null }> }
     // Filename order: 第2章 before 第10章 before 第99章, subfolder irrelevant.
     expect(segments.map(segment => segment.title)).toEqual(['第1章 开眼', '第2章 契约', '第10章 灯下', '第99章 尾声'])
 
-    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const detail = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
     const content = (detail.json() as { segment: { content: string } }).segment.content
     expect(content).toContain('开眼的正文。')
     expect(content).not.toContain('第一章 开眼')
@@ -479,7 +479,7 @@ describe('whole-book upload', () => {
     const res = await uploadBook(projectId, 'windows书.zip', zip)
     expect(res.statusCode).toBe(201)
     expect(res.json()).toMatchObject({ files: 2, segments: 2 })
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ title: string | null }> }
     // Titles must be readable Chinese, not µÚÒ»ÕÂ-style mojibake.
     expect(segments.map(segment => segment.title)).toEqual(['第1章 开眼', '第2章 灯下'])
@@ -488,23 +488,23 @@ describe('whole-book upload', () => {
   it('deletes a shell episode and returns its chapters to unassigned', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '要删的壳' } })).statusCode).toBe(201)
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '留下的' } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '要删的壳' } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 2, title: '留下的' } })).statusCode).toBe(201)
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string; number: number }> }
     const ep1 = episodes.find(e => e.number === 1)!.id
     await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [{ segmentId: segments[0].id, episodeId: ep1 }] },
     })
 
-    const del = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/episodes/${ep1}`, headers: authHeaders() })
+    const del = await env.app.inject({ method: 'DELETE', url: `/api/projects/${projectId}/episodes/${ep1}`, headers: authHeaders() })
     expect(del.statusCode).toBe(204)
 
-    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const reread = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const after = reread.json() as { segments: Array<{ id: string; episodeId: string | null }>; episodes: Array<{ id: string; number: number }> }
     expect(after.episodes.map(e => e.number)).toEqual([2])
     // The chapter fell back to unassigned, it did not vanish.
@@ -513,8 +513,8 @@ describe('whole-book upload', () => {
     // An episode with a storyboard refuses the delete: paid/hand work never
     // silently dies with a cleanup pass.
     const ep2 = after.episodes[0]
-    expect((await env.app.inject({ method: 'POST', url: `/episodes/${ep2.id}/storyboards`, headers: authHeaders(), payload: { number: 1, title: '镜头', durationMs: 3000, description: '有人走过' } })).statusCode).toBe(201)
-    const blocked = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/episodes/${ep2.id}`, headers: authHeaders() })
+    expect((await env.app.inject({ method: 'POST', url: `/api/episodes/${ep2.id}/storyboards`, headers: authHeaders(), payload: { number: 1, title: '镜头', durationMs: 3000, description: '有人走过' } })).statusCode).toBe(201)
+    const blocked = await env.app.inject({ method: 'DELETE', url: `/api/projects/${projectId}/episodes/${ep2.id}`, headers: authHeaders() })
     expect(blocked.statusCode).toBe(409)
     expect(blocked.json()).toMatchObject({ error: 'episodes:notDeletable' })
   })
@@ -522,18 +522,18 @@ describe('whole-book upload', () => {
   it('deletes a junk chapter; its allocation goes with it', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string }> }
 
-    const del = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const del = await env.app.inject({ method: 'DELETE', url: `/api/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
     expect(del.statusCode).toBe(204)
 
-    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const reread = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const after = reread.json() as { segments: Array<{ id: string }> }
     expect(after.segments.map(s => s.id)).not.toContain(segments[0].id)
     expect(after.segments).toHaveLength(2)
 
-    const again = await env.app.inject({ method: 'DELETE', url: `/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
+    const again = await env.app.inject({ method: 'DELETE', url: `/api/projects/${projectId}/source/segments/${segments[0].id}`, headers: authHeaders() })
     expect(again.statusCode).toBe(404)
   })
 })
@@ -598,10 +598,10 @@ describe('allocation and apply', () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
     for (const [number, title] of [[1, '纸人开眼'], [2, '契约']] as const) {
-      expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number, title } })).statusCode).toBe(201)
+      expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number, title } })).statusCode).toBe(201)
     }
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string; title: string | null; preview: string }>; episodes: Array<{ id: string; number: number }> }
     // The excerpt reads as content (no marker line), not just another number column.
     expect(segments[1].preview).toContain('夜里有风')
@@ -611,7 +611,7 @@ describe('allocation and apply', () => {
 
     const allocate = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [
         { segmentId: segments[0].id, episodeId: ep1 },
@@ -621,7 +621,7 @@ describe('allocation and apply', () => {
     })
     expect(allocate.statusCode).toBe(200)
 
-    const apply = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    const apply = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect(apply.statusCode).toBe(200)
     const results = (apply.json() as { results: Array<{ number: number; version: number | null; skipped: boolean }> }).results
     expect(results).toEqual(expect.arrayContaining([
@@ -629,7 +629,7 @@ describe('allocation and apply', () => {
       expect.objectContaining({ number: 2, version: 1, skipped: false }),
     ]))
 
-    const ep1Source = await env.app.inject({ method: 'GET', url: `/episodes/${ep1}/source-versions/1`, headers: authHeaders() })
+    const ep1Source = await env.app.inject({ method: 'GET', url: `/api/episodes/${ep1}/source-versions/1`, headers: authHeaders() })
     expect(ep1Source.statusCode).toBe(200)
     const source = ep1Source.json() as { version: { content: string } }
     // Book order is preserved: the unmarked lead precedes chapter one inside episode 1.
@@ -637,7 +637,7 @@ describe('allocation and apply', () => {
     expect(source.version.content).not.toContain('第二章')
 
     // Re-applying the same map is a no-op per episode, not an error.
-    const again = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    const again = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect((again.json() as { results: Array<{ skipped: boolean }> }).results.every(r => r.skipped)).toBe(true)
   })
 
@@ -645,15 +645,15 @@ describe('allocation and apply', () => {
     const projectId = await createProject('film')
     expect((await uploadBook(projectId, 'film.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
     const other = await createProject('series')
-    const ep = await env.app.inject({ method: 'POST', url: `/projects/${other}/episodes`, headers: authHeaders(), payload: { number: 1, title: '别家的集' } })
+    const ep = await env.app.inject({ method: 'POST', url: `/api/projects/${other}/episodes`, headers: authHeaders(), payload: { number: 1, title: '别家的集' } })
     const foreignEpisodeId = (ep.json() as { id: string }).id
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string }> }
 
     const spread = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: [
         { segmentId: segments[0].id, episodeId: foreignEpisodeId },
@@ -668,23 +668,23 @@ describe('allocation and apply', () => {
   it('applies a film book onto its single episode as one source version', async () => {
     const projectId = await createProject('film')
     expect((await uploadBook(projectId, 'film.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string }> }
     expect(episodes).toHaveLength(1)
 
     const allocate = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: segments.map(segment => ({ segmentId: segment.id, episodeId: episodes[0].id })) },
     })
     expect(allocate.statusCode).toBe(200)
 
-    const apply = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })
+    const apply = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })
     expect(apply.statusCode).toBe(200)
     expect((apply.json() as { results: Array<{ version: number | null }> }).results[0].version).toBe(1)
 
-    const whole = await env.app.inject({ method: 'GET', url: `/episodes/${episodes[0].id}/source-versions/1`, headers: authHeaders() })
+    const whole = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodes[0].id}/source-versions/1`, headers: authHeaders() })
     const source = whole.json() as { version: { content: string; contentLength: number } }
     expect(source.version.content).toContain('楔子')
     expect(source.version.content).toContain('第二章 契约')
@@ -693,12 +693,12 @@ describe('allocation and apply', () => {
   it('serves one chapter\'s full text for row expansion, scoped to the owning org', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string; title: string | null; charCount: number }> }
     // The matrix reads shapes only; the detail read is where the words live.
     expect(segments[1]).not.toHaveProperty('content')
 
-    const detail = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[1].id}`, headers: authHeaders() })
+    const detail = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/${segments[1].id}`, headers: authHeaders() })
     expect(detail.statusCode).toBe(200)
     const segment = (detail.json() as { segment: { title: string | null; content: string; charCount: number } }).segment
     expect(segment.title).toBe('第一章 纸人开眼')
@@ -708,21 +708,21 @@ describe('allocation and apply', () => {
 
     // A segment of another org's project is not addressable, and unknown ids 404.
     const outsider = (await env.register('outsider@studio.test', 'Outsider Org')).token
-    const foreign = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/${segments[1].id}`, headers: env.authHeaders(outsider) })
+    const foreign = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/${segments[1].id}`, headers: env.authHeaders(outsider) })
     expect(foreign.statusCode).toBe(404)
-    const unknown = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source/segments/does-not-exist`, headers: authHeaders() })
+    const unknown = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source/segments/does-not-exist`, headers: authHeaders() })
     expect(unknown.statusCode).toBe(404)
   })
 
   it('edits one chapter\'s text in place, re-deriving its char count', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments } = matrix.json() as { segments: Array<{ id: string; charCount: number }> }
 
     const edit = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/segments/${segments[1].id}`,
+      url: `/api/projects/${projectId}/source/segments/${segments[1].id}`,
       headers: authHeaders(),
       payload: { content: '第一章 纸人开眼\n改写后的整章内容，只占一行。' },
     })
@@ -732,13 +732,13 @@ describe('allocation and apply', () => {
     expect(saved.charCount).toBe(saved.content.length)
 
     // The matrix reads the new shape without a re-upload.
-    const reread = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const reread = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const row = ((reread.json() as { segments: Array<{ id: string; charCount: number }> }).segments).find(s => s.id === segments[1].id)
     expect(row?.charCount).toBe(saved.charCount)
 
     const empty = await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/segments/${segments[1].id}`,
+      url: `/api/projects/${projectId}/source/segments/${segments[1].id}`,
       headers: authHeaders(),
       payload: { content: '   ' },
     })
@@ -749,24 +749,24 @@ describe('allocation and apply', () => {
   it('rides source statuses on the episode list so rows can flag drafts awaiting review', async () => {
     const projectId = await createProject('series')
     expect((await uploadBook(projectId, 'book.txt', Buffer.from(BOOK, 'utf8'))).statusCode).toBe(201)
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(), payload: { number: 1, title: '纸人开眼' } })).statusCode).toBe(201)
 
     // Before apply: the episode exists but owes no source.
-    const empty = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const empty = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders() })
     expect(((empty.json() as Array<{ sourceVersions: Array<{ status: string }> }>)[0]).sourceVersions).toEqual([])
 
-    const matrix = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/source`, headers: authHeaders() })
+    const matrix = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/source`, headers: authHeaders() })
     const { segments, episodes } = matrix.json() as { segments: Array<{ id: string }>; episodes: Array<{ id: string }> }
     await env.app.inject({
       method: 'PATCH',
-      url: `/projects/${projectId}/source/allocations`,
+      url: `/api/projects/${projectId}/source/allocations`,
       headers: authHeaders(),
       payload: { allocations: segments.map(segment => ({ segmentId: segment.id, episodeId: episodes[0].id })) },
     })
-    expect((await env.app.inject({ method: 'POST', url: `/projects/${projectId}/source/apply`, headers: authHeaders() })).statusCode).toBe(200)
+    expect((await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/source/apply`, headers: authHeaders() })).statusCode).toBe(200)
 
     // After apply: the draft the project page must flag is right there in the list read.
-    const list = await env.app.inject({ method: 'GET', url: `/projects/${projectId}/episodes`, headers: authHeaders() })
+    const list = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders() })
     const statuses = ((list.json() as Array<{ sourceVersions: Array<{ status: string }> }>)[0]).sourceVersions
     expect(statuses).toEqual([{ status: 'DRAFT' }])
   })

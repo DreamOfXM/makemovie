@@ -53,22 +53,22 @@ async function createTenant(email: string, organizationName: string, connectionN
   const token = owner.token
   const organizationId = owner.organization.id
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(token), payload: { name: `${organizationName} Project` } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(token), payload: { name: `${organizationName} Project` } })
   expect(project.statusCode).toBe(201)
 
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${project.json().id}/episodes`, headers: authHeaders(token), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${project.json().id}/episodes`, headers: authHeaders(token), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
-  const secondEpisode = await env.app.inject({ method: 'POST', url: `/projects/${project.json().id}/episodes`, headers: authHeaders(token), payload: { number: 2, title: 'EP2' } })
+  const secondEpisode = await env.app.inject({ method: 'POST', url: `/api/projects/${project.json().id}/episodes`, headers: authHeaders(token), payload: { number: 2, title: 'EP2' } })
   expect(secondEpisode.statusCode).toBe(201)
 
-  const connection = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name: connectionName, apiKey: 'test-key' } })
+  const connection = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name: connectionName, apiKey: 'test-key' } })
   expect(connection.statusCode).toBe(201)
   const capabilities = (connection.json() as { capabilities: { id: string; model: string }[] }).capabilities
-  const probe = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.json().id}/probe`, headers: authHeaders(token) })
+  const probe = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.json().id}/probe`, headers: authHeaders(token) })
   expect(probe.statusCode).toBe(200)
   for (const [slot, model] of [['script_text', 'mock-text'], ['video_t2v', 'mock-t2v'], ['tts_voice', 'mock-tts'], ['music_gen', 'mock-music']] as const) {
     const binding = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(token),
       payload: { slot, capabilityId: capabilities.find(capability => capability.model === model)!.id },
     })
     expect(binding.statusCode).toBe(201)
@@ -136,7 +136,7 @@ async function seedRun(
 
 async function getUsage(token: string, query: Record<string, string> = {}): Promise<{ statusCode: number; body: UsageReport }> {
   const search = new URLSearchParams(query).toString()
-  const res = await env.app.inject({ method: 'GET', url: `/usage${search ? `?${search}` : ''}`, headers: authHeaders(token) })
+  const res = await env.app.inject({ method: 'GET', url: `/api/usage${search ? `?${search}` : ''}`, headers: authHeaders(token) })
   return { statusCode: res.statusCode, body: res.json() as UsageReport }
 }
 
@@ -191,7 +191,7 @@ describe('GET /usage', () => {
       where: { connection: { organizationId: tenant.organizationId }, model: 'mock-i2v' },
     })
     const binding = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(tenant.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(tenant.token),
       payload: { slot: 'video_i2v', capabilityId: capability.id, projectId: tenant.projectId },
     })
     expect(binding.statusCode).toBe(201)
@@ -227,10 +227,10 @@ describe('GET /usage', () => {
 
     // An id from another tenant answers exactly as the other routes answer it: 404, and
     // no hint that the row exists at all.
-    const foreignProject = await env.app.inject({ method: 'GET', url: `/usage?projectId=${theirs.projectId}`, headers: authHeaders(mine.token) })
+    const foreignProject = await env.app.inject({ method: 'GET', url: `/api/usage?projectId=${theirs.projectId}`, headers: authHeaders(mine.token) })
     expect(foreignProject.statusCode).toBe(404)
     expect(foreignProject.json()).toEqual({ error: 'Project not found' })
-    const foreignEpisode = await env.app.inject({ method: 'GET', url: `/usage?episodeId=${theirs.episodeId}`, headers: authHeaders(mine.token) })
+    const foreignEpisode = await env.app.inject({ method: 'GET', url: `/api/usage?episodeId=${theirs.episodeId}`, headers: authHeaders(mine.token) })
     expect(foreignEpisode.statusCode).toBe(404)
     expect(foreignEpisode.json()).toEqual({ error: 'Episode not found' })
 
@@ -275,10 +275,10 @@ describe('GET /usage', () => {
     expect(open.body.rows).toHaveLength(0)
     expect(open.body.total).toEqual({ taskCount: 0, entryCount: 0, retriedTaskCount: 0, inputUnits: 0, outputUnits: 0 })
 
-    const malformed = await env.app.inject({ method: 'GET', url: '/usage?from=last-tuesday', headers: authHeaders(tenant.token) })
+    const malformed = await env.app.inject({ method: 'GET', url: '/api/usage?from=last-tuesday', headers: authHeaders(tenant.token) })
     expect(malformed.statusCode).toBe(400)
     expect(malformed.json()).toEqual({ error: 'from must be an ISO date' })
-    const reversed = await env.app.inject({ method: 'GET', url: `/usage?from=${iso(0)}&to=${iso(3600)}`, headers: authHeaders(tenant.token) })
+    const reversed = await env.app.inject({ method: 'GET', url: `/api/usage?from=${iso(0)}&to=${iso(3600)}`, headers: authHeaders(tenant.token) })
     expect(reversed.statusCode).toBe(400)
     expect(reversed.json()).toEqual({ error: 'from must not be after to' })
   })
@@ -315,10 +315,10 @@ describe('GET /usage', () => {
 
   it('splits the space ledger by project so the heaviest consumer leads', async () => {
     const tenant = await createTenant('usage-split@example.com', 'Usage Split Org', 'usage-split-main')
-    const second = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(tenant.token), payload: { name: 'Second Project' } })
+    const second = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(tenant.token), payload: { name: 'Second Project' } })
     expect(second.statusCode).toBe(201)
     const secondEpisode = await env.app.inject({
-      method: 'POST', url: `/projects/${second.json().id}/episodes`, headers: authHeaders(tenant.token),
+      method: 'POST', url: `/api/projects/${second.json().id}/episodes`, headers: authHeaders(tenant.token),
       payload: { number: 1, title: 'EP1' },
     })
     expect(secondEpisode.statusCode).toBe(201)
@@ -340,7 +340,7 @@ describe('GET /usage', () => {
   })
 
   it('requires a session', async () => {
-    const anonymous = await env.app.inject({ method: 'GET', url: '/usage' })
+    const anonymous = await env.app.inject({ method: 'GET', url: '/api/usage' })
     expect(anonymous.statusCode).toBe(401)
     expect(anonymous.json()).toEqual({ error: 'Missing bearer token' })
   })
@@ -348,7 +348,7 @@ describe('GET /usage', () => {
   it('reports units and nothing else: no price, currency, or cost column exists', async () => {
     const tenant = await createTenant('usage-boundary@example.com', 'Usage Boundary Org', 'usage-boundary-main')
     await seedRun(tenant, { stage: 'VIDEO', model: 'mock-t2v', modality: 't2v', inputUnits: 12, outputUnits: 34 })
-    const res = await env.app.inject({ method: 'GET', url: '/usage', headers: authHeaders(tenant.token) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/usage', headers: authHeaders(tenant.token) })
     expect(res.statusCode).toBe(200)
     assertNoPriceTags(res.payload)
     const body = res.json() as UsageReport

@@ -81,7 +81,7 @@ interface CompositionDto {
   score: ArtifactDto | null
 }
 
-type TaskRow = GenerationTask & { artifacts: MediaArtifact[] }
+type TaskRow = GenerationTask & { mediaArtifacts: MediaArtifact[] }
 type BatchRow = GenerationBatch & { tasks: TaskRow[] }
 
 interface GenerationBody {
@@ -90,6 +90,7 @@ interface GenerationBody {
   assetIds?: string[]
   promptNote?: string
   regenerate?: boolean
+  styleId?: string
 }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
@@ -97,13 +98,13 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
 }
 
 async function latestChecks(db: PrismaClient, tasks: TaskRow[]): Promise<QualityCheck[]> {
-  const artifactIds = tasks.flatMap(task => task.artifacts.map(artifact => artifact.id))
+  const artifactIds = tasks.flatMap(task => task.mediaArtifacts.map((artifact: MediaArtifact) => artifact.id))
   if (artifactIds.length === 0) return []
   return db.qualityCheck.findMany({ where: { artifactId: { in: artifactIds } }, orderBy: { id: 'desc' } })
 }
 
 function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
-  const artifactIds = new Set(task.artifacts.map(artifact => artifact.id))
+  const artifactIds = new Set(task.mediaArtifacts.map((artifact: MediaArtifact) => artifact.id))
   const check = checks.find(candidate => candidate.artifactId !== null && artifactIds.has(candidate.artifactId))
   return {
     id: task.id,
@@ -116,7 +117,7 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
     error: task.errorSnapshot,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-    artifacts: task.artifacts.map(toArtifactDto),
+    artifacts: task.mediaArtifacts.map(toArtifactDto),
     qc: check ? { kind: check.kind, score: check.score, status: check.status } : null,
     retryTrace: parseRetryTrace(task.responseSnapshot),
   }
@@ -144,7 +145,7 @@ async function toBatchDtos(db: PrismaClient, batches: BatchRow[]): Promise<Batch
 async function toBatchDto(db: PrismaClient, batchId: string): Promise<BatchDto> {
   const batch = await db.generationBatch.findUniqueOrThrow({
     where: { id: batchId },
-    include: { tasks: { include: { artifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+    include: { tasks: { include: { mediaArtifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
   })
   const [dto] = await toBatchDtos(db, [batch])
   return dto
@@ -175,7 +176,13 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const stage = request.body?.stage
       if (!isGenerationStage(stage)) return reply.code(400).send({ error: `stage must be one of: ${generationStages.join(', ')}` })
-      const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, { storyboardIds: request.body?.storyboardIds, assetIds: request.body?.assetIds, promptNote: request.body?.promptNote?.slice(0, 500), regenerate: request.body?.regenerate === true })
+      const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, {
+        storyboardIds: request.body?.storyboardIds,
+        assetIds: request.body?.assetIds,
+        promptNote: request.body?.promptNote?.slice(0, 500),
+        regenerate: request.body?.regenerate === true,
+        styleId: request.body?.styleId,
+      })
       if (!result.ok) return reply.code(result.code).send({ error: result.error, ...(result.reasons ? { reasons: result.reasons } : {}) })
       return reply.code(result.created ? 201 : 200).send({ batch: await toBatchDto(app.db, result.batchId) })
     },
@@ -263,7 +270,7 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const batches = await app.db.generationBatch.findMany({
         where: { episodeId: episode.id },
-        include: { tasks: { include: { artifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+        include: { tasks: { include: { mediaArtifacts: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
         // Neither GenerationBatch nor Composition carries a createdAt column;
         // cuid ids sort chronologically.
         orderBy: { id: 'desc' },
@@ -281,10 +288,10 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requirePermission('generation:trigger') },
     async (request, reply) => {
       const auth = request.auth!
-      const task = await app.db.generationTask.findFirst({ where: { id: request.params.taskId, organizationId: auth.organizationId }, include: { artifacts: true } })
+      const task = await app.db.generationTask.findFirst({ where: { id: request.params.taskId, organizationId: auth.organizationId }, include: { mediaArtifacts: true } })
       if (!task) return reply.code(404).send({ error: 'task not found' })
       if (task.status !== 'QUEUED') return reply.code(409).send({ error: 'only queued tasks can be cancelled' })
-      const cancelled = await app.db.generationTask.update({ where: { id: task.id }, data: { status: 'CANCELLED' }, include: { artifacts: true } })
+      const cancelled = await app.db.generationTask.update({ where: { id: task.id }, data: { status: 'CANCELLED' }, include: { mediaArtifacts: true } })
       await syncBatchStatus(app.db, cancelled.batchId)
       await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'generation.cancel', entityType: 'generation-task', entityId: cancelled.id, payload: { batchId: cancelled.batchId, stage: toApiStage(cancelled.stage) } })
       const [dto] = await toTaskDtos(app.db, [cancelled])
@@ -355,12 +362,12 @@ async function shotsWithOpenSelection(db: PrismaClient, episodeId: string): Prom
   if (unchosen.length === 0) return []
   const tasks = await db.generationTask.findMany({
     where: { storyboardId: { in: unchosen.map(shot => shot.id) }, stage: 'VIDEO', status: 'SUCCEEDED' },
-    select: { storyboardId: true, _count: { select: { artifacts: { where: { stage: 'VIDEO' } } } } },
+    select: { storyboardId: true, _count: { select: { mediaArtifacts: { where: { stage: 'VIDEO' } } } } },
   })
   const clipsPerShot = new Map<string, number>()
   for (const task of tasks) {
     if (!task.storyboardId) continue
-    clipsPerShot.set(task.storyboardId, (clipsPerShot.get(task.storyboardId) ?? 0) + task._count.artifacts)
+    clipsPerShot.set(task.storyboardId, (clipsPerShot.get(task.storyboardId) ?? 0) + task._count.mediaArtifacts)
   }
   return unchosen.filter(shot => (clipsPerShot.get(shot.id) ?? 0) >= 2)
 }

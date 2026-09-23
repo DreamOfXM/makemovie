@@ -39,7 +39,7 @@ beforeAll(async () => {
   await env.register('src-editor@example.com', 'Source Editor Org')
   await env.register('src-viewer@example.com', 'Source Viewer Org')
   for (const [email, role] of [['src-editor@example.com', 'EDITOR'], ['src-viewer@example.com', 'VIEWER']] as const) {
-    const added = await env.app.inject({ method: 'POST', url: '/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
+    const added = await env.app.inject({ method: 'POST', url: '/api/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
     expect(added.statusCode).toBe(201)
     const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email, password: 'password123', organizationId } })
     expect(login.statusCode).toBe(200)
@@ -48,34 +48,34 @@ beforeAll(async () => {
   }
 
   const rival = await env.register('src-rival@example.com', 'Rival Org')
-  const rivalProject = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(rival.token), payload: { name: 'Rival Drama' } })
+  const rivalProject = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(rival.token), payload: { name: 'Rival Drama' } })
   expect(rivalProject.statusCode).toBe(201)
   const rivalEpisode = await env.app.inject({
-    method: 'POST', url: `/projects/${rivalProject.json().id as string}/episodes`,
+    method: 'POST', url: `/api/projects/${rivalProject.json().id as string}/episodes`,
     headers: env.authHeaders(rival.token), payload: { number: 1, title: 'Rival EP1' },
   })
   expect(rivalEpisode.statusCode).toBe(201)
   rivalEpisodeId = rivalEpisode.json().id as string
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Source Drama' } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Source Drama' } })
   expect(project.statusCode).toBe(201)
   projectId = project.json().id as string
 
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
   for (const [number, title, description] of [[1, 'SB1', 'Opening scene'], [2, 'SB2', 'Rooftop chase']] as const) {
     const storyboard = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
       payload: { number, title, durationMs: 8000, description, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(storyboard.statusCode).toBe(201)
     storyboardIds.push(storyboard.json().id as string)
   }
 
-  sourceUrl = `/episodes/${episodeId}/source-versions`
-  scriptUrl = `/episodes/${episodeId}/script-versions`
+  sourceUrl = `/api/episodes/${episodeId}/source-versions`
+  scriptUrl = `/api/episodes/${episodeId}/script-versions`
 }, 300_000)
 
 afterAll(async () => {
@@ -98,12 +98,12 @@ describe('source document versions', () => {
     expect(forbidden.statusCode).toBe(403)
     expect(forbidden.json().error).toMatch(/episode:write/)
 
-    const missing = await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/source-versions', headers: authHeaders(editorToken), payload: { content: sourceContentV1 } })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/source-versions', headers: authHeaders(editorToken), payload: { content: sourceContentV1 } })
     expect(missing.statusCode).toBe(404)
 
-    const foreign = await env.app.inject({ method: 'GET', url: `/episodes/${rivalEpisodeId}/source-versions`, headers: authHeaders(editorToken) })
+    const foreign = await env.app.inject({ method: 'GET', url: `/api/episodes/${rivalEpisodeId}/source-versions`, headers: authHeaders(editorToken) })
     expect(foreign.statusCode).toBe(404)
-    const foreignWrite = await env.app.inject({ method: 'POST', url: `/episodes/${rivalEpisodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: sourceContentV1 } })
+    const foreignWrite = await env.app.inject({ method: 'POST', url: `/api/episodes/${rivalEpisodeId}/source-versions`, headers: authHeaders(editorToken), payload: { content: sourceContentV1 } })
     expect(foreignWrite.statusCode).toBe(404)
 
     // Reads only need membership.
@@ -174,7 +174,7 @@ describe('source document versions', () => {
     expect((await env.app.inject({ method: 'GET', url: `${sourceUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'GET', url: `${sourceUrl}/abc`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
     // Version numbers are episode-scoped, so a rival's episode stays invisible.
-    expect((await env.app.inject({ method: 'GET', url: `/episodes/${rivalEpisodeId}/source-versions/1`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/episodes/${rivalEpisodeId}/source-versions/1`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
   })
 
   it('approves a source version once and refuses to approve it twice', async () => {
@@ -192,7 +192,7 @@ describe('source document versions', () => {
     expect(again.json()).toEqual({ error: 'sources:alreadyApproved' })
 
     expect((await env.app.inject({ method: 'POST', url: `${sourceUrl}/99/approve`, headers: authHeaders(editorToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/source-versions/1/approve', headers: authHeaders(editorToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/source-versions/1/approve', headers: authHeaders(editorToken) })).statusCode).toBe(404)
   })
 })
 
@@ -290,9 +290,9 @@ describe('script versions', () => {
 
     expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/abc`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'GET', url: '/episodes/does-not-exist/script-versions/1', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: '/api/episodes/does-not-exist/script-versions/1', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
     // Version numbers are episode-scoped, so a rival's episode stays invisible.
-    expect((await env.app.inject({ method: 'GET', url: `/episodes/${rivalEpisodeId}/script-versions/1`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/episodes/${rivalEpisodeId}/script-versions/1`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
   })
 
   it('moves the storyboards to the newest approved script version', async () => {
@@ -328,7 +328,7 @@ describe('script versions', () => {
   })
 
   it('records the source and script events in the audit trail', async () => {
-    const res = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
     const events = res.json().events as { action: string; entityType: string }[]
     expect(events.some(event => event.action === 'source.upload' && event.entityType === 'SourceDocumentVersion')).toBe(true)

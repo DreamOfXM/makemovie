@@ -1,17 +1,55 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { isRole } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { revokeSessionsForMembership } from '../lib/sessions.js'
 import { requirePermission } from '../plugins/auth.js'
 
+interface MemberListQuery {
+  email?: string
+}
+
 export async function memberRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/members', { preHandler: requirePermission('read') }, async request => {
+  app.get('/members', { preHandler: requirePermission('read') }, async (request, reply) => {
     const auth = request.auth!
+    const query = request.query as MemberListQuery
+    
+    // Support fuzzy email search via query param or custom header (for compatibility)
+    const emailFilter = query.email || 
+                       (request.headers['email-filter'] as string | undefined)
+    
+    if (emailFilter && emailFilter.trim()) {
+      console.log('[MEMBERS DEBUG] Email filter:', emailFilter.trim())
+      
+      // Check if user exists in the system (any organization)
+      const matchingUsers = await app.db.user.findMany({
+        where: {
+          email: {
+            contains: emailFilter.trim().toLowerCase(),
+            mode: 'insensitive',
+          },
+        },
+        select: { id: true, email: true, name: true, createdAt: true },
+      })
+      
+      console.log('[MEMBERS DEBUG] Found users in system:', matchingUsers.length)
+      
+      // Return all matches - caller will check membership separately if needed
+      return matchingUsers.map(u => ({
+        userId: u.id,
+        email: u.email,
+        name: u.name,
+        role: 'VIEWER' as const, // placeholder
+        joinedAt: u.createdAt,
+      }))
+    }
+    
+    // No filter: return all members of current org
     const memberships = await app.db.organizationMember.findMany({
       where: { organizationId: auth.organizationId },
       include: { user: { select: { id: true, email: true, name: true, createdAt: true } } },
       orderBy: { user: { createdAt: 'asc' } },
     })
+    
     return memberships.map(item => ({
       userId: item.userId,
       email: item.user.email,

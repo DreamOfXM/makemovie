@@ -103,6 +103,73 @@ Produce an episode:
 
 Triggering a stage twice returns the existing batch instead of queueing duplicate work; **Regenerate** is the deliberate way to re-run a stage after editing its upstream.
 
+## Style Presets
+
+Choose a visual style for your episode and the pipeline renders every shot in that aesthetic. Styles are project-level settings that influence the image and video prompts generated for all shots.
+
+| Style | Description | Best For |
+| --- | --- | --- |
+| **Cinematic** | Film-grade lighting, wide dynamic range, dramatic color grading | Feature films, short dramas |
+| **Anime** | Cel-shaded rendering, vivid outlines, Japanese animation palette | Anime adaptations, manga-style content |
+| **Documentary** | Natural lighting, shallow depth of field, neutral color science | Factual narratives, interview-led stories |
+| **Realistic** | Photorealistic rendering, accurate materials and lighting | High-fidelity storytelling |
+| **Watercolor** | Soft brush strokes, pastel palette, painterly textures | Artistic adaptations, children's content |
+| **Cyberpunk** | Neon accents, rain-slicked surfaces, high contrast | Sci-fi narratives, futuristic settings |
+| **Retro Vintage** | Film grain, warm color cast, letterbox framing | Period pieces, nostalgic storytelling |
+| **Minimalist** | Clean compositions, limited palette, negative space | Abstract narratives, art-house projects |
+
+## Node-based Pipeline
+
+The production pipeline is exposed as a visual node graph where each stage is a node and arrows show data flow. Every node has three states: **Pending**, **Running**, and **Complete**.
+
+**Node stages:**
+
+```
+Source → Script → Shot Breakdown → Assets → First Frames → Videos → Voice → Score → Composition → Master
+```
+
+- **Source** — Upload and approve the source material
+- **Script** — AI-generated shooting script from approved source
+- **Shot Breakdown** — Extract cast, props, scenes, and dialogue per shot
+- **Assets** — Generate reference images for characters and environments
+- **First Frames** — Produce opening frames for each video clip
+- **Videos** — Generate video clips (T2V / I2V / R2V)
+- **Voice** — Synthesize voice-over for dialogue shots
+- **Score** — Generate background music bed
+- **Composition** — Assemble clips, voice, score, and subtitles into master
+- **Master** — Final episode delivery package
+
+Each node displays its revision number, quality score, and timestamp. Click any node to expand its details, view generated artifacts, or manually trigger regeneration.
+
+**Auto-advance** is enabled by default — when a node completes, the next downstream node starts automatically. Disable auto-advance to step through the pipeline manually.
+
+## Customization
+
+The pipeline adapts to your creative requirements through per-project settings and per-stage overrides.
+
+**Project-level settings:**
+
+| Setting | Options | Effect |
+| --- | --- | --- |
+| Content Language | Chinese, English | Controls prompt language for script and media generation |
+| Style Preset | 8 presets (see above) | Sets the visual aesthetic for all generated images and videos |
+| Auto-advance | On, Off | Enable or disable automatic pipeline progression |
+
+**Stage-level controls:**
+
+- **Regenerate** — Re-run a stage to produce a new revision; prior revisions are preserved
+- **Edit in place** — Modify script, dialogue, or shot text directly; edits trigger checksum recomputation
+- **Manual trigger** — Force any stage to run on demand regardless of upstream status
+- **Approve / Reject** — Human checkpoint gates between major stages (Source, Script, Composition)
+
+**Prompt customization:**
+
+Each generation stage uses templates that can be overridden per project. Template variables include shot text, dialogue, speaker, style preset, and cast descriptions. Override a template by creating a project-level template with the same identifier.
+
+**Quality thresholds:**
+
+Configure acceptance thresholds for visual audit scores. Shots scoring below the threshold automatically enter rework — the worker generates a new candidate and cycles until the score passes or the maximum attempt count is reached.
+
 ## Configuration
 
 | Variable | Default | Purpose |

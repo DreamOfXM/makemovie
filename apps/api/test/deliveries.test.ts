@@ -132,7 +132,7 @@ beforeAll(async () => {
   await env.register('delivery-editor@example.com', 'Delivery Editor Org')
   await env.register('delivery-viewer@example.com', 'Delivery Viewer Org')
   for (const [email, role] of [['delivery-editor@example.com', 'EDITOR'], ['delivery-viewer@example.com', 'VIEWER']] as const) {
-    const added = await env.app.inject({ method: 'POST', url: '/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
+    const added = await env.app.inject({ method: 'POST', url: '/api/members', headers: env.authHeaders(ownerToken), payload: { email, role } })
     expect(added.statusCode).toBe(201)
     const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email, password: 'password123', organizationId } })
     expect(login.statusCode).toBe(200)
@@ -140,17 +140,17 @@ beforeAll(async () => {
     else viewerToken = login.json().token as string
   }
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Delivery Drama' } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: env.authHeaders(ownerToken), payload: { name: 'Delivery Drama' } })
   expect(project.statusCode).toBe(201)
   projectId = project.json().id as string
 
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: env.authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
   for (const [number, title] of [[1, 'SB1'], [2, 'SB2']] as const) {
     const storyboard = await env.app.inject({
-      method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: env.authHeaders(ownerToken),
       payload: { number, title, durationMs: 4000 + number * 1000, description: `${title} scene`, sourceExcerpt: '原文', continuityIn: '', continuityOut: '' },
     })
     expect(storyboard.statusCode).toBe(201)
@@ -165,7 +165,7 @@ afterAll(async () => {
 const authHeaders = (token: string) => env.authHeaders(token)
 
 const createDelivery = async (token: string) =>
-  env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/deliveries`, headers: authHeaders(token) })
+  env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/deliveries`, headers: authHeaders(token) })
 
 describe('delivery acceptance gate', () => {
   it('refuses an episode with no composition and names every missing clip', async () => {
@@ -180,7 +180,7 @@ describe('delivery acceptance gate', () => {
     ])
     expect(await env.db.delivery.count({ where: { episodeId } })).toBe(0)
 
-    const missing = await env.app.inject({ method: 'POST', url: '/episodes/does-not-exist/deliveries', headers: authHeaders(editorToken) })
+    const missing = await env.app.inject({ method: 'POST', url: '/api/episodes/does-not-exist/deliveries', headers: authHeaders(editorToken) })
     expect(missing.statusCode).toBe(404)
   })
 
@@ -316,26 +316,26 @@ describe('delivery acceptance gate', () => {
 
 describe('delivery reading', () => {
   it('lists deliveries newest first and serves the manifest on its own', async () => {
-    const list = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
+    const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
     expect(list.statusCode).toBe(200)
     const deliveries = (list.json() as { deliveries: DeliveryDto[] }).deliveries
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0]!.id).toBe(deliveryOneId)
     expect(deliveries[0]!.manifest).toEqual(packagedManifest)
 
-    const manifest = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/manifest`, headers: authHeaders(viewerToken) })
+    const manifest = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/manifest`, headers: authHeaders(viewerToken) })
     expect(manifest.statusCode).toBe(200)
     expect(manifest.json()).toEqual(packagedManifest)
 
-    expect((await env.app.inject({ method: 'GET', url: '/deliveries/does-not-exist/manifest', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/manifest` })).statusCode).toBe(401)
-    expect((await env.app.inject({ method: 'GET', url: '/episodes/does-not-exist/deliveries', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: '/api/deliveries/does-not-exist/manifest', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/manifest` })).statusCode).toBe(401)
+    expect((await env.app.inject({ method: 'GET', url: '/api/episodes/does-not-exist/deliveries', headers: authHeaders(viewerToken) })).statusCode).toBe(404)
   })
 })
 
 describe('delivery edit handoff export', () => {
   it('serves an EDL whose record timecodes accumulate over the packaged clips', async () => {
-    const res = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(viewerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(viewerToken) })
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-type']).toContain('text/plain')
     expect(res.headers['content-disposition']).toContain('episode-1-edit.edl')
@@ -352,7 +352,7 @@ describe('delivery edit handoff export', () => {
   })
 
   it('serves an FCPXML timeline with the same frame math and spine order', async () => {
-    const res = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list?format=fcpxml`, headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list?format=fcpxml`, headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
     expect(res.headers['content-type']).toContain('application/xml')
     expect(res.headers['content-disposition']).toContain('episode-1-edit.fcpxml')
@@ -364,19 +364,19 @@ describe('delivery edit handoff export', () => {
   })
 
   it('refuses unknown formats and hides other organizations\' deliveries', async () => {
-    const bad = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list?format=xml`, headers: authHeaders(editorToken) })
+    const bad = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list?format=xml`, headers: authHeaders(editorToken) })
     expect(bad.statusCode).toBe(400)
-    const missing = await env.app.inject({ method: 'GET', url: '/deliveries/does-not-exist/edit-list', headers: authHeaders(ownerToken) })
+    const missing = await env.app.inject({ method: 'GET', url: '/api/deliveries/does-not-exist/edit-list', headers: authHeaders(ownerToken) })
     expect(missing.statusCode).toBe(404)
-    const foreign = await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(outsiderToken) })
+    const foreign = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list`, headers: authHeaders(outsiderToken) })
     expect(foreign.statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'GET', url: `/deliveries/${deliveryOneId}/edit-list` })).statusCode).toBe(401)
+    expect((await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list` })).statusCode).toBe(401)
   })
 })
 
 describe('delivery acceptance decisions', () => {
   it('accepts a draft once and refuses to accept it again', async () => {
-    const res = await env.app.inject({ method: 'POST', url: `/deliveries/${deliveryOneId}/accept`, headers: authHeaders(editorToken) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/deliveries/${deliveryOneId}/accept`, headers: authHeaders(editorToken) })
     expect(res.statusCode).toBe(200)
     const delivery = (res.json() as { delivery: DeliveryDto }).delivery
     expect(delivery.status).toBe('APPROVED')
@@ -390,10 +390,10 @@ describe('delivery acceptance decisions', () => {
     expect(stored.status).toBe('APPROVED')
     expect(JSON.parse(stored.manifest).acceptance).toEqual(delivery.manifest.acceptance)
 
-    const again = await env.app.inject({ method: 'POST', url: `/deliveries/${deliveryOneId}/accept`, headers: authHeaders(editorToken) })
+    const again = await env.app.inject({ method: 'POST', url: `/api/deliveries/${deliveryOneId}/accept`, headers: authHeaders(editorToken) })
     expect(again.statusCode).toBe(409)
     expect(again.json().error).toBe('delivery:alreadyAccepted')
-    expect((await env.app.inject({ method: 'POST', url: '/deliveries/does-not-exist/accept', headers: authHeaders(editorToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'POST', url: '/api/deliveries/does-not-exist/accept', headers: authHeaders(editorToken) })).statusCode).toBe(404)
   })
 
   it('requires a reason to reject and never reopens an accepted delivery', async () => {
@@ -402,16 +402,16 @@ describe('delivery acceptance decisions', () => {
     deliveryTwoId = (second.json() as { delivery: DeliveryDto }).delivery.id
 
     for (const payload of [{ reason: '   ' }, {}]) {
-      const blank = await env.app.inject({ method: 'POST', url: `/deliveries/${deliveryTwoId}/reject`, headers: authHeaders(editorToken), payload })
+      const blank = await env.app.inject({ method: 'POST', url: `/api/deliveries/${deliveryTwoId}/reject`, headers: authHeaders(editorToken), payload })
       expect(blank.statusCode).toBe(400)
     }
     expect((await env.db.delivery.findUniqueOrThrow({ where: { id: deliveryTwoId } })).status).toBe('DRAFT')
 
-    const tooLate = await env.app.inject({ method: 'POST', url: `/deliveries/${deliveryOneId}/reject`, headers: authHeaders(editorToken), payload: { reason: 'changed our mind' } })
+    const tooLate = await env.app.inject({ method: 'POST', url: `/api/deliveries/${deliveryOneId}/reject`, headers: authHeaders(editorToken), payload: { reason: 'changed our mind' } })
     expect(tooLate.statusCode).toBe(409)
     expect(tooLate.json().error).toBe('delivery:alreadyAccepted')
 
-    const res = await env.app.inject({ method: 'POST', url: `/deliveries/${deliveryTwoId}/reject`, headers: authHeaders(editorToken), payload: { reason: ' audio drift in SB2 ' } })
+    const res = await env.app.inject({ method: 'POST', url: `/api/deliveries/${deliveryTwoId}/reject`, headers: authHeaders(editorToken), payload: { reason: ' audio drift in SB2 ' } })
     expect(res.statusCode).toBe(200)
     const delivery = (res.json() as { delivery: DeliveryDto }).delivery
     expect(delivery.status).toBe('NEEDS_REVIEW')
@@ -420,16 +420,16 @@ describe('delivery acceptance decisions', () => {
     expect(delivery.manifest.acceptance?.acceptedAt).toBeUndefined()
     expect((await env.db.delivery.findUniqueOrThrow({ where: { id: deliveryTwoId } })).status).toBe('NEEDS_REVIEW')
 
-    const list = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
+    const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
     const ids = (list.json() as { deliveries: DeliveryDto[] }).deliveries.map(candidate => candidate.id)
     expect(ids).toEqual([deliveryTwoId, deliveryOneId])
   })
 
   it('denies viewers every write and hides deliveries from other organizations', async () => {
     const viewerWrites: ['POST', string, { reason: string }?][] = [
-      ['POST', `/episodes/${episodeId}/deliveries`],
-      ['POST', `/deliveries/${deliveryTwoId}/accept`],
-      ['POST', `/deliveries/${deliveryTwoId}/reject`, { reason: 'viewer says no' }],
+      ['POST', `/api/episodes/${episodeId}/deliveries`],
+      ['POST', `/api/deliveries/${deliveryTwoId}/accept`],
+      ['POST', `/api/deliveries/${deliveryTwoId}/reject`, { reason: 'viewer says no' }],
     ]
     for (const [method, url, payload] of viewerWrites) {
       const res = await env.app.inject({ method, url, headers: authHeaders(viewerToken), ...(payload ? { payload } : {}) })
@@ -439,11 +439,11 @@ describe('delivery acceptance decisions', () => {
 
     // An owner of another organization passes RBAC but never sees these rows.
     const rivalRequests: ['GET' | 'POST', string, { reason: string }?][] = [
-      ['POST', `/episodes/${episodeId}/deliveries`],
-      ['GET', `/episodes/${episodeId}/deliveries`],
-      ['GET', `/deliveries/${deliveryOneId}/manifest`],
-      ['POST', `/deliveries/${deliveryTwoId}/accept`],
-      ['POST', `/deliveries/${deliveryTwoId}/reject`, { reason: 'rival says no' }],
+      ['POST', `/api/episodes/${episodeId}/deliveries`],
+      ['GET', `/api/episodes/${episodeId}/deliveries`],
+      ['GET', `/api/deliveries/${deliveryOneId}/manifest`],
+      ['POST', `/api/deliveries/${deliveryTwoId}/accept`],
+      ['POST', `/api/deliveries/${deliveryTwoId}/reject`, { reason: 'rival says no' }],
     ]
     for (const [method, url, payload] of rivalRequests) {
       const res = await env.app.inject({ method, url, headers: authHeaders(outsiderToken), ...(payload ? { payload } : {}) })
@@ -453,7 +453,7 @@ describe('delivery acceptance decisions', () => {
   })
 
   it('records create, accept and reject in the audit trail', async () => {
-    const res = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(ownerToken) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(ownerToken) })
     expect(res.statusCode).toBe(200)
     const events = res.json().events as { action: string; entityType: string; entityId: string }[]
     expect(events.some(event => event.action === 'delivery.create' && event.entityType === 'delivery' && event.entityId === deliveryOneId)).toBe(true)

@@ -53,7 +53,7 @@ interface ShotboardResponse {
 }
 
 async function shotboard(token: string, episodeId: string): Promise<{ statusCode: number; body: ShotboardResponse }> {
-  const res = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/shotboard`, headers: authHeaders(token) })
+  const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/shotboard`, headers: authHeaders(token) })
   return { statusCode: res.statusCode, body: res.json() as ShotboardResponse }
 }
 
@@ -74,29 +74,29 @@ beforeAll(async () => {
   ownerToken = owner.token
   organizationId = owner.organization.id
   const viewer = await env.register('shotboard-viewer@example.com', 'Shotboard Viewer Org')
-  const added = await env.app.inject({ method: 'POST', url: '/members', headers: authHeaders(ownerToken), payload: { email: 'shotboard-viewer@example.com', role: 'VIEWER' } })
+  const added = await env.app.inject({ method: 'POST', url: '/api/members', headers: authHeaders(ownerToken), payload: { email: 'shotboard-viewer@example.com', role: 'VIEWER' } })
   expect(added.statusCode).toBe(201)
   const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'shotboard-viewer@example.com', password: 'password123', organizationId } })
   expect(login.statusCode).toBe(200)
   viewerToken = login.json().token as string
 
-  const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(ownerToken), payload: { name: 'Shotboard Drama' } })
+  const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Shotboard Drama' } })
   expect(project.statusCode).toBe(201)
   const projectId = project.json().id as string
-  const episode = await env.app.inject({ method: 'POST', url: `/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
+  const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'EP1' } })
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
   const rival = await env.register('shotboard-rival@example.com', 'Shotboard Rival Org')
   rivalToken = rival.token
-  const rivalProject = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(rival.token), payload: { name: 'Rival' } })
-  const rivalEpisode = await env.app.inject({ method: 'POST', url: `/projects/${rivalProject.json().id}/episodes`, headers: authHeaders(rival.token), payload: { number: 1, title: 'Rival EP1' } })
+  const rivalProject = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(rival.token), payload: { name: 'Rival' } })
+  const rivalEpisode = await env.app.inject({ method: 'POST', url: `/api/projects/${rivalProject.json().id}/episodes`, headers: authHeaders(rival.token), payload: { number: 1, title: 'Rival EP1' } })
   rivalEpisodeId = rivalEpisode.json().id as string
 
-  const first = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken), payload: { number: 1, title: '巷口相遇', durationMs: 3000, description: '小雨在巷口撑伞' } })
+  const first = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken), payload: { number: 1, title: '巷口相遇', durationMs: 3000, description: '小雨在巷口撑伞' } })
   expect(first.statusCode).toBe(201)
   shotOneId = first.json().id as string
-  const second = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken), payload: { number: 2, title: '雨夜分别', durationMs: 5000, description: '两人在巷口道别', dialogue: '我会想你的。', speaker: '小雨' } })
+  const second = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken), payload: { number: 2, title: '雨夜分别', durationMs: 5000, description: '两人在巷口道别', dialogue: '我会想你的。', speaker: '小雨' } })
   expect(second.statusCode).toBe(201)
   shotTwoId = second.json().id as string
 }, 300_000)
@@ -160,7 +160,7 @@ describe('GET /episodes/:episodeId/shotboard', () => {
   })
 
   it('flags unapproved assets with versions on the shot and in the episode lane, and only while gate-relevant', async () => {
-    const assetRes = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
+    const assetRes = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(assetRes.statusCode).toBe(201)
     const assetId = assetRes.json().asset.id as string
     // 参考图预览要跟 triggerStage 同源:只有"已审批 + 带定妆实体 + 画面文本提到名字"才点亮。
@@ -169,7 +169,7 @@ describe('GET /episodes/:episodeId/shotboard', () => {
     })
     await env.db.assetVersion.create({ data: { assetId, version: 1, description: '版本一', status: 'DRAFT', artifactId: costume.id } })
     const put = await env.app.inject({
-      method: 'PUT', url: `/storyboards/${shotOneId}/assets`, headers: authHeaders(ownerToken),
+      method: 'PUT', url: `/api/storyboards/${shotOneId}/assets`, headers: authHeaders(ownerToken),
       payload: { assets: [{ assetId, role: 'lead' }] },
     })
     expect(put.statusCode).toBe(200)
@@ -216,7 +216,7 @@ describe('GET /episodes/:episodeId/shotboard', () => {
 
   it('aggregates the cast block: costume thumbnails, appearance lists and unbound assets', async () => {
     const costume = await env.db.mediaArtifact.findFirstOrThrow({ where: { organizationId, stage: 'ASSET' } })
-    const strayRes = await env.app.inject({ method: 'POST', url: `/episodes/${episodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'prop', name: '旧怀表', description: '一只停走的怀表' } })
+    const strayRes = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/assets`, headers: authHeaders(ownerToken), payload: { kind: 'prop', name: '旧怀表', description: '一只停走的怀表' } })
     expect(strayRes.statusCode).toBe(201)
     const strayId = strayRes.json().asset.id as string
 
@@ -243,7 +243,7 @@ describe('GET /episodes/:episodeId/shotboard', () => {
 
     expect((await shotboard(ownerToken, 'does-not-exist')).statusCode).toBe(404)
     expect((await shotboard(ownerToken, rivalEpisodeId)).statusCode).toBe(404)
-    const anonymous = await env.app.inject({ method: 'GET', url: `/episodes/${episodeId}/shotboard` })
+    const anonymous = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/shotboard` })
     expect(anonymous.statusCode).toBe(401)
   })
 
@@ -261,7 +261,7 @@ describe('shotboard video candidates and the selection endpoint', () => {
   let clipNewId: string
 
   const select = (storyboardId: string, token: string, payload: { artifactId?: string | null }) =>
-    env.app.inject({ method: 'POST', url: `/storyboards/${storyboardId}/video-selection`, headers: authHeaders(token), payload })
+    env.app.inject({ method: 'POST', url: `/api/storyboards/${storyboardId}/video-selection`, headers: authHeaders(token), payload })
 
   it('lists every succeeded clip newest first and flags the shot while nobody has picked', async () => {
     const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', plannedCount: 1 } })
@@ -325,7 +325,7 @@ describe('shotboard video candidates and the selection endpoint', () => {
 
     // 每次钦定都留在审计里,包括取消钦定。
     expect((await select(shotOneId, ownerToken, { artifactId: clipNewId })).statusCode).toBe(200)
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events?action=storyboard.select-video', headers: authHeaders(ownerToken) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=storyboard.select-video', headers: authHeaders(ownerToken) })
     const events = audit.json().events as { entityId: string; payload: { artifactId: string | null } }[]
     expect(events.some(event => event.entityId === shotOneId && event.payload.artifactId === clipNewId)).toBe(true)
   })

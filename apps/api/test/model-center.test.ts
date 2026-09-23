@@ -18,7 +18,7 @@ const authHeaders = (token: string) => env.authHeaders(token)
 interface Connection { id: string; provider: string; name: string; baseUrl: string; apiKeySet?: boolean; accessKeySet?: boolean; capabilities: { id: string; model: string; modality: string }[] }
 
 async function createMockConnection(token: string, name: string, apiKey = 'test-key'): Promise<Connection> {
-  const res = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name, apiKey } })
+  const res = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(token), payload: { provider: 'mock', name, apiKey } })
   expect(res.statusCode).toBe(201)
   return res.json() as Connection
 }
@@ -26,7 +26,7 @@ async function createMockConnection(token: string, name: string, apiKey = 'test-
 describe('provider catalogs', () => {
   it('lists catalogs to any authenticated member', async () => {
     const owner = await env.register('mc-catalog@example.com', 'Catalog Org')
-    const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs', headers: authHeaders(owner.token) })
+    const res = await env.app.inject({ method: 'GET', url: '/api/providers/catalogs', headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
     const catalogs = res.json() as { provider: string; defaultBaseUrl?: string; requiresAccessKey?: boolean; models: { model: string }[] }[]
     expect(catalogs.map(c => c.provider).sort()).toEqual(['anthropic', 'dashscope', 'google', 'kling', 'mock', 'openai', 'openai_compatible', 'seedance'])
@@ -44,7 +44,7 @@ describe('provider catalogs', () => {
   })
 
   it('rejects anonymous access', async () => {
-    const res = await env.app.inject({ method: 'GET', url: '/providers/catalogs' })
+    const res = await env.app.inject({ method: 'GET', url: '/api/providers/catalogs' })
     expect(res.statusCode).toBe(401)
   })
 })
@@ -59,7 +59,7 @@ describe('provider connections', () => {
     expect(stored.encryptedSecret.startsWith('v1.')).toBe(true)
     expect(stored.encryptedSecret).not.toContain('test-key')
 
-    const list = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const list = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(owner.token) })
     expect(list.statusCode).toBe(200)
     const body = list.json() as Record<string, unknown>[]
     expect(body[0]).not.toHaveProperty('encryptedSecret')
@@ -70,7 +70,7 @@ describe('provider connections', () => {
     const owner = await env.register('mc-seedance@example.com', 'Seedance Org')
     const res = await env.app.inject({
       method: 'POST',
-      url: '/providers/connections',
+      url: '/api/providers/connections',
       headers: authHeaders(owner.token),
       payload: { provider: 'seedance', name: 'ark-main', apiKey: 'test-ark-key' },
     })
@@ -99,7 +99,7 @@ describe('provider connections', () => {
     const owner = await env.register('mc-kling@example.com', 'Kling Org')
     const res = await env.app.inject({
       method: 'POST',
-      url: '/providers/connections',
+      url: '/api/providers/connections',
       headers: authHeaders(owner.token),
       payload: { provider: 'kling', name: 'kling-main', apiKey: 'test-sk', accessKey: 'test-ak' },
     })
@@ -123,7 +123,7 @@ describe('provider connections', () => {
     expect(stored.accessKeyEncrypted).not.toContain('test-ak')
     expect(stored.encryptedSecret).not.toContain('test-sk')
 
-    const list = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const list = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(owner.token) })
     const rows = list.json() as Record<string, unknown>[]
     expect(rows[0]).not.toHaveProperty('encryptedSecret')
     expect(rows[0]).not.toHaveProperty('accessKeyEncrypted')
@@ -137,7 +137,7 @@ describe('provider connections', () => {
     const owner = await env.register('mc-kling-half@example.com', 'Kling Half Org')
     const res = await env.app.inject({
       method: 'POST',
-      url: '/providers/connections',
+      url: '/api/providers/connections',
       headers: authHeaders(owner.token),
       payload: { provider: 'kling', name: 'kling-no-ak', apiKey: 'test-sk' },
     })
@@ -150,7 +150,7 @@ describe('provider connections', () => {
     const owner = await env.register('mc-dashscope@example.com', 'DashScope Org')
     const res = await env.app.inject({
       method: 'POST',
-      url: '/providers/connections',
+      url: '/api/providers/connections',
       headers: authHeaders(owner.token),
       payload: { provider: 'dashscope', name: 'bailian-main', apiKey: 'test-key' },
     })
@@ -165,7 +165,7 @@ describe('provider connections', () => {
     const owner = await env.register('mc-kling-rotate@example.com', 'Kling Rotate Org')
     const created = await env.app.inject({
       method: 'POST',
-      url: '/providers/connections',
+      url: '/api/providers/connections',
       headers: authHeaders(owner.token),
       payload: { provider: 'kling', name: 'kling-rotate', apiKey: 'test-sk', accessKey: 'test-ak' },
     })
@@ -174,7 +174,7 @@ describe('provider connections', () => {
 
     const res = await env.app.inject({
       method: 'PATCH',
-      url: `/providers/connections/${connection.id}`,
+      url: `/api/providers/connections/${connection.id}`,
       headers: authHeaders(owner.token),
       payload: { accessKey: 'test-ak-rotated' },
     })
@@ -193,21 +193,21 @@ describe('provider connections', () => {
   it('rejects duplicate names, unknown providers and missing keys', async () => {
     const owner = await env.register('mc-dup@example.com', 'Dup Org')
     await createMockConnection(owner.token, 'dup-main')
-    const dup = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'mock', name: 'dup-main', apiKey: 'k' } })
+    const dup = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'mock', name: 'dup-main', apiKey: 'k' } })
     expect(dup.statusCode).toBe(409)
-    const unknown = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'openai-ish', name: 'x', apiKey: 'k' } })
+    const unknown = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'openai-ish', name: 'x', apiKey: 'k' } })
     expect(unknown.statusCode).toBe(400)
-    const noKey = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'mock', name: 'y' } })
+    const noKey = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token), payload: { provider: 'mock', name: 'y' } })
     expect(noKey.statusCode).toBe(400)
   })
 
   it('requires providers:manage (ADMIN+) to create connections', async () => {
     const owner = await env.register('mc-perm@example.com', 'Perm Org')
     await env.register('mc-editor@example.com', 'Editor Own Org')
-    await env.app.inject({ method: 'POST', url: '/members', headers: authHeaders(owner.token), payload: { email: 'mc-editor@example.com', role: 'EDITOR' } })
+    await env.app.inject({ method: 'POST', url: '/api/members', headers: authHeaders(owner.token), payload: { email: 'mc-editor@example.com', role: 'EDITOR' } })
     const login = await env.app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'mc-editor@example.com', password: 'password123', organizationId: owner.organization.id } })
     const editorToken = login.json().token as string
-    const res = await env.app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(editorToken), payload: { provider: 'mock', name: 'nope', apiKey: 'k' } })
+    const res = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(editorToken), payload: { provider: 'mock', name: 'nope', apiKey: 'k' } })
     expect(res.statusCode).toBe(403)
   })
 
@@ -216,18 +216,18 @@ describe('provider connections', () => {
     const b = await env.register('mc-tenant-b@example.com', 'Tenant B')
     const connection = await createMockConnection(a.token, 'tenant-main')
 
-    const listB = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(b.token) })
+    const listB = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(b.token) })
     expect(listB.json()).toEqual([])
-    const patchB = await env.app.inject({ method: 'PATCH', url: `/providers/connections/${connection.id}`, headers: authHeaders(b.token), payload: { name: 'hijack' } })
+    const patchB = await env.app.inject({ method: 'PATCH', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(b.token), payload: { name: 'hijack' } })
     expect(patchB.statusCode).toBe(404)
-    const probeB = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(b.token) })
+    const probeB = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(b.token) })
     expect(probeB.statusCode).toBe(404)
   })
 })
 
 describe('provider base URLs', () => {
   const create = (token: string, payload: Record<string, string>, app = env.app) =>
-    app.inject({ method: 'POST', url: '/providers/connections', headers: authHeaders(token), payload })
+    app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(token), payload })
 
   it('refuses an address that would put a request on the worker’s own network', async () => {
     const owner = await env.register('mc-url@example.com', 'Base URL Org')
@@ -264,7 +264,7 @@ describe('provider base URLs', () => {
 
     const denied = await env.app.inject({
       method: 'PATCH',
-      url: `/providers/connections/${connection.id}`,
+      url: `/api/providers/connections/${connection.id}`,
       headers: authHeaders(owner.token),
       payload: { baseUrl: 'http://127.0.0.1:18080/v1' },
     })
@@ -278,7 +278,7 @@ describe('provider base URLs', () => {
     try {
       const allowed = await permissive.inject({
         method: 'PATCH',
-        url: `/providers/connections/${connection.id}`,
+        url: `/api/providers/connections/${connection.id}`,
         headers: authHeaders(owner.token),
         payload: { baseUrl: 'http://127.0.0.1:18080/v1' },
       })
@@ -298,7 +298,7 @@ describe('provider base URLs', () => {
     // would make an existing mock connection impossible to rename.
     const renamed = await env.app.inject({
       method: 'PATCH',
-      url: `/providers/connections/${connection.id}`,
+      url: `/api/providers/connections/${connection.id}`,
       headers: authHeaders(owner.token),
       payload: { name: 'mock-address', baseUrl: 'mock://local' },
     })
@@ -310,7 +310,7 @@ describe('entitlement probing', () => {
   it('marks capabilities verified after a successful probe', async () => {
     const owner = await env.register('mc-probe@example.com', 'Probe Org')
     const connection = await createMockConnection(owner.token, 'probe-ok')
-    const res = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
     const results = res.json().results as { ok: boolean }[]
     expect(results.every(r => r.ok)).toBe(true)
@@ -323,7 +323,7 @@ describe('entitlement probing', () => {
   it('records failure without granting entitlement for a bad key', async () => {
     const owner = await env.register('mc-probe-bad@example.com', 'Probe Bad Org')
     const connection = await createMockConnection(owner.token, 'probe-bad', 'invalid')
-    const res = await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    const res = await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     expect(res.statusCode).toBe(200)
     const results = res.json().results as { ok: boolean; status: number }[]
     expect(results.every(r => !r.ok && r.status === 401)).toBe(true)
@@ -336,19 +336,19 @@ describe('entitlement probing', () => {
 
 describe('models entered by hand', () => {
   const addModel = (token: string, connectionId: string, payload: Record<string, unknown>) =>
-    env.app.inject({ method: 'POST', url: `/providers/connections/${connectionId}/models`, headers: authHeaders(token), payload })
+    env.app.inject({ method: 'POST', url: `/api/providers/connections/${connectionId}/models`, headers: authHeaders(token), payload })
 
   it('refuses a gateway connection with no host to point at', async () => {
     const owner = await env.register('mc-gateway@example.com', 'Gateway Org')
     const res = await env.app.inject({
-      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
       payload: { provider: 'openai_compatible', name: 'vllm-local', apiKey: 'k' },
     })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toContain('baseUrl is required')
 
     const filled = await env.app.inject({
-      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
       payload: { provider: 'openai_compatible', name: 'vllm-local', apiKey: 'k', baseUrl: 'http://127.0.0.1:8000/v1' },
     })
     // A gateway is a socket the worker will actually open, so the address guard that
@@ -360,7 +360,7 @@ describe('models entered by hand', () => {
     await permissive.ready()
     try {
       const opened = await permissive.inject({
-        method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+        method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
         payload: { provider: 'openai_compatible', name: 'vllm-typed', apiKey: 'k', baseUrl: 'http://127.0.0.1:8000/v1' },
       })
       expect(opened.statusCode).toBe(201)
@@ -380,7 +380,7 @@ describe('models entered by hand', () => {
     expect(added.statusCode).toBe(201)
     expect(added.json()).toMatchObject({ model: 'qwen2.5-72b-instruct', displayName: 'Lab Qwen', modality: 'text', acceptsFirstFrame: false, maxReferenceImages: 0, probeStatus: 'unverified' })
 
-    const listed = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const listed = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(owner.token) })
     const rows = listed.json() as Connection[]
     expect(rows.find(c => c.id === connection.id)!.capabilities.map(c => c.model)).toContain('qwen2.5-72b-instruct')
 
@@ -417,7 +417,7 @@ describe('models entered by hand', () => {
     expect(repeat.statusCode).toBe(409)
     expect(repeat.json().error).toContain('for the "i2v" modality')
 
-    const listed = await env.app.inject({ method: 'GET', url: '/providers/connections', headers: authHeaders(owner.token) })
+    const listed = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(owner.token) })
     const rows = listed.json() as Connection[]
     const both = rows.find(c => c.id === connection.id)!.capabilities.filter(c => c.model === 'kling-v2-5-turbo')
     expect(both.map(c => c.modality).sort()).toEqual(['i2v', 't2v'])
@@ -445,23 +445,23 @@ describe('models entered by hand', () => {
   it('blocks deleting a row a slot still points at, then lets it go', async () => {
     const owner = await env.register('mc-delmodel@example.com', 'Delete Model Org')
     const connection = await createMockConnection(owner.token, 'delmodel-main')
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     const added = await addModel(owner.token, connection.id, { model: 'mock-disposable', modality: 'text' })
     const capabilityId = added.json().id as string
-    await env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(owner.token) })
 
-    const bind = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
+    const bind = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
     expect(bind.statusCode).toBe(201)
 
-    const blocked = await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })
+    const blocked = await env.app.inject({ method: 'DELETE', url: `/api/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })
     expect(blocked.statusCode).toBe(409)
     expect(blocked.json().error).toMatch(/still bound to 1 slot/)
 
-    expect((await env.app.inject({ method: 'DELETE', url: `/bindings/${bind.json().id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
-    expect((await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+    expect((await env.app.inject({ method: 'DELETE', url: `/api/bindings/${bind.json().id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+    expect((await env.app.inject({ method: 'DELETE', url: `/api/providers/capabilities/${capabilityId}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
     expect(await env.db.modelCapability.findUnique({ where: { id: capabilityId } })).toBeNull()
     // Deleting a whole connection still has to reach the rows the catalog never offered.
-    expect((await env.app.inject({ method: 'DELETE', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
+    expect((await env.app.inject({ method: 'DELETE', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })).statusCode).toBe(204)
   })
 
   it('keeps another organisation’s rows invisible to both write routes', async () => {
@@ -471,8 +471,8 @@ describe('models entered by hand', () => {
     const capabilityId = connection.capabilities.find(c => c.model === 'mock-text')!.id
 
     expect((await addModel(b.token, connection.id, { model: 'mock-sneak', modality: 'text' })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(b.token) })).statusCode).toBe(404)
-    expect((await env.app.inject({ method: 'DELETE', url: `/providers/capabilities/${capabilityId}`, headers: authHeaders(b.token) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'POST', url: `/api/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(b.token) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'DELETE', url: `/api/providers/capabilities/${capabilityId}`, headers: authHeaders(b.token) })).statusCode).toBe(404)
     expect((await addModel(a.token, 'does-not-exist', { model: 'mock-x', modality: 'text' })).statusCode).toBe(404)
     expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(10)
   })
@@ -480,18 +480,18 @@ describe('models entered by hand', () => {
 
 describe('per-model verification', () => {
   const probeModel = (token: string, capabilityId: string) =>
-    env.app.inject({ method: 'POST', url: `/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(token) })
+    env.app.inject({ method: 'POST', url: `/api/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(token) })
 
   it('verifies one model at a time and makes only that row bindable', async () => {
     const owner = await env.register('mc-single@example.com', 'Single Probe Org')
     const connection = await createMockConnection(owner.token, 'single-main')
     const added = await env.app.inject({
-      method: 'POST', url: `/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
+      method: 'POST', url: `/api/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
       payload: { model: 'mock-entered', modality: 'text' },
     })
     const capabilityId = added.json().id as string
 
-    const unverified = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
+    const unverified = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })
     expect(unverified.statusCode).toBe(422)
     expect(unverified.json().error).toMatch(/no verified entitlement/)
 
@@ -499,7 +499,7 @@ describe('per-model verification', () => {
     expect(probed.statusCode).toBe(200)
     expect(probed.json()).toMatchObject({ ok: true, model: 'mock-entered', modality: 'text' })
 
-    expect((await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })).statusCode).toBe(201)
+    expect((await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId } })).statusCode).toBe(201)
     // The per-model probe earns this row its entitlement; rows it never addressed stay unverified.
     const rows = await env.db.modelCapability.findMany({ where: { connectionId: connection.id } })
     expect(rows.find(r => r.id === capabilityId)!.entitlementVerifiedAt).toBeTruthy()
@@ -509,9 +509,9 @@ describe('per-model verification', () => {
   it('records a model the endpoint denies as failed and drops the belief in it', async () => {
     const owner = await env.register('mc-deny@example.com', 'Deny Org')
     const connection = await createMockConnection(owner.token, 'deny-main')
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     const added = await env.app.inject({
-      method: 'POST', url: `/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
+      method: 'POST', url: `/api/providers/connections/${connection.id}/models`, headers: authHeaders(owner.token),
       payload: { model: 'typo-model-name', modality: 'text' },
     })
     const capabilityId = added.json().id as string
@@ -551,11 +551,11 @@ describe('per-model verification', () => {
     // A seedance connection can carry a hand-entered text row, and that vendor has no
     // request that names a model without generating from it.
     const seedance = await env.app.inject({
-      method: 'POST', url: '/providers/connections', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
       payload: { provider: 'seedance', name: 'refuse-ark', apiKey: 'test-ark-key' },
     })
     const entered = await env.app.inject({
-      method: 'POST', url: `/providers/connections/${seedance.json().id}/models`, headers: authHeaders(owner.token),
+      method: 'POST', url: `/api/providers/connections/${seedance.json().id}/models`, headers: authHeaders(owner.token),
       payload: { model: 'ark-text-pro', modality: 'text' },
     })
     expect(entered.statusCode).toBe(201)
@@ -568,7 +568,7 @@ describe('per-model verification', () => {
     const owner = await env.register('mc-off@example.com', 'Off Org')
     const connection = await createMockConnection(owner.token, 'off-main')
     const capabilityId = connection.capabilities.find(c => c.model === 'mock-text')!.id
-    await env.app.inject({ method: 'PATCH', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
+    await env.app.inject({ method: 'PATCH', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
     expect((await probeModel(owner.token, capabilityId)).statusCode).toBe(409)
   })
 })
@@ -579,33 +579,33 @@ describe('capability slot bindings', () => {
     const connection = await createMockConnection(owner.token, 'bind-main')
 
     const unverified = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
       payload: { slot: 'video_i2v', capabilityId: connection.capabilities.find(c => c.model === 'mock-i2v')!.id },
     })
     expect(unverified.statusCode).toBe(422)
     expect(unverified.json().error).toMatch(/verified entitlement/)
 
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
 
     const mismatch = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
       payload: { slot: 'video_i2v', capabilityId: connection.capabilities.find(c => c.model === 'mock-t2v')!.id },
     })
     expect(mismatch.statusCode).toBe(422)
     expect(mismatch.json().error).toMatch(/requires modality/)
 
-    const badSlot = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'not_a_slot', capabilityId: 'x' } })
+    const badSlot = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot: 'not_a_slot', capabilityId: 'x' } })
     expect(badSlot.statusCode).toBe(400)
 
     const ok = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
       payload: { slot: 'video_i2v', capabilityId: connection.capabilities.find(c => c.model === 'mock-i2v')!.id, priority: 10 },
     })
     expect(ok.statusCode).toBe(201)
     expect(ok.json().slot).toBe('video_i2v')
 
     const dup = await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
       payload: { slot: 'video_i2v', capabilityId: connection.capabilities.find(c => c.model === 'mock-i2v')!.id },
     })
     expect(dup.statusCode).toBe(409)
@@ -615,62 +615,62 @@ describe('capability slot bindings', () => {
     const owner = await env.register('mc-resolve@example.com', 'Resolve Org')
     const main = await createMockConnection(owner.token, 'resolve-main')
     const alt = await createMockConnection(owner.token, 'resolve-alt')
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${main.id}/probe`, headers: authHeaders(owner.token) })
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${alt.id}/probe`, headers: authHeaders(owner.token) })
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(owner.token), payload: { name: 'Resolve Drama' } })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${main.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${alt.id}/probe`, headers: authHeaders(owner.token) })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Resolve Drama' } })
     const projectId = project.json().id as string
 
     const capId = (connection: Connection, model: string) => connection.capabilities.find(c => c.model === model)!.id
     const bind = (slot: string, capabilityId: string, projectId?: string, priority = 0) =>
-      env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot, capabilityId, projectId, priority } })
+      env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot, capabilityId, projectId, priority } })
 
     expect((await bind('video_t2v', capId(main, 'mock-t2v'), undefined, 5)).statusCode).toBe(201)
     const mismatch = await bind('video_t2v', capId(main, 'mock-i2v'), undefined, 50)
     expect(mismatch.statusCode).toBe(422) // i2v cannot fill a t2v slot even at high priority
     expect((await bind('video_t2v', capId(alt, 'mock-t2v'), projectId, 1)).statusCode).toBe(201)
 
-    const orgResolve = await env.app.inject({ method: 'GET', url: '/bindings/resolve?slot=video_t2v', headers: authHeaders(owner.token) })
+    const orgResolve = await env.app.inject({ method: 'GET', url: '/api/bindings/resolve?slot=video_t2v', headers: authHeaders(owner.token) })
     expect(orgResolve.statusCode).toBe(200)
     const orgCandidates = orgResolve.json().candidates as { model: string; scope: string; capabilityId: string }[]
     expect(orgCandidates.map(c => [c.model, c.scope, c.capabilityId])).toEqual([['mock-t2v', 'organization', capId(main, 'mock-t2v')]])
 
-    const projectResolve = await env.app.inject({ method: 'GET', url: `/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
+    const projectResolve = await env.app.inject({ method: 'GET', url: `/api/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
     const projectCandidates = projectResolve.json().candidates as { scope: string; capabilityId: string }[]
     expect(projectCandidates.map(c => [c.scope, c.capabilityId])).toEqual([
       ['project', capId(alt, 'mock-t2v')],
       ['organization', capId(main, 'mock-t2v')],
     ])
 
-    const badSlot = await env.app.inject({ method: 'GET', url: '/bindings/resolve?slot=bogus', headers: authHeaders(owner.token) })
+    const badSlot = await env.app.inject({ method: 'GET', url: '/api/bindings/resolve?slot=bogus', headers: authHeaders(owner.token) })
     expect(badSlot.statusCode).toBe(400)
   })
 
   it('blocks deleting a connection that still has bindings, then unbinds and deletes', async () => {
     const owner = await env.register('mc-delete@example.com', 'Delete Org')
     const connection = await createMockConnection(owner.token, 'delete-main')
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     const capId = connection.capabilities.find(c => c.model === 'mock-text')!.id
-    const bind = await env.app.inject({ method: 'POST', url: '/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId: capId } })
+    const bind = await env.app.inject({ method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token), payload: { slot: 'script_text', capabilityId: capId } })
     expect(bind.statusCode).toBe(201)
 
-    const blocked = await env.app.inject({ method: 'DELETE', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })
+    const blocked = await env.app.inject({ method: 'DELETE', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })
     expect(blocked.statusCode).toBe(409)
 
-    const unbind = await env.app.inject({ method: 'DELETE', url: `/bindings/${bind.json().id}`, headers: authHeaders(owner.token) })
+    const unbind = await env.app.inject({ method: 'DELETE', url: `/api/bindings/${bind.json().id}`, headers: authHeaders(owner.token) })
     expect(unbind.statusCode).toBe(204)
-    const del = await env.app.inject({ method: 'DELETE', url: `/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })
+    const del = await env.app.inject({ method: 'DELETE', url: `/api/providers/connections/${connection.id}`, headers: authHeaders(owner.token) })
     expect(del.statusCode).toBe(204)
   })
 
   it('records binding and provider mutations in the audit trail', async () => {
     const owner = await env.register('mc-audit@example.com', 'Audit MC Org')
     const connection = await createMockConnection(owner.token, 'audit-main')
-    await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+    await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     await env.app.inject({
-      method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+      method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
       payload: { slot: 'script_text', capabilityId: connection.capabilities.find(c => c.model === 'mock-text')!.id },
     })
-    const audit = await env.app.inject({ method: 'GET', url: '/audit-events', headers: authHeaders(owner.token) })
+    const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(owner.token) })
     const actions = (audit.json().events as { action: string }[]).map(e => e.action)
     expect(actions).toContain('provider.create')
     expect(actions).toContain('provider.probe')
@@ -705,15 +705,15 @@ describe('candidate resolution filtering', () => {
     const dark = await createMockConnection(owner.token, 'filter-dark')
     const stale = await createMockConnection(owner.token, 'filter-stale')
     for (const connection of [main, alt, dark, stale]) {
-      await env.app.inject({ method: 'POST', url: `/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
+      await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(owner.token) })
     }
-    const project = await env.app.inject({ method: 'POST', url: '/projects', headers: authHeaders(owner.token), payload: { name: 'Filter Drama' } })
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Filter Drama' } })
     const projectId = project.json().id as string
 
     const capId = (connection: Connection) => connection.capabilities.find(c => c.model === 'mock-t2v')!.id
     const bind = (capabilityId: string, scope: string | undefined, priority: number, enabled = true) =>
       env.app.inject({
-        method: 'POST', url: '/bindings', headers: authHeaders(owner.token),
+        method: 'POST', url: '/api/bindings', headers: authHeaders(owner.token),
         payload: { slot: 'video_t2v', capabilityId, projectId: scope, priority, enabled },
       })
 
@@ -726,10 +726,10 @@ describe('candidate resolution filtering', () => {
     expect((await bind(capId(dark), undefined, 100)).statusCode).toBe(201)
     expect((await bind(capId(stale), undefined, 80)).statusCode).toBe(201)
 
-    await env.app.inject({ method: 'PATCH', url: `/providers/connections/${dark.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
+    await env.app.inject({ method: 'PATCH', url: `/api/providers/connections/${dark.id}`, headers: authHeaders(owner.token), payload: { enabled: false } })
     await env.db.modelCapability.update({ where: { id: capId(stale) }, data: { entitlementVerifiedAt: null, credentialVerifiedAt: null } })
 
-    const scoped = await env.app.inject({ method: 'GET', url: `/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
+    const scoped = await env.app.inject({ method: 'GET', url: `/api/bindings/resolve?slot=video_t2v&projectId=${projectId}`, headers: authHeaders(owner.token) })
     expect(scoped.statusCode).toBe(200)
     const scopedBody = scoped.json() as ResolveBody
     expect(scopedBody.slot).toBe('video_t2v')
@@ -741,7 +741,7 @@ describe('candidate resolution filtering', () => {
 
     // Without a project the project-scoped bindings vanish and the org-scoped
     // duplicate is the only survivor: the disabled, unverified and turned-off ones stay out.
-    const orgWide = await env.app.inject({ method: 'GET', url: '/bindings/resolve?slot=video_t2v', headers: authHeaders(owner.token) })
+    const orgWide = await env.app.inject({ method: 'GET', url: '/api/bindings/resolve?slot=video_t2v', headers: authHeaders(owner.token) })
     const orgBody = orgWide.json() as ResolveBody
     expect(orgBody.projectId).toBeNull()
     expect(orgBody.candidates.map(c => [c.scope, c.priority, c.connectionName])).toEqual([['organization', 5, 'filter-main']])
