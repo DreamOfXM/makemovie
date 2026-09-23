@@ -52,24 +52,24 @@ export function ProjectSettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+      <DialogContent className="flex max-h-[85vh] max-w-2xl flex-col">
         <DialogHeader>
           <DialogTitle>{t('settings.title')}</DialogTitle>
           <DialogDescription>{t('settings.description')}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-6 py-4">
-          <div>
-            <h3 className="text-sm font-medium mb-3">{t('settings.style')}</h3>
-            <StyleSelector
-              value={selectedStyleId}
-              onChange={setSelectedStyleId}
-              disabled={saving}
-            />
-          </div>
+        {/* Only the grid scrolls; the footer actions stay reachable no matter how
+            many styles the organization has. */}
+        <div className="min-h-0 flex-1 overflow-y-auto py-4">
+          <h3 className="text-sm font-medium mb-3">{t('settings.style')}</h3>
+          <StyleSelector
+            value={selectedStyleId}
+            onChange={setSelectedStyleId}
+            disabled={saving}
+          />
         </div>
 
-        <div className="flex justify-end gap-2 pt-4 border-t">
+        <div className="flex justify-end gap-2 border-t pt-4">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             {t('common.cancel')}
           </Button>
