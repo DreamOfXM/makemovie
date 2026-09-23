@@ -429,18 +429,23 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             {userExists === false && (
               <Alert variant="destructive">
                 <CircleAlertIcon className="size-4" />
-                <AlertDescription>
-                  该邮箱尚未注册，请先告知用户完成注册后再添加。
-                </AlertDescription>
+                <AlertDescription>{t('members.notRegistered')}</AlertDescription>
               </Alert>
             )}
-            
+
             {existingMembership && (
               <Alert>
                 <CheckIcon className="size-4 text-success" />
                 <AlertDescription>
-                  该用户已是组织成员（角色：{t(`role.${existingMembership.role}`)}）。
+                  {t('members.alreadyMember', { role: t(`role.${existingMembership.role || 'VIEWER'}`) })}
                 </AlertDescription>
+              </Alert>
+            )}
+
+            {userExists && !existingMembership && (
+              <Alert>
+                <CheckIcon className="size-4 text-success" />
+                <AlertDescription>{t('members.found')}</AlertDescription>
               </Alert>
             )}
           </Field>
@@ -466,7 +471,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null}>
+            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null || userExists === false}>
               {busy ? t('common.saving') : t('members.add')}
             </Button>
           </DialogFooter>

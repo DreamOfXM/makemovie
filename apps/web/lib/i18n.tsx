@@ -1056,6 +1056,9 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.joinedAt': 'Joined',
     'members.count': '{count} member(s)',
     'members.searching': 'Searching…',
+    'members.notRegistered': 'That email has not registered yet; ask them to sign up first.',
+    'members.alreadyMember': 'Already a member of this organization (role: {role}).',
+    'members.found': 'Account found and not in this organization yet — pick a role and press Add.',
     'members.noMembers': 'No members',
 
     'audit.title': 'Audit log',
@@ -2203,6 +2206,9 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.joinedAt': '加入时间',
     'members.count': '共 {count} 名成员',
     'members.searching': '正在查找…',
+    'members.notRegistered': '该邮箱尚未注册，请先让对方完成注册再添加。',
+    'members.alreadyMember': '该用户已是组织成员（角色：{role}）。',
+    'members.found': '已找到该账号（尚未加入本组织）。选择角色后点「添加成员」。',
 
     'audit.title': '审计日志',
     'audit.subtitle': '本组织所有写操作，按时间倒序排列。',
