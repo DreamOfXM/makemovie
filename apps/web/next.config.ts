@@ -12,6 +12,13 @@ const nextConfig: NextConfig = {
   // Proxy requests to backend API
   async rewrites() {
     return [
+      // With NEXT_PUBLIC_API_URL=/api the client prefixes auth paths too, so
+      // /api/auth/* must land on the backend's unprefixed /auth/* mount —
+      // first match wins, keep it above the generic /api rule.
+      {
+        source: '/api/auth/:path*',
+        destination: 'http://localhost:4010/auth/:path*',
+      },
       // Rewrite /api/* to backend /api/*
       {
         source: '/api/:path*',
