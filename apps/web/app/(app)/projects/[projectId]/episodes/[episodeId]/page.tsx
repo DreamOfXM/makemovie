@@ -32,6 +32,7 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
+import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog'
 import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
@@ -76,19 +77,15 @@ export default function EpisodePage() {
   // The project's style is set on the project page; the media panel shows it so
   // what a run will look like is visible where the run is triggered.
   const [stylePresetId, setStylePresetId] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
+  const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
+  const loadProjectStyle = useCallback(() => {
     api<Project[]>('/projects')
-      .then(list => {
-        if (!cancelled) setStylePresetId(list.find(item => item.id === projectId)?.stylePresetId ?? null)
-      })
-      .catch(() => {
-        if (!cancelled) setStylePresetId(null)
-      })
-    return () => {
-      cancelled = true
-    }
+      .then(list => setStylePresetId(list.find(item => item.id === projectId)?.stylePresetId ?? null))
+      .catch(() => setStylePresetId(null))
   }, [api, projectId])
+  useEffect(() => {
+    loadProjectStyle()
+  }, [loadProjectStyle])
 
   const view: EpisodeTab = pickedView ?? (episode && (episode.storyboards?.length ?? 0) === 0 ? 'flow' : 'board')
 
@@ -417,7 +414,20 @@ export default function EpisodePage() {
               </Card>
             </div>
 
-            <GenerationsPanel episodeId={episodeId} reloadToken={generationsToken} storyboards={storyboards} stylePresetId={stylePresetId} />
+            <GenerationsPanel
+              episodeId={episodeId}
+              reloadToken={generationsToken}
+              storyboards={storyboards}
+              stylePresetId={stylePresetId}
+              onStyleClick={() => setStyleSettingsOpen(true)}
+            />
+            <ProjectSettingsDialog
+              open={styleSettingsOpen}
+              projectId={projectId}
+              currentStyleId={stylePresetId}
+              onOpenChange={setStyleSettingsOpen}
+              onStyleChanged={loadProjectStyle}
+            />
             <div id="step-delivery" className="scroll-mt-20">
               <DeliveryPanel episodeId={episodeId} />
             </div>

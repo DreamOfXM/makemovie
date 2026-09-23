@@ -87,9 +87,11 @@ interface GenerationsPanelProps {
   storyboards: Storyboard[]
   /** The project's default style preset, shown next to the trigger so what a run will look like is visible. */
   stylePresetId?: string | null
+  /** Opens the project's style settings; the muted line doubles as the entry point. */
+  onStyleClick?: () => void
 }
 
-export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, stylePresetId = null }: GenerationsPanelProps) {
+export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, stylePresetId = null, onStyleClick }: GenerationsPanelProps) {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -320,13 +322,27 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
           </CardTitle>
           <CardDescription>{active ? t('generations.pollHint') : t('generations.mediaHint')}</CardDescription>
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <span>
-              {stylePresetId
-                ? styleName
-                  ? t('generations.currentStyle', { name: styleName })
-                  : t('generations.currentStyleSet')
-                : t('generations.currentStyleNone')}
-            </span>
+            {onStyleClick ? (
+              <button
+                type="button"
+                onClick={onStyleClick}
+                className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+              >
+                {stylePresetId
+                  ? styleName
+                    ? t('generations.currentStyle', { name: styleName })
+                    : t('generations.currentStyleSet')
+                  : t('generations.currentStyleNone')}
+              </button>
+            ) : (
+              <span>
+                {stylePresetId
+                  ? styleName
+                    ? t('generations.currentStyle', { name: styleName })
+                    : t('generations.currentStyleSet')
+                  : t('generations.currentStyleNone')}
+              </span>
+            )}
             <HelpHint text={t('generations.currentStyleHint')} />
           </div>
           {episodeId && (
