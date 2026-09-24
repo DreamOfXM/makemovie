@@ -1006,7 +1006,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'models.bindingDisabled': 'Binding disabled',
 
     'models.catalogs': 'Provider catalogs',
-    'models.catalogsHint': 'Catalogs are versioned in code. Adding a connection copies its models into your organization.',
+    'models.catalogsHint': 'Catalogs are versioned in code, so this list is read-only. For any gateway or relay the catalog does not know: create an OpenAI-compatible connection under Connections, then add your own models to it (probe verifies each).',
     'models.catalogVersion': 'Catalog version',
     'models.catalogModels': 'Models',
     'models.catalogBaseUrl': 'Default base URL',
@@ -2161,7 +2161,7 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'models.bindingDisabled': '绑定已停用',
 
     'models.catalogs': 'Provider 目录',
-    'models.catalogsHint': '目录以代码形式版本化。新建连接时会把目录里的模型复制到你的组织。',
+    'models.catalogsHint': '目录随代码版本化，因此只读。清单之外的网关/中转：到「连接」新建 OpenAI 兼容连接，再给这条连接手动添加模型（探测会逐一验证）。',
     'models.catalogVersion': '目录版本',
     'models.catalogModels': '模型',
     'models.catalogBaseUrl': '默认 Base URL',
