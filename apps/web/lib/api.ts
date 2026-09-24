@@ -304,6 +304,8 @@ export interface CreateProjectInput {
   format?: ProjectFormat
   /** Custom per-episode default inside the format's range; absent = the format constant. */
   targetDurationMs?: number
+  /** Project style preset from birth; the API defaults to 写实风 (realistic). */
+  styleId?: string
 }
 
 export function createProject(api: ApiClient, input: CreateProjectInput): Promise<Project> {

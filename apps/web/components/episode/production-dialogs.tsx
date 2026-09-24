@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { ArrowRightIcon } from 'lucide-react'
 import {
   canTransition,
@@ -48,6 +48,8 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const { locale, t } = useI18n()
   const { api } = useSession()
   const [name, setName] = useState('')
+  const [styleId, setStyleId] = useState('realistic')
+  const [styleOptions, setStyleOptions] = useState<Array<{ id: string; name: string; nameEn?: string | null }>>([])
   const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [format, setFormat] = useState<ProjectFormat>('short_drama')
   // Minutes in the box, ms on the wire — kept as text so the field can be emptied
@@ -57,6 +59,16 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const [durationError, setDurationError] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  const createStyleOptions = useCallback(
+    () => api<{ styles: Array<{ id: string; name: string; nameEn?: string | null }> }>('/styles')
+      .then(data => setStyleOptions(data.styles))
+      .catch(() => setStyleOptions([])),
+    [api],
+  )
+  useEffect(() => {
+    if (state?.mode === 'create') void createStyleOptions()
+  }, [state?.mode, createStyleOptions])
   const durationRange = formatDurationRange[format]
   const durationMinutes = Number(durationText)
   const durationEmpty = durationText.trim() === ''
@@ -92,7 +104,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     setError('')
     try {
       if (state.mode === 'create') {
-        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMinutes * 60_000) })
+        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMinutes * 60_000), styleId })
         onDone('create', created.name)
       } else {
         await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
@@ -138,6 +150,22 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
               </SelectContent>
             </Select>
           </Field>
+          {state?.mode === 'create' && (
+            <Field label={t('settings.style')} htmlFor="projectStyle" hint={t('projects.styleHint')}>
+              <Select value={styleId} onValueChange={setStyleId} disabled={busy}>
+                <SelectTrigger id="projectStyle">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(styleOptions.length > 0 ? styleOptions : [{ id: 'realistic', name: '写实风', nameEn: 'Realistic' }]).map(item => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {locale === 'zh' || !item.nameEn ? item.name : item.nameEn}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           {state?.mode === 'create' && (
             <div className="space-y-1.5">
               <p className="flex items-center gap-1.5 text-sm font-medium">

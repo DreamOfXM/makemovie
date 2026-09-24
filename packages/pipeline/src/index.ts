@@ -781,8 +781,16 @@ export async function triggerStage(
   // 落 BLOCKED 不排队;所有留痕随请求快照入库——审计要能回答"这条 prompt 被动过吗、为什么"。
   // 守卫链是有序数组(DEFAULT_PROMPT_GUARDS),增减规则不碰这里。
   const shotById = new Map(selected.map(storyboard => [storyboard.id, storyboard]))
-  let promptedTargets: GenerationTarget[] = stage === 'IMAGE' || stage === 'VIDEO'
-    ? notedTargets.map(target => {
+  // 风格预设先于守卫链应用:style-anchor 认得出「视觉风格」标记就不叠加
+  // 默认写实基准,显式选的风格永远赢;没有预设时守卫照旧兜底。
+  let promptedTargets: GenerationTarget[] = style && (stage === 'IMAGE' || stage === 'VIDEO')
+    ? notedTargets.map(target => ({
+        ...target,
+        prompt: applyStyleToPrompt(stage, target.prompt, style),
+      }))
+    : notedTargets
+  promptedTargets = stage === 'IMAGE' || stage === 'VIDEO'
+    ? promptedTargets.map(target => {
         const info = target.storyboardId ? shotGuardInfo.get(target.storyboardId) : undefined
         const shot = target.storyboardId ? shotById.get(target.storyboardId) : undefined
         const result = runPromptGuards(DEFAULT_PROMPT_GUARDS, target.prompt, {
@@ -798,14 +806,6 @@ export async function triggerStage(
         }
       })
     : notedTargets
-
-  // 风格预设应用到 IMAGE/VIDEO 阶段:在守卫处理之后追加视觉风格描述
-  if (style && (stage === 'IMAGE' || stage === 'VIDEO')) {
-    promptedTargets = promptedTargets.map(target => ({
-      ...target,
-      prompt: applyStyleToPrompt(stage, target.prompt, style),
-    }))
-  }
 
   // A frame is only looked up when a model was bound that can take it: resolving one for a
   // request that would have to drop it spends a query to produce a number nobody reads.

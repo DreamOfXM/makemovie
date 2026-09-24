@@ -43,10 +43,17 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  app.post<{ Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
+  app.post<{ Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; styleId?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
     const auth = request.auth!
     const name = request.body?.name?.trim()
     if (!name) return reply.code(400).send({ error: 'name is required' })
+    // New projects carry a style from birth (default: 写实风) so generation is
+    // shaped from the first click; an explicit styleId must resolve like apply-style's.
+    const requestedStyleId = request.body?.styleId ?? 'realistic'
+    const style = await app.db.stylePreset.findFirst({
+      where: { id: requestedStyleId, OR: [{ organizationId: null }, { organizationId: auth.organizationId }] },
+    })
+    if (!style) return reply.code(400).send({ error: 'styleId references a non-existent or inaccessible style' })
     const contentLocale = request.body?.contentLocale
     if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
       return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
@@ -69,6 +76,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           name,
           contentLocale,
           format: prismaFormat,
+          stylePresetId: style.id,
           ...(request.body?.targetDurationMs === undefined ? {} : { targetDurationMs: request.body?.targetDurationMs }),
         },
       })

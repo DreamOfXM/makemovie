@@ -66,7 +66,7 @@ export interface GuardedResult {
  */
 export const VISUAL_STYLE_DIRECTIVE =
   '视觉风格基准：真人实拍电影质感，写实光影与自然色彩，电影级构图与景深；禁止动漫、卡通、Q版、手绘插画风格。'
-const STYLE_MARKERS = ['真人实拍', '电影质感', '写实', 'photorealistic', 'cinematic']
+const STYLE_MARKERS = ['真人实拍', '电影质感', '写实', 'photorealistic', 'cinematic', '视觉风格']
 
 const styleAnchor: PromptGuard = {
   id: 'style-anchor',

@@ -226,3 +226,23 @@
     visibility: hidden;
   }
 }
+
+/* Skins — the SkinSelector sets data-skin on <html>. Only the primary family
+   recolors: backgrounds keep their tuned contrast pairs, so a skin can never
+   break readability in either light or dark. Equal specificity with .dark,
+   declared later, so one rule covers both modes. */
+[data-skin='forest'] {
+  --primary: oklch(0.61 0.13 169);
+  --primary-foreground: oklch(0.985 0.005 169);
+  --ring: oklch(0.61 0.13 169);
+}
+[data-skin='tungsten'] {
+  --primary: oklch(0.65 0.18 41);
+  --primary-foreground: oklch(0.985 0.005 41);
+  --ring: oklch(0.65 0.18 41);
+}
+[data-skin='rice'] {
+  --primary: oklch(0.53 0.19 263);
+  --primary-foreground: oklch(0.985 0.005 263);
+  --ring: oklch(0.53 0.19 263);
+}

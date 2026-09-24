@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createPipelineQueue, type ComposeEpisodePayload, type RunTaskPayload } from '@studio/jobs'
-import { generationSeed, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
+import { generationSeed, getStyleVisualDirective, OFFICIAL_STYLES, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
 import { startTestEnv, type TestEnv } from './env.js'
 
 // The api suite shares the Redis instance with the worker suite; a private
@@ -219,10 +219,12 @@ describe('generation trigger', () => {
     // A paid media request pins its base seed in the snapshot, derived from that key.
     // P7 守卫给每条无风格的媒体 prompt 补上真人质感基准，并把改写留痕写进快照——
     // 快照不再是"原样的输入"，而是"实际付钱买的东西"。
+    // 新建项目默认写实风预设,且预设先于守卫应用:style-anchor 认得「视觉风格」
+    // 标记即让路,快照里只有预设注入、没有守卫改写。
+    const realistic = OFFICIAL_STYLES.find(style => style.id === 'realistic')!
     expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
-      input: { prompt: `SB2: Chase scene\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `SB2: Chase scene\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
       parameters: { seed: generationSeed(stored.idempotencyKey!) },
-      promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
 
     // The composition worker finds each clip through the batch → storyboards link.
@@ -418,7 +420,7 @@ describe('prompt guards on trigger', () => {
     // 风格基准同批注入 —— 两者都留痕,审计能回答"这条 prompt 被动过什么"。
     expect(snapshot.input.prompt).toContain('画面中出现的人物必须与以下已绑定角色的外观设定严格一致')
     expect(snapshot.input.prompt).toContain('关师傅：六十岁老匠人')
-    expect(snapshot.promptGuards.map((finding: { guard: string }) => finding.guard)).toEqual(['style-anchor', 'character-anchor'])
+    expect(snapshot.promptGuards.map((finding: { guard: string }) => finding.guard)).toEqual(['character-anchor'])
     expect(snapshot.promptGuards.every((finding: { action: string }) => finding.action === 'repair')).toBe(true)
 
     const triggerEvent = await env.db.auditEvent.findFirst({ where: { organizationId, action: 'generation.trigger', entityType: 'generation-batch', entityId: batch.id } })
@@ -440,7 +442,7 @@ describe('prompt guards on trigger', () => {
     // 复活后的快照按当前事实重排:这一镜不再缺锚。
     const revived = JSON.parse(blockedBefore.requestSnapshot ?? '')
     expect(revived.input.prompt).toContain('青石巷')
-    expect(revived.promptGuards ?? []).toEqual(expect.arrayContaining([expect.objectContaining({ guard: 'style-anchor' })]))
+    expect(revived.input.prompt).toContain('视觉风格：')
   })
 })
 
