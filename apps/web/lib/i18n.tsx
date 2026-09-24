@@ -1059,6 +1059,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.notRegistered': 'That email has not registered yet; ask them to sign up first.',
     'members.alreadyMember': 'Already a member of this organization (role: {role}).',
     'members.found': 'Account found and not in this organization yet — pick a role and press Add.',
+    'members.resultsTitle': '{count} accounts match — pick the one to add:',
+    'members.inOrg': 'In org · {role}',
     'members.noMembers': 'No members',
 
     'audit.title': 'Audit log',
@@ -2209,6 +2211,8 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.notRegistered': '该邮箱尚未注册，请先让对方完成注册再添加。',
     'members.alreadyMember': '该用户已是组织成员（角色：{role}）。',
     'members.found': '已找到该账号（尚未加入本组织）。选择角色后点「添加成员」。',
+    'members.resultsTitle': '找到 {count} 个匹配的账号，选择要添加的：',
+    'members.inOrg': '本组织成员 · {role}',
 
     'audit.title': '审计日志',
     'audit.subtitle': '本组织所有写操作，按时间倒序排列。',

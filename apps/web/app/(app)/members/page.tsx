@@ -303,47 +303,46 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
   const [checking, setChecking] = useState(false)
   const [userExists, setUserExists] = useState<boolean | null>(null)
   const [existingMembership, setExistingMembership] = useState<{ role: string; joinedAt: string } | null>(null)
+  const [hits, setHits] = useState<MemberSearchHit[]>([])
+  const [pickedEmail, setPickedEmail] = useState<string | null>(null)
+
+  /** A picked hit drives the confirm alerts and the eventual add. */
+  function applyPick(hit: MemberSearchHit) {
+    setPickedEmail(hit.email)
+    setEmail(hit.email)
+    if (hit.member) setExistingMembership({ role: hit.role ?? '', joinedAt: hit.joinedAt ?? '' })
+    else setExistingMembership(null)
+  }
 
   // Search for user by fuzzy email match before showing full dialog
-  async function checkUserEmail() {
-    if (!email || !email.includes('@')) return
-    
+  async function checkUserEmail(query: string = email) {
+    if (!query || query.trim().length < 3) return
+
     setChecking(true)
     setError('')
     setUserExists(null)
     setExistingMembership(null)
+    setHits([])
+    setPickedEmail(null)
     
     try {
       
       // Call the backend fuzzy search endpoint: GET /members?email=xxx
-      const searchResults = await api<MemberSearchHit[]>('/members?email=' + encodeURIComponent(email.toLowerCase()))
+      const searchResults = await api<MemberSearchHit[]>('/members?email=' + encodeURIComponent(query.trim().toLowerCase()))
       
-      if (searchResults) {
-      }
-      
-      // Filter results client-side for fuzzy matching (defense in depth)
-      const fuzzyMatched = searchResults?.filter(m => 
-        m.email.toLowerCase().includes(email.toLowerCase())
+      const fuzzyMatched = (searchResults ?? []).filter(m =>
+        m.email.toLowerCase().includes(query.trim().toLowerCase()),
       )
-      
-      
-      if (fuzzyMatched && fuzzyMatched.length > 0) {
-        // Found matching users - check if any are already members of this org
-        const alreadyMember = fuzzyMatched.find(m => 
-          m.email === email.toLowerCase() // Exact match first
-        )
-        
-        
-        if (alreadyMember?.member) {
-          setExistingMembership({ role: alreadyMember.role ?? '', joinedAt: alreadyMember.joinedAt ?? '' })
-          setUserExists(true)
-        } else {
-          // Registered elsewhere (or in nobody's org): addable here.
-          setUserExists(true)
-        }
-      } else {
-        // No fuzzy match found - user likely doesn't exist
+
+      if (fuzzyMatched.length === 0) {
         setUserExists(false)
+      } else {
+        setHits(fuzzyMatched)
+        // One hit, or an exact-email hit, picks itself; several hits wait for a pick.
+        const exact = fuzzyMatched.find(m => m.email === query.trim().toLowerCase())
+        const auto = exact ?? (fuzzyMatched.length === 1 ? fuzzyMatched[0] : undefined)
+        if (auto) applyPick(auto)
+        setUserExists(true)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '')
@@ -358,7 +357,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
     setBusy(true)
     setError('')
     try {
-      await api('/members', { method: 'POST', body: JSON.stringify({ email, role: memberRole }) })
+      await api('/members', { method: 'POST', body: JSON.stringify({ email: pickedEmail ?? email, role: memberRole }) })
       toast.success(t('members.added', { email, role: t(`role.${memberRole}`) }))
       onDone()
     } catch (err) {
@@ -400,9 +399,10 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
                 value={email}
                 onChange={async (event) => {
                   setEmail(event.target.value)
-                  // Debounced fuzzy search on every keystroke
-                  if (event.target.value.includes('@') && event.target.value.length >= 3) {
-                    await checkUserEmail()
+                  // Fuzzy search from three characters — a prefix like "wang" is a
+                  // legitimate query; picking a hit backfills the full email.
+                  if (event.target.value.trim().length >= 3) {
+                    await checkUserEmail(event.target.value)
                   } else {
                     setUserExists(null)
                     setExistingMembership(null)
@@ -419,7 +419,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
                 type="button"
                 variant="outline"
                 onClick={() => checkUserEmail()}
-                disabled={!email.includes('@') || checking}
+                disabled={email.trim().length < 3 || checking}
               >
                 {checking ? t('common.loading') : t('members.search')}
               </Button>
@@ -442,11 +442,50 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
               </Alert>
             )}
 
-            {userExists && !existingMembership && (
+            {userExists && !existingMembership && (pickedEmail || hits.length === 1) && (
               <Alert>
                 <CheckIcon className="size-4 text-success" />
                 <AlertDescription>{t('members.found')}</AlertDescription>
               </Alert>
+            )}
+
+            {hits.length > 1 && (
+              <div role="radiogroup" aria-label={t('members.resultsTitle', { count: hits.length })} className="space-y-1.5">
+                <p className="text-xs text-muted-foreground">{t('members.resultsTitle', { count: hits.length })}</p>
+                {hits.map(hit => {
+                  const picked = pickedEmail === hit.email
+                  return (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={picked}
+                      key={hit.userId}
+                      disabled={hit.member}
+                      onClick={() => applyPick(hit)}
+                      className={
+                        'flex w-full items-center gap-2.5 rounded-lg border p-2 text-left transition-colors ' +
+                        (hit.member
+                          ? 'cursor-not-allowed opacity-55'
+                          : 'cursor-pointer hover:border-primary/40 ') +
+                        (picked ? 'border-primary bg-primary/5 ring-1 ring-primary' : '')
+                      }
+                    >
+                      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
+                        {(hit.name ?? hit.email).slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{hit.name ?? hit.email.split('@')[0]}</span>
+                        <span className="block truncate text-xs text-muted-foreground">{hit.email}</span>
+                      </span>
+                      {hit.member ? (
+                        <Badge variant="muted">{t('members.inOrg', { role: t(`role.${hit.role ?? 'VIEWER'}`) })}</Badge>
+                      ) : picked ? (
+                        <CheckIcon className="size-4 shrink-0 text-primary" />
+                      ) : null}
+                    </button>
+                  )
+                })}
+              </div>
             )}
           </Field>
 
@@ -471,7 +510,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null || userExists === false}>
+            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null || userExists === false || (hits.length > 1 && !pickedEmail)}>
               {busy ? t('common.saving') : t('members.add')}
             </Button>
           </DialogFooter>
