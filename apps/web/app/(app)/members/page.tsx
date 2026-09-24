@@ -342,11 +342,9 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
       if (fuzzyMatched.length === 0) {
         setUserExists(false)
       } else {
+        // No auto-pick: the user's own click is what fills the email —
+        // silently rewriting the box mid-typing reads as hijacking.
         setHits(fuzzyMatched)
-        // One hit, or an exact-email hit, picks itself; several hits wait for a pick.
-        const exact = fuzzyMatched.find(m => m.email === query.trim().toLowerCase())
-        const auto = exact ?? (fuzzyMatched.length === 1 ? fuzzyMatched[0] : undefined)
-        if (auto) applyPick(auto)
         setUserExists(true)
       }
     } catch (err) {
@@ -447,14 +445,14 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
               </Alert>
             )}
 
-            {userExists && !existingMembership && (pickedEmail || hits.length === 1) && (
+            {userExists && !existingMembership && pickedEmail && (
               <Alert>
                 <CheckIcon className="size-4 text-success" />
                 <AlertDescription>{t('members.found')}</AlertDescription>
               </Alert>
             )}
 
-            {hits.length > 1 && (
+            {hits.length > 0 && (
               <div role="radiogroup" aria-label={t('members.resultsTitle', { count: hits.length })} className="space-y-1.5">
                 <p className="text-xs text-muted-foreground">{t('members.resultsTitle', { count: hits.length })}</p>
                 {hits.slice(page * HITS_PER_PAGE, page * HITS_PER_PAGE + HITS_PER_PAGE).map(hit => {
@@ -479,8 +477,10 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
                         {(hit.name ?? hit.email).slice(0, 1).toUpperCase()}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm">{hit.name ?? hit.email.split('@')[0]}</span>
-                        <span className="block truncate text-xs text-muted-foreground">{hit.email}</span>
+                        <span className="block truncate text-sm font-medium">{hit.email}</span>
+                        {hit.name && hit.name !== hit.email && (
+                          <span className="block truncate text-xs text-muted-foreground">{hit.name}</span>
+                        )}
                       </span>
                       {hit.member ? (
                         <Badge variant="muted">{t('members.inOrg', { role: t(`role.${hit.role ?? 'VIEWER'}`) })}</Badge>
@@ -540,7 +540,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={busy || !email.trim() || existingMembership !== null || userExists === false || (hits.length > 1 && !pickedEmail)}>
+            <Button type="submit" disabled={busy || !pickedEmail || existingMembership !== null}>
               {busy ? t('common.saving') : t('members.add')}
             </Button>
           </DialogFooter>
