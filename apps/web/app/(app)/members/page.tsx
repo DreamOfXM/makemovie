@@ -287,6 +287,9 @@ function RoleSelect({ value, disabled, onValueChange }: RoleSelectProps) {
   )
 }
 
+/** Candidates paginate inside the dialog so a broad query can never stretch it past the screen. */
+const HITS_PER_PAGE = 6
+
 interface AddMemberDialogProps {
   open: boolean
   onOpenChange(open: boolean): void
@@ -305,6 +308,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
   const [existingMembership, setExistingMembership] = useState<{ role: string; joinedAt: string } | null>(null)
   const [hits, setHits] = useState<MemberSearchHit[]>([])
   const [pickedEmail, setPickedEmail] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
 
   /** A picked hit drives the confirm alerts and the eventual add. */
   function applyPick(hit: MemberSearchHit) {
@@ -324,6 +328,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
     setExistingMembership(null)
     setHits([])
     setPickedEmail(null)
+    setPage(0)
     
     try {
       
@@ -452,7 +457,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
             {hits.length > 1 && (
               <div role="radiogroup" aria-label={t('members.resultsTitle', { count: hits.length })} className="space-y-1.5">
                 <p className="text-xs text-muted-foreground">{t('members.resultsTitle', { count: hits.length })}</p>
-                {hits.map(hit => {
+                {hits.slice(page * HITS_PER_PAGE, page * HITS_PER_PAGE + HITS_PER_PAGE).map(hit => {
                   const picked = pickedEmail === hit.email
                   return (
                     <button
@@ -485,6 +490,31 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
                     </button>
                   )
                 })}
+                {hits.length > HITS_PER_PAGE && (
+                  <div className="flex items-center justify-between pt-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={page === 0}
+                      onClick={() => setPage(current => Math.max(0, current - 1))}
+                    >
+                      {t('members.prevPage')}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {t('members.pageInfo', { page: page + 1, pages: Math.ceil(hits.length / HITS_PER_PAGE) })}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={(page + 1) * HITS_PER_PAGE >= hits.length}
+                      onClick={() => setPage(current => current + 1)}
+                    >
+                      {t('members.nextPage')}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </Field>

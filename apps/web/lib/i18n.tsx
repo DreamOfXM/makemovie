@@ -1061,6 +1061,9 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.found': 'Account found and not in this organization yet — pick a role and press Add.',
     'members.resultsTitle': '{count} accounts match — pick the one to add:',
     'members.inOrg': 'In org · {role}',
+    'members.prevPage': 'Previous',
+    'members.nextPage': 'Next',
+    'members.pageInfo': 'Page {page} of {pages}',
     'members.noMembers': 'No members',
 
     'audit.title': 'Audit log',
@@ -2213,6 +2216,9 @@ const dictionaries: Record<Locale, Record<string, string>> = {
     'members.found': '已找到该账号（尚未加入本组织）。选择角色后点「添加成员」。',
     'members.resultsTitle': '找到 {count} 个匹配的账号，选择要添加的：',
     'members.inOrg': '本组织成员 · {role}',
+    'members.prevPage': '上一页',
+    'members.nextPage': '下一页',
+    'members.pageInfo': '第 {page} / {pages} 页',
 
     'audit.title': '审计日志',
     'audit.subtitle': '本组织所有写操作，按时间倒序排列。',
