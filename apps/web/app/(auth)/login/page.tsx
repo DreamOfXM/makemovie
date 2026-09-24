@@ -49,10 +49,13 @@ export default function LoginPage() {
   }>>([])
 
   useEffect(() => {
-    if (status === 'authenticated') router.replace('/projects')
-  }, [status, router])
+    // The org picker runs while already signed in (switching needs the token);
+    // don't yank the page out from under it.
+    if (status === 'authenticated' && !showOrgPicker) router.replace('/projects')
+  }, [status, showOrgPicker, router])
 
-  if (status !== 'anonymous') return <BootScreen />
+  // Same exception as the redirect above: the picker needs the signed-in tree.
+  if (status !== 'anonymous' && !showOrgPicker) return <BootScreen />
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -76,6 +79,9 @@ export default function LoginPage() {
         
         // Check if user has multiple organizations
         if (data.memberships && data.memberships.length > 1) {
+          // Establish the session first — switching organizations is an
+          // authenticated call, and without this the picker's switch 401s.
+          await signIn(data.token)
           setAllMemberships(data.memberships)
           setShowOrgPicker(true)
           setError('')
