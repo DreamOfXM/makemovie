@@ -15,6 +15,8 @@ import {
   Settings2Icon,
   ShieldCheckIcon,
   Trash2Icon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from 'lucide-react'
 import type { Binding, Capability, Catalog, Connection, ProbeResponse, ProbeResult } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -337,6 +339,8 @@ function ConnectionCard({
   const { t, locale } = useI18n()
   const { can, denyReason } = usePermission()
   const manage = can('providers:manage')
+  // 模型清单是查阅型内容：卡片默认收起，探测/启停/编辑留在卡头常驻。
+  const [modelsOpen, setModelsOpen] = useState(false)
 
   const toggle = (
     <Switch
@@ -351,6 +355,15 @@ function ConnectionCard({
     <Card className="gap-4 py-4">
       <CardHeader>
         <div className="flex items-start gap-3">
+          <button
+            type="button"
+            aria-expanded={modelsOpen}
+            aria-label={modelsOpen ? t('common.collapse') : t('common.expand')}
+            onClick={() => setModelsOpen(value => !value)}
+            className="text-muted-foreground hover:text-foreground mt-1 shrink-0"
+          >
+            {modelsOpen ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
+          </button>
           <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
             <RadioTowerIcon className="size-4.5" />
           </span>
@@ -366,6 +379,7 @@ function ConnectionCard({
               ) : (
                 <Badge variant="warning">{t('models.apiKeyMissing')}</Badge>
               )}
+              <Badge variant="outline">{t('models.capabilityCount', { count: connection.capabilities.length })}</Badge>
             </CardTitle>
             <CardDescription className="truncate font-mono text-xs">{connection.baseUrl}</CardDescription>
           </div>
@@ -460,6 +474,7 @@ function ConnectionCard({
         </CardContent>
       )}
 
+      {modelsOpen && (
       <div className="border-t">
         <div className="flex items-center justify-between gap-3 px-6 py-3">
           <p className="text-sm font-medium">{t('models.capabilities')}</p>
@@ -501,6 +516,7 @@ function ConnectionCard({
           </Table>
         )}
       </div>
+      )}
     </Card>
   )
 }

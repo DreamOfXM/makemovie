@@ -34,12 +34,35 @@ export function CatalogsPanel({ catalogs }: { catalogs: AsyncState<Catalog[]> })
       ) : (
         <div className="space-y-4">
           {catalogs.data.map(catalog => (
-            <Card key={catalog.provider}>
-              <CardHeader>
-                <div className="flex items-start gap-3">
-                  <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
-                    <BoxesIcon className="size-4.5" />
-                  </span>
+            <CatalogCard key={catalog.provider} catalog={catalog} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 参考型清单：默认收起，卡头留模型数与目录版本，展开才见全表。 */
+function CatalogCard({ catalog }: { catalog: Catalog }) {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start gap-3">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-label={open ? t('common.collapse') : t('common.expand')}
+            onClick={() => setOpen(value => !value)}
+            className="text-muted-foreground hover:text-foreground mt-1 shrink-0"
+          >
+            {open ? <ChevronDownIcon className="size-4" /> : <ChevronRightIcon className="size-4" />}
+          </button>
+          <span className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
+            <BoxesIcon className="size-4.5" />
+          </span>
                   <div className="min-w-0 space-y-1.5">
                     <CardTitle className="flex flex-wrap items-center gap-2">
                       {catalog.label}
@@ -55,7 +78,7 @@ export function CatalogsPanel({ catalogs }: { catalogs: AsyncState<Catalog[]> })
                   <Badge variant="muted">{t('models.capabilityCount', { count: catalog.models.length })}</Badge>
                 </CardAction>
               </CardHeader>
-              {catalog.models.length === 0 ? (
+      {open && (catalog.models.length === 0 ? (
                 <p className="text-muted-foreground px-6 text-sm">{t('models.noCapabilities')}</p>
               ) : (
                 <div className="border-t">
@@ -77,12 +100,8 @@ export function CatalogsPanel({ catalogs }: { catalogs: AsyncState<Catalog[]> })
                     </TableBody>
                   </Table>
                 </div>
-              )}
-            </Card>
-          ))}
-        </div>
-      )}
-    </div>
+              ))}
+    </Card>
   )
 }
 
