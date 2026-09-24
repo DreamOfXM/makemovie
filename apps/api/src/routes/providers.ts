@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { Prisma, type PrismaClient } from '@studio/db'
 import { modelModalities, isModelModality, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
-import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogModel, type ProviderAdapter } from '@studio/providers'
+import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogModel, type ProviderAdapter, type ProviderCatalog } from '@studio/providers'
 import { decryptSecret, encryptSecret } from '@studio/security'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -36,16 +36,125 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     return createAdapter(connection.provider, { apiKey, accessKey, baseUrl: connection.baseUrl })
   }
 
-  app.get('/providers/catalogs', { preHandler: requirePermission('read') }, async () => {
-    return listCatalogs().map(catalog => ({
-      provider: catalog.provider,
-      label: catalog.label,
-      defaultBaseUrl: catalog.defaultBaseUrl,
-      catalogVersion: catalog.catalogVersion,
-      requiresAccessKey: catalog.requiresAccessKey,
-      models: catalog.models,
-    }))
+  app.get('/providers/catalogs', { preHandler: requirePermission('read') }, async request => {
+    const auth = request.auth!
+    const overlay = await loadOverlay(app.db, auth.organizationId)
+    return listCatalogs()
+      .map(catalog => mergeCatalog(catalog, overlay))
+      .filter((catalog): catalog is EffectiveCatalog => catalog !== null)
+      .map(catalog => ({
+        provider: catalog.provider,
+        label: catalog.label,
+        defaultBaseUrl: catalog.defaultBaseUrl,
+        catalogVersion: catalog.catalogVersion,
+        requiresAccessKey: catalog.requiresAccessKey,
+        models: catalog.models,
+      }))
   })
+
+  /** The recycle bin for the overlay: what this org hid, so the UI can offer restore. */
+  app.get('/providers/catalogs/hidden', { preHandler: requirePermission('read') }, async request => {
+    const auth = request.auth!
+    const overlay = await loadOverlay(app.db, auth.organizationId)
+    const providers = overlay.hidden
+      .filter(row => row.model === '')
+      .map(row => ({ provider: row.provider, label: getCatalog(row.provider)?.label ?? row.provider }))
+    const models = overlay.hidden
+      .filter(row => row.model !== '')
+      .map(row => {
+        const catalog = getCatalog(row.provider)
+        const official = catalog?.models.find(model => model.model === row.model)
+        const custom = overlay.custom.find(entry => entry.provider === row.provider && entry.model === row.model)
+        return { provider: row.provider, model: row.model, displayName: official?.displayName ?? custom?.displayName ?? row.model }
+      })
+    return { providers, models }
+  })
+
+  /**
+   * Hides a vendor card (no model in the body) or every row filed under a model id.
+   * Official rows re-ship with every release, so delete-by-hide is the only honest
+   * semantics: a hard delete would silently return on the next deploy.
+   */
+  app.post<{ Params: { provider: string }; Body: { model?: string } }>(
+    '/providers/catalogs/:provider/hide',
+    { preHandler: requirePermission('providers:manage') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const provider = request.params.provider
+      const catalog = getCatalog(provider)
+      if (!catalog) return reply.code(400).send({ error: 'provider must be one of the known catalogs' })
+      const model = request.body?.model?.trim() ?? ''
+      if (model) {
+        const known = catalog.models.some(entry => entry.model === model)
+          || await app.db.catalogCustomModel.findFirst({ where: { organizationId: auth.organizationId, provider, model } })
+        if (!known) return reply.code(404).send({ error: `model "${model}" is not in the ${provider} catalog` })
+      }
+      await app.db.catalogHidden.upsert({
+        where: { organizationId_provider_model: { organizationId: auth.organizationId, provider, model } },
+        create: { organizationId: auth.organizationId, provider, model },
+        update: {},
+      })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'catalog.hide', entityType: 'CatalogHidden', entityId: `${provider}:${model || '*'}`, payload: { provider, model: model || null } })
+      return reply.code(204).send()
+    },
+  )
+
+  app.delete<{ Params: { provider: string } }>(
+    '/providers/catalogs/:provider/hide',
+    { preHandler: requirePermission('providers:manage') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const provider = request.params.provider
+      const model = (request.query as { model?: string }).model?.trim() ?? ''
+      const removed = await app.db.catalogHidden.deleteMany({ where: { organizationId: auth.organizationId, provider, model } })
+      if (removed.count === 0) return reply.code(404).send({ error: 'nothing hidden under this provider/model' })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'catalog.unhide', entityType: 'CatalogHidden', entityId: `${provider}:${model || '*'}`, payload: { provider, model: model || null } })
+      return reply.code(204).send()
+    },
+  )
+
+  /**
+   * The org's own row for a model the code catalog does not carry yet — a release so
+   * new we have not shipped it, or a gateway's checkpoint under the protocol entry.
+   * Same (provider, model, modality) as an official row shadows it, so a stale
+   * official flag can be corrected without waiting for a release.
+   */
+  app.post<{ Params: { provider: string }; Body: ModelBody }>(
+    '/providers/catalogs/:provider/models',
+    { preHandler: requirePermission('providers:manage') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const provider = request.params.provider
+      if (!isKnownProvider(provider)) return reply.code(400).send({ error: 'provider must be one of the known catalogs' })
+      const parsed = parseModelBody(request.body)
+      if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
+      try {
+        const entry = await app.db.catalogCustomModel.create({
+          data: { organizationId: auth.organizationId, provider, ...parsed.data },
+        })
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'catalog.model.add', entityType: 'CatalogCustomModel', entityId: entry.id, payload: { provider, model: entry.model, modality: entry.modality } })
+        return reply.code(201).send(entry)
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          return reply.code(409).send({ error: `model "${parsed.data.model}" is already in the ${provider} catalog for the "${parsed.data.modality}" modality` })
+        }
+        throw error
+      }
+    },
+  )
+
+  app.delete<{ Params: { entryId: string } }>(
+    '/providers/catalogs/entries/:entryId',
+    { preHandler: requirePermission('providers:manage') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const entry = await app.db.catalogCustomModel.findFirst({ where: { id: request.params.entryId, organizationId: auth.organizationId } })
+      if (!entry) return reply.code(404).send({ error: 'catalog entry not found' })
+      await app.db.catalogCustomModel.delete({ where: { id: entry.id } })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'catalog.model.delete', entityType: 'CatalogCustomModel', entityId: entry.id, payload: { provider: entry.provider, model: entry.model, modality: entry.modality } })
+      return reply.code(204).send()
+    },
+  )
 
   app.get('/providers/connections', { preHandler: requirePermission('read') }, async request => {
     const auth = request.auth!
@@ -83,6 +192,10 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const existing = await app.db.providerConnection.findUnique({ where: { organizationId_name: { organizationId: auth.organizationId, name } } })
     if (existing) return reply.code(409).send({ error: 'a connection with this name already exists' })
 
+    // Seed from what the org actually sees: hidden models stay out, custom rows ride
+    // along. Curating the overlay once keeps every new connection from dragging in
+    // the vendor's whole list of rows the org will never bind.
+    const effectiveModels = mergeCatalog(catalog, await loadOverlay(app.db, auth.organizationId))?.models ?? []
     const connection = await app.db.providerConnection.create({
       data: {
         organizationId: auth.organizationId,
@@ -91,7 +204,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         baseUrl,
         encryptedSecret: encryptSecret(apiKey, app.config.masterKey),
         accessKeyEncrypted: accessKey ? encryptSecret(accessKey, app.config.masterKey) : null,
-        capabilities: { create: catalog.models.map(toCapabilityData) },
+        capabilities: { create: effectiveModels.map(toCapabilityData) },
       },
       include: { capabilities: true },
     })
@@ -194,49 +307,18 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const connection = await app.db.providerConnection.findFirst({ where: { id: request.params.connectionId, organizationId: auth.organizationId } })
       if (!connection) return reply.code(404).send({ error: 'connection not found' })
 
-      const model = request.body?.model?.trim()
-      if (!model) return reply.code(400).send({ error: 'model is required' })
-      if (model.length > 120) return reply.code(400).send({ error: 'model must be 120 characters or fewer' })
-      const modality = request.body?.modality
-      if (!isModelModality(modality)) return reply.code(400).send({ error: `modality must be one of: ${modelModalities.join(', ')}` })
-
-      const maxReferenceImages = request.body?.maxReferenceImages ?? 0
-      if (!Number.isInteger(maxReferenceImages) || maxReferenceImages < 0 || maxReferenceImages > MAX_ENTERED_REFERENCE_IMAGES) {
-        return reply.code(400).send({ error: `maxReferenceImages must be a whole number between 0 and ${MAX_ENTERED_REFERENCE_IMAGES}` })
-      }
-      const acceptsFirstFrame = Boolean(request.body?.acceptsFirstFrame)
-      const acceptsReferenceImages = Boolean(request.body?.acceptsReferenceImages)
-      // Refusing beats dropping: a row that quietly lost the flag the operator set would
-      // fail at generation time with a message about reference media, far from here.
-      // First frames stay a video dialect, but reference images are not: qwen-image-edit
-      // is an image model that draws its subject from approved asset sheets, so an image
-      // row may declare references — it just may not take a video's starting frame.
-      if (modality !== 'i2v' && modality !== 'r2v' && modality !== 'image' && (acceptsFirstFrame || acceptsReferenceImages || maxReferenceImages > 0)) {
-        return reply.code(400).send({ error: `first-frame and reference input describe video or image models, not a "${modality}" one` })
-      }
-      if (modality !== 'i2v' && modality !== 'r2v' && acceptsFirstFrame) {
-        return reply.code(400).send({ error: `a first frame is video conditioning, not something a "${modality}" model takes` })
-      }
-      const displayName = request.body?.displayName?.trim()
-      if (displayName && displayName.length > 120) return reply.code(400).send({ error: 'displayName must be 120 characters or fewer' })
+      const parsed = parseModelBody(request.body)
+      if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
 
       try {
         const capability = await app.db.modelCapability.create({
-          data: {
-            connectionId: connection.id,
-            model,
-            displayName: displayName || null,
-            modality,
-            acceptsFirstFrame,
-            acceptsReferenceImages,
-            maxReferenceImages,
-          },
+          data: { connectionId: connection.id, ...parsed.data },
         })
-        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.add', entityType: 'ModelCapability', entityId: capability.id, payload: { connectionId: connection.id, provider: connection.provider, model, modality } })
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.add', entityType: 'ModelCapability', entityId: capability.id, payload: { connectionId: connection.id, provider: connection.provider, model: capability.model, modality: capability.modality } })
         return reply.code(201).send(capability)
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-          return reply.code(409).send({ error: `model "${model}" is already configured on this connection for the "${modality}" modality` })
+          return reply.code(409).send({ error: `model "${parsed.data.model}" is already configured on this connection for the "${parsed.data.modality}" modality` })
         }
         throw error
       }
@@ -379,4 +461,101 @@ function toCapabilityData(model: CatalogModel) {
     maxReferenceImages: model.maxReferenceImages ?? 0,
     spec: model.spec === undefined ? undefined : (model.spec as Prisma.InputJsonValue),
   }
+}
+
+interface Overlay {
+  hidden: Array<{ provider: string; model: string }>
+  custom: Array<{ id: string; provider: string; model: string; displayName: string | null; modality: string; acceptsFirstFrame: boolean; acceptsReferenceImages: boolean; maxReferenceImages: number }>
+}
+
+/** The org's edits to the code-shipped catalogs, in one read. */
+async function loadOverlay(db: PrismaClient, organizationId: string): Promise<Overlay> {
+  const [hidden, custom] = await Promise.all([
+    db.catalogHidden.findMany({ where: { organizationId }, select: { provider: true, model: true } }),
+    db.catalogCustomModel.findMany({
+      where: { organizationId },
+      select: { id: true, provider: true, model: true, displayName: true, modality: true, acceptsFirstFrame: true, acceptsReferenceImages: true, maxReferenceImages: true },
+    }),
+  ])
+  return { hidden, custom }
+}
+
+interface OverlayRow extends CatalogModel {
+  source: 'official' | 'custom'
+  entryId?: string
+}
+
+interface EffectiveCatalog {
+  provider: string
+  label: string
+  defaultBaseUrl?: string
+  catalogVersion: string
+  requiresAccessKey?: boolean
+  models: OverlayRow[]
+}
+
+/**
+ * The view an org sees of one vendor catalog: official rows minus what was hidden,
+ * plus custom rows — a custom (provider, model, modality) shadows the official row
+ * it matches, so a stale official flag yields to the org's correction. Returns null
+ * when the org hid the vendor card itself.
+ */
+function mergeCatalog(catalog: ProviderCatalog, overlay: Overlay): EffectiveCatalog | null {
+  if (overlay.hidden.some(row => row.provider === catalog.provider && row.model === '')) return null
+  const hiddenModels = new Set(overlay.hidden.filter(row => row.provider === catalog.provider).map(row => row.model))
+  const customs = overlay.custom.filter(row => row.provider === catalog.provider)
+  const shadowed = new Set(customs.map(row => `${row.model}:${row.modality}`))
+  const official = catalog.models
+    .filter(model => !hiddenModels.has(model.model) && !shadowed.has(`${model.model}:${model.modality}`))
+    .map(model => ({ ...model, source: 'official' as const }))
+  const customRows = customs
+    .filter(row => !hiddenModels.has(row.model))
+    .map(row => ({
+      model: row.model,
+      displayName: row.displayName ?? row.model,
+      modality: row.modality as ModelModality,
+      acceptsFirstFrame: row.acceptsFirstFrame,
+      acceptsReferenceImages: row.acceptsReferenceImages,
+      maxReferenceImages: row.maxReferenceImages,
+      source: 'custom' as const,
+      entryId: row.id,
+    }))
+  return { ...catalog, models: [...official, ...customRows] }
+}
+
+type ParsedModelBody =
+  | { ok: false; error: string }
+  | { ok: true; data: { model: string; displayName: string | null; modality: ModelModality; acceptsFirstFrame: boolean; acceptsReferenceImages: boolean; maxReferenceImages: number } }
+
+/**
+ * One validator for every hand-entered model row, whether it lands on a connection
+ * or in the org's catalog overlay — the claims must stay equally narrow in both.
+ */
+function parseModelBody(body: ModelBody | undefined): ParsedModelBody {
+  const model = body?.model?.trim()
+  if (!model) return { ok: false, error: 'model is required' }
+  if (model.length > 120) return { ok: false, error: 'model must be 120 characters or fewer' }
+  const modality = body?.modality
+  if (!isModelModality(modality)) return { ok: false, error: `modality must be one of: ${modelModalities.join(', ')}` }
+
+  const maxReferenceImages = body?.maxReferenceImages ?? 0
+  if (!Number.isInteger(maxReferenceImages) || maxReferenceImages < 0 || maxReferenceImages > MAX_ENTERED_REFERENCE_IMAGES) {
+    return { ok: false, error: `maxReferenceImages must be a whole number between 0 and ${MAX_ENTERED_REFERENCE_IMAGES}` }
+  }
+  const acceptsFirstFrame = Boolean(body?.acceptsFirstFrame)
+  const acceptsReferenceImages = Boolean(body?.acceptsReferenceImages)
+  // Refusing beats dropping: a row that quietly lost the flag the operator set would
+  // fail at generation time with a message about reference media, far from here.
+  // First frames stay a video dialect, but reference images are not: qwen-image-edit
+  // is an image model that draws its subject from approved asset sheets, so an image
+  // row may declare references — it just may not take a video's starting frame.
+  if (modality !== 'i2v' && modality !== 'r2v' && modality !== 'image' && (acceptsFirstFrame || acceptsReferenceImages || maxReferenceImages > 0)) {
+    return { ok: false, error: `first-frame and reference input describe video or image models, not a "${modality}" one` }
+  }
+  if (modality !== 'i2v' && modality !== 'r2v' && acceptsFirstFrame) {
+    return { ok: false, error: `a first frame is video conditioning, not something a "${modality}" model takes` }
+  }
+  const displayName = body?.displayName?.trim()
+  if (displayName && displayName.length > 120) return { ok: false, error: 'displayName must be 120 characters or fewer' }
+  return { ok: true, data: { model, displayName: displayName || null, modality, acceptsFirstFrame, acceptsReferenceImages, maxReferenceImages } }
 }

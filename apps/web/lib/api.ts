@@ -68,6 +68,9 @@ export interface CatalogModel {
   acceptsReferenceImages?: boolean
   maxReferenceImages?: number
   spec?: Record<string, unknown>
+  /** 'custom' marks a row the org added itself; entryId keys its deletion. */
+  source?: 'official' | 'custom'
+  entryId?: string
 }
 
 export interface Catalog {
@@ -78,6 +81,12 @@ export interface Catalog {
   catalogVersion: string
   requiresAccessKey?: boolean
   models: CatalogModel[]
+}
+
+/** What this org hid from the catalogs, so the UI can offer one-click restore. */
+export interface CatalogHiddenInfo {
+  providers: Array<{ provider: string; label: string }>
+  models: Array<{ provider: string; model: string; displayName: string }>
 }
 
 export interface Capability {

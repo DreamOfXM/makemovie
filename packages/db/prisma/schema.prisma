@@ -228,6 +228,8 @@ model Organization {
   createdAt          DateTime             @default(now())
   auditEvents        AuditEvent[]
   capabilityBindings CapabilityBinding[]
+  catalogCustomModels CatalogCustomModel[]
+  catalogHidden       CatalogHidden[]
   members            OrganizationMember[]
   projects           Project[]
   providerConnections ProviderConnection[]
@@ -515,6 +517,39 @@ model PipelineConfig {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime @updatedAt
   projects    Project[]
+}
+
+/// The vendor catalog ships with the code and re-ships on every release, so an
+/// org can only hide an official row, never delete it. '' in `model` hides the
+/// vendor card itself; a model id hides every row filed under that id.
+model CatalogHidden {
+  id             String   @id @default(cuid())
+  organizationId String
+  provider       String
+  model          String
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider, model])
+}
+
+/// A model row the org adds because the vendor shipped it and the code catalog
+/// has not caught up. Same (provider, model, modality) as an official row means
+/// the custom one shadows it — the fix for a stale official flag.
+model CatalogCustomModel {
+  id                     String   @id @default(cuid())
+  organizationId         String
+  provider               String
+  model                  String
+  displayName            String?
+  modality               String
+  acceptsFirstFrame      Boolean  @default(false)
+  acceptsReferenceImages Boolean  @default(false)
+  maxReferenceImages     Int      @default(0)
+  createdAt              DateTime @default(now())
+  organization           Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider, model, modality])
 }
 
 enum CapabilitySlot {

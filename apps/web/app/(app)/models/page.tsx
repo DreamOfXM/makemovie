@@ -150,7 +150,7 @@ const ANCHOR_FALLBACK: Record<string, string> = {
           <BindingsPanel connections={connections} bindings={bindings} projectScope={projectParam} />
         </TabsContent>
         <TabsContent value="catalogs">
-          <CatalogsPanel catalogs={catalogs} />
+          <CatalogsPanel catalogs={catalogs} onChanged={catalogs.reload} />
         </TabsContent>
       </Tabs>
     </>
