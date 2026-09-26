@@ -17,6 +17,7 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
+import { apiErrorMessage } from '@/lib/api-error'
 
 const ALL = '__all__'
 const PAGE_SIZE = 25
@@ -64,7 +65,7 @@ export default function AuditPage() {
           return merged.size === current.length ? current : [...merged].sort()
         })
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : t('error.generic'))
+        setError(apiErrorMessage(cause, t))
       } finally {
         setLoading(false)
       }
@@ -86,7 +87,7 @@ export default function AuditPage() {
       const result = await api<{ pruned: number }>('/sessions/expired', { method: 'DELETE' })
       toast.success(t('audit.pruned', { count: result.pruned }))
     } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : t('error.generic'))
+      toast.error(apiErrorMessage(cause, t))
     } finally {
       setPruning(false)
     }
@@ -151,11 +152,13 @@ export default function AuditPage() {
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead>{t('audit.time')}</TableHead>
+                  <TableHead pin="left">{t('audit.time')}</TableHead>
                   <TableHead>{t('audit.action')}</TableHead>
                   <TableHead>{t('audit.entity')}</TableHead>
                   <TableHead>{t('audit.user')}</TableHead>
-                  <TableHead className="text-right">{t('audit.payload')}</TableHead>
+                  <TableHead className="text-right" pin="right">
+                    {t('audit.payload')}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -165,7 +168,7 @@ export default function AuditPage() {
                       className={cn('cursor-pointer', expanded === event.id && 'bg-muted/50')}
                       onClick={() => setExpanded(current => (current === event.id ? null : event.id))}
                     >
-                      <TableCell className="whitespace-nowrap">
+                      <TableCell className="whitespace-nowrap" pin="left">
                         <p>{formatDateTime(event.createdAt, locale)}</p>
                         <p className="text-subtle-foreground text-xs">{relativeTime(event.createdAt, locale)}</p>
                       </TableCell>
@@ -180,10 +183,13 @@ export default function AuditPage() {
                           {event.entityId}
                         </p>
                       </TableCell>
-                      <TableCell className="text-muted-foreground">
+                      {/* The actor is one of the log's four core dimensions (when/who/what/
+                          outcome), not a secondary detail — muted here left the whole
+                          table reading gray with only badges left carrying contrast. */}
+                      <TableCell>
                         {event.userEmail ?? <span className="italic">{t('audit.system')}</span>}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="text-right" pin="right">
                         <Button
                           type="button"
                           variant="ghost"
