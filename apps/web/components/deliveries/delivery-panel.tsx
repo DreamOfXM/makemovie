@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { toast } from 'sonner'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   CheckIcon,
   DownloadIcon,
@@ -162,7 +163,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
         setNotReadyReasons(reasons)
         toast.error(t('delivery.notReady'))
       } else {
-        toast.error(error instanceof Error ? error.message : t('error.generic'))
+        toast.error(apiErrorMessage(error, t))
       }
     } finally {
       setPackaging(false)
@@ -176,13 +177,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       toast.success(t('delivery.accepted'))
       reload()
     } catch (error) {
-      toast.error(
-        error instanceof ApiError && error.message === 'delivery:alreadyAccepted'
-          ? t('delivery.alreadyAccepted')
-          : error instanceof Error
-            ? error.message
-            : t('error.generic'),
-      )
+      toast.error(apiErrorMessage(error, t))
       reload()
     } finally {
       setAcceptingId(null)
@@ -216,7 +211,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       URL.revokeObjectURL(url)
       toast.success(t('delivery.videoDownloaded'))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDownloadingId(null)
     }
@@ -237,7 +232,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       URL.revokeObjectURL(url)
       toast.success(t('delivery.manifestDownloaded'))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDownloadingId(null)
     }
@@ -263,7 +258,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       URL.revokeObjectURL(url)
       toast.success(t('delivery.editListDownloaded'))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDownloadingId(null)
     }
@@ -283,6 +278,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
               <GuardedButton
                 action="episode:write"
                 size="sm"
+                variant="outline"
                 disabled={packaging}
                 onClick={() => void packageDelivery()}
               >
@@ -500,9 +496,12 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                   {manifest.composition.mimeType}
                   {manifest.composition.durationMs !== null && ` · ${formatDuration(manifest.composition.durationMs)}`}
                   {' · '}
-                  <span className="font-mono" title={manifest.composition.checksum}>
-                    {manifest.composition.checksum.slice(0, 12)}
-                  </span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="font-mono">{manifest.composition.checksum.slice(0, 12)}</span>
+                    </TooltipTrigger>
+                    <TooltipContent className="break-all">{`${t('delivery.checksum')} ${manifest.composition.checksum}`}</TooltipContent>
+                  </Tooltip>
                 </span>
                 {manifest.composition.tracks && (
                   manifest.composition.tracks.length === 0 ? (
@@ -516,9 +515,12 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                           {' · '}
                           <span className="font-mono break-all">{track.objectKey}</span>
                           <span className="text-muted-foreground"> · </span>
-                          <span className="text-muted-foreground font-mono" title={track.checksum}>
-                            {track.checksum.slice(0, 12)}
-                          </span>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="text-muted-foreground font-mono">{track.checksum.slice(0, 12)}</span>
+                            </TooltipTrigger>
+                            <TooltipContent className="break-all">{`${t('delivery.checksum')} ${track.checksum}`}</TooltipContent>
+                          </Tooltip>
                         </p>
                       ))}
                     </div>
@@ -639,8 +641,13 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                                   ? formatDuration(artifact.durationMs)
                                   : '—'}
                             </TableCell>
-                            <TableCell className="text-muted-foreground font-mono text-xs" title={artifact.checksum}>
-                              {artifact.checksum.slice(0, 12)}
+                            <TableCell className="text-muted-foreground font-mono text-xs">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span>{artifact.checksum.slice(0, 12)}</span>
+                                </TooltipTrigger>
+                                <TooltipContent className="break-all">{`${t('delivery.checksum')} ${artifact.checksum}`}</TooltipContent>
+                              </Tooltip>
                             </TableCell>
                           </TableRow>
                         ))}
@@ -679,9 +686,12 @@ function VersionRefValue({ reference }: { reference: ManifestVersionRef | null }
     <span className="flex flex-wrap items-center gap-2 text-xs">
       <span className="font-medium">v{reference.version}</span>
       <StatusBadge status={toneFor(reference.status)} label={t(`status.${toneFor(reference.status)}`)} />
-      <span className="text-muted-foreground font-mono" title={reference.checksum}>
-        {reference.checksum.slice(0, 12)}
-      </span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="text-muted-foreground font-mono">{reference.checksum.slice(0, 12)}</span>
+        </TooltipTrigger>
+        <TooltipContent className="break-all">{`${t('delivery.checksum')} ${reference.checksum}`}</TooltipContent>
+      </Tooltip>
     </span>
   )
 }
@@ -721,13 +731,7 @@ function RejectDialog({ delivery, onOpenChange, onDone }: RejectDialogProps) {
       })
       onDone()
     } catch (err) {
-      setError(
-        err instanceof ApiError && err.message === 'delivery:alreadyAccepted'
-          ? t('delivery.alreadyAccepted')
-          : err instanceof Error
-            ? err.message
-            : t('error.generic'),
-      )
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }

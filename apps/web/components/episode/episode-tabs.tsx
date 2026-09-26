@@ -20,15 +20,18 @@ const tabs: { id: EpisodeTab; labelKey: string; icon: typeof FilmIcon }[] = [
 export function EpisodeTabs({ value, onChange }: { value: EpisodeTab; onChange(next: EpisodeTab): void }) {
   const { t } = useI18n()
   return (
-    <div role="tablist" aria-label={t('episode.tabs')} className="bg-muted/40 inline-flex items-center gap-0.5 rounded-lg border p-0.5">
+    <div role="tablist" aria-label={t('episode.tabs')} className="border-border/70 bg-muted/40 inline-flex items-center gap-0.5 rounded-lg border p-0.5">
       {tabs.map(tab => (
         <Button
           key={tab.id}
           role="tab"
+          variant="ghost"
           aria-selected={value === tab.id}
           size="sm"
-          variant={value === tab.id ? 'secondary' : 'ghost'}
-          className={cn('h-7 rounded-md text-xs', value === tab.id && 'text-foreground font-medium')}
+          className={cn(
+            'h-7 rounded-md border px-2.5 text-xs font-medium whitespace-nowrap transition-colors [&_svg]:size-3.5',
+            value === tab.id ? 'border-primary/70 bg-primary/15 text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground',
+          )}
           onClick={() => onChange(tab.id)}
         >
           <tab.icon />

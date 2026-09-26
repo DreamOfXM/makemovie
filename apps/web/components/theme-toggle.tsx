@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const themeOptions = [
   { value: 'light', icon: SunIcon, labelKey: 'theme.light' },
@@ -30,14 +31,21 @@ export function ThemeToggle() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative" aria-label={t('theme.label')} title={t('theme.label')}>
-          {/* Both icons ship in the markup so the trigger never mismatches the
-              server render; CSS picks the one for the active color scheme. */}
-          <SunIcon className="size-4.5 scale-100 rotate-0 transition-all dark:scale-90 dark:-rotate-90" />
-          <MoonIcon className="absolute size-4.5 scale-90 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="relative" aria-label={t('theme.label')}>
+              {/* Both icons ship in the markup so the trigger never mismatches the
+                  server render; CSS picks the one for the active color scheme. */}
+              <SunIcon className="size-4.5 scale-100 rotate-0 transition-all dark:scale-90 dark:-rotate-90" />
+              <MoonIcon className="absolute size-4.5 scale-90 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {t('theme.label')} · {t('theme.hint')}
+        </TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" className="min-w-[280px]">
         <DropdownMenuLabel>{t('theme.label')}</DropdownMenuLabel>
         

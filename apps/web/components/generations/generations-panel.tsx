@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   BanIcon,
   CaptionsIcon,
@@ -28,8 +29,8 @@ import {
   type Storyboard,
 } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
-import { pipelineGateMessage } from '@/lib/pipeline-errors'
 import { HelpHint } from '@/components/ui/help-hint'
+import { Hint } from '@/components/ui/hint'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { cn, formatDateTime, formatDuration } from '@/lib/utils'
@@ -52,7 +53,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
-import { ArtifactMedia, useArtifactUrl } from '@/components/generations/artifact-media'
+import { ArtifactLoadError, ArtifactMedia, useArtifactUrl } from '@/components/generations/artifact-media'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -64,14 +65,18 @@ type ShotStage = 'IMAGE' | 'VIDEO' | 'AUDIO'
 /** Stages this panel owns. SCRIPT/ASSET/STORYBOARD live in their own panels' triggers. */
 const MEDIA_STAGES: readonly GenerationStage[] = ['IMAGE', 'VIDEO', 'AUDIO', 'MUSIC']
 
-/** Maps the pipeline's SCREAMING_SNAKE statuses onto the workflow tones StatusBadge already renders. */
+/**
+ * Maps the pipeline's SCREAMING_SNAKE statuses onto the workflow tones StatusBadge already renders.
+ * 失败与阻塞同红：琥珀在本产品里只有一个意思——等你审（镜头卡、放映条、生命周期条同规则）。
+ * 批次 rollup 的 BLOCKED 就是「有任务失败需要人」，不能与同一行末尾的红色「N 个失败」分成两色。
+ */
 const statusTone: Record<string, string> = {
   QUEUED: 'ready',
   PENDING: 'draft',
   RUNNING: 'running',
   SUCCEEDED: 'completed',
   FAILED: 'blocked',
-  BLOCKED: 'needs_review',
+  BLOCKED: 'blocked',
   CANCELLED: 'cancelled',
 }
 
@@ -174,7 +179,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
         setPendingPlan({ stage: next, regenerate: isRegenerate, plan })
       }
     } catch (error) {
-      toast.error(pipelineGateMessage(error, t, locale) ?? (error instanceof Error ? error.message : t('error.generic')))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setTriggering(false)
       setRegenerating(false)
@@ -196,7 +201,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       )
       reload()
     } catch (error) {
-      toast.error(pipelineGateMessage(error, t, locale) ?? (error instanceof Error ? error.message : t('error.generic')))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setTriggering(false)
       setRegenerating(false)
@@ -217,7 +222,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       reload()
       await new Promise(resolve => setTimeout(resolve, 900))
     } catch (error) {
-      toast.error(pipelineGateMessage(error, t, locale) ?? (error instanceof Error ? error.message : t('error.generic')))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setRetryingStage(null)
     }
@@ -261,7 +266,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       }
       toast.success(t('generations.regenAllDone'))
     } catch (error) {
-      toast.error(pipelineGateMessage(error, t, locale) ?? (error instanceof Error ? error.message : t('error.generic')))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setRegenAllStage(null)
       reload()
@@ -276,7 +281,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       toast.success(t('generations.composeStarted'))
       reload()
     } catch (error) {
-      toast.error(pipelineGateMessage(error, t, locale) ?? (error instanceof Error ? error.message : t('error.generic')))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setComposing(false)
     }
@@ -289,7 +294,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       toast.success(t('generations.taskCancelled'))
       reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setCancellingId(null)
     }
@@ -306,11 +311,20 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       toast.success(t('generations.batchStopped', { count: result.cancelled }))
       reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setStoppingBatchId(null)
     }
   }
+
+  // 缺权限时这一枚与旁边两枚走同一套表达（禁用 + 说明），不是凭空消失：
+  // 面板那句说明指向「更多」，入口不见了就等于让读者去找一个不存在的按钮。
+  const moreLabel = (
+    <>
+      {regenAllStage ? <LoaderCircleIcon className="animate-spin" /> : <MoreHorizontalIcon />}
+      {regenAllStage ? t(`generations.regenAllStage.${regenAllStage}`) : t('generations.more')}
+    </>
+  )
 
   return (
     <>
@@ -350,7 +364,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
               <div className="flex flex-wrap items-center gap-2">
                 <StageMenuButton
                   actionIcon={<SparklesIcon />}
-                  variant="default"
+                  variant="outline"
                   busy={triggering}
                   busyLabel={t('generations.triggering')}
                   idleLabel={t('generations.trigger')}
@@ -368,14 +382,11 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                   onSelect={next => void requestTrigger(next, true)}
                 />
                 <HelpHint text={t('generations.regenerateHint')} />
-                {can('generation:trigger') && (
+                {can('generation:trigger') ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="outline" size="sm">
-                        {regenAllStage ? <LoaderCircleIcon className="animate-spin" /> : <MoreHorizontalIcon />}
-                        {regenAllStage
-                          ? t(`generations.regenAllStage.${regenAllStage}`)
-                          : t('generations.more')}
+                        {moreLabel}
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-80">
@@ -396,6 +407,10 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                ) : (
+                  <GuardedButton action="generation:trigger" variant="outline" size="sm">
+                    {moreLabel}
+                  </GuardedButton>
                 )}
                 <Button variant="outline" size="sm" onClick={reload} disabled={generations.loading}>
                   <RefreshCwIcon className={cn(generations.loading && 'animate-spin')} />
@@ -443,6 +458,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                         storyboards={storyboards}
                         cancellingId={cancellingId}
                         defaultOpen
+                        qcThreshold={generations.data.limits?.qcThreshold}
                         onCancel={cancelTask}
                         onRetry={() => void retryFailed(batch.stage)}
                         retrying={retryingStage === batch.stage}
@@ -504,6 +520,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                               storyboards={storyboards}
                               cancellingId={cancellingId}
                               defaultOpen={false}
+                              qcThreshold={generations.data.limits?.qcThreshold}
                               onCancel={cancelTask}
                               onRetry={() => void retryFailed(batch.stage)}
                               retrying={retryingStage === batch.stage}
@@ -670,17 +687,18 @@ function ErrorCell({ error }: { error: string | null }) {
   const [expanded, setExpanded] = useState(false)
   if (!error) return <span className="text-muted-foreground text-xs">—</span>
   return (
-    <button
-      type="button"
-      className="text-destructive hover:text-destructive/80 block max-w-72 cursor-pointer text-left text-xs"
-      title={expanded ? t('generations.collapseError') : t('generations.expandError')}
-      onClick={() => setExpanded(value => !value)}
-    >
-      <span className={expanded ? 'block break-all whitespace-pre-wrap' : 'line-clamp-2 break-all'}>
-        {error}
-      </span>
-      {!expanded && <span className="text-destructive/60 ml-1 underline underline-offset-2">{t('generations.expand')}</span>}
-    </button>
+    <Hint text={expanded ? t('generations.collapseError') : t('generations.expandError')}>
+      <button
+        type="button"
+        className="text-destructive hover:text-destructive/80 block max-w-72 cursor-pointer text-left text-xs"
+        onClick={() => setExpanded(value => !value)}
+      >
+        <span className={expanded ? 'block break-all whitespace-pre-wrap' : 'line-clamp-2 break-all'}>
+          {error}
+        </span>
+        {!expanded && <span className="text-destructive/60 ml-1 underline underline-offset-2">{t('generations.expand')}</span>}
+      </button>
+    </Hint>
   )
 }
 
@@ -734,6 +752,8 @@ interface BatchCardProps {
   cancellingId: string | null
   /** Only the newest batch starts open; older runs collapse to one line each. */
   defaultOpen: boolean
+  /** 质检线由后端随批次下发；缺省=还不知道，那就不涂红绿。 */
+  qcThreshold?: number
   onCancel(task: GenerationTask): Promise<void>
   /** Re-queue just this batch's FAILED tasks (idempotent trigger path). */
   onRetry(): void
@@ -745,7 +765,7 @@ interface BatchCardProps {
   stopping: boolean
 }
 
-function BatchCard({ batch, storyboards, cancellingId, defaultOpen, onCancel, onRetry, retrying, onStop, stopping }: BatchCardProps) {
+function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold, onCancel, onRetry, retrying, onStop, stopping }: BatchCardProps) {
   const { t, locale } = useI18n()
   const { api } = useSession()
   const [open, setOpen] = useState(defaultOpen)
@@ -846,9 +866,11 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, onCancel, on
                 {translateEnum(t, 'generations.stage', task.stage)}
                 {/* A batch row means nothing without the shot it was made for. */}
                 {task.storyboardId && (
-                  <span className="text-muted-foreground ml-1 font-normal" title={task.storyboardId}>
-                    #{storyboardNumber(task.storyboardId, storyboards)}
-                  </span>
+                  <Hint text={task.storyboardId}>
+                    <span className="text-muted-foreground ml-1 font-normal">
+                      #{storyboardNumber(task.storyboardId, storyboards)}
+                    </span>
+                  </Hint>
                 )}
               </TableCell>
               <TableCell>
@@ -878,19 +900,30 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, onCancel, on
               </TableCell>
               <TableCell>
                 {task.qc?.kind === 'visual-audit' && task.qc.score !== null ? (
-                  <span
-                    className={cn(
-                      'text-xs font-medium tabular-nums',
-                      task.qc.score >= 0.7 ? 'text-success' : 'text-destructive',
-                    )}
-                    title={`${task.qc.kind} · ${task.qc.status}`}
+                  <Hint
+                    text={
+                      qcThreshold === undefined
+                        ? `${task.qc.kind} · ${task.qc.status}`
+                        : `${task.qc.kind} · ${task.qc.status} · ${t('generations.qcLine', { line: Math.round(qcThreshold * 100) })}`
+                    }
                   >
-                    {Math.round(task.qc.score * 100)}%
-                  </span>
+                    <span
+                      className={cn(
+                        'text-xs font-medium tabular-nums',
+                        qcThreshold === undefined
+                          ? 'text-foreground'
+                          : task.qc.score >= qcThreshold
+                            ? 'text-success'
+                            : 'text-destructive',
+                      )}
+                    >
+                      {Math.round(task.qc.score * 100)}%
+                    </span>
+                  </Hint>
                 ) : task.qc ? (
-                  <span className="text-muted-foreground text-xs" title={`${task.qc.kind} · ${task.qc.status}`}>
-                    {t('generations.qcUnaudited')}
-                  </span>
+                  <Hint text={`${task.qc.kind} · ${task.qc.status}`}>
+                    <span className="text-muted-foreground text-xs">{t('generations.qcUnaudited')}</span>
+                  </Hint>
                 ) : (
                   <span className="text-muted-foreground text-xs">—</span>
                 )}
@@ -911,15 +944,16 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, onCancel, on
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-0.5">
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={t('generations.logs')}
-                    title={t('generations.logs')}
-                    onClick={() => void openLogs(task)}
-                  >
-                    <ScrollTextIcon />
-                  </Button>
+                  <Hint text={t('generations.logs')}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t('generations.logs')}
+                      onClick={() => void openLogs(task)}
+                    >
+                      <ScrollTextIcon />
+                    </Button>
+                  </Hint>
                   {task.status === 'QUEUED' && (
                     <GuardedButton
                       action="generation:trigger"
@@ -1046,7 +1080,7 @@ function EpisodeTracksCard({
         <CardDescription>{t('generations.episodeTracksHint')}</CardDescription>
         {composition === null || composition.status !== 'RUNNING' ? (
           <CardAction>
-            <GuardedButton action="generation:trigger" size="sm" disabled={composing} onClick={onCompose}>
+            <GuardedButton action="generation:trigger" variant="outline" size="sm" disabled={composing} onClick={onCompose}>
               <ClapperboardIcon />
               {composing ? t('generations.composing') : t('generations.compose')}
             </GuardedButton>
@@ -1108,8 +1142,9 @@ function TrackAbsent({ children }: { children: ReactNode }) {
 /** The master is the one artifact worth playing at full width; its blob URL also downloads. */
 function MasterVideo({ artifact, subtitleArtifact }: { artifact: GenerationArtifact; subtitleArtifact: GenerationArtifact | null }) {
   const { t } = useI18n()
-  const href = useArtifactUrl(artifact.downloadUrl)
+  const { url: href, failed, reload } = useArtifactUrl(artifact.downloadUrl)
   const vttUrl = useSrtAsVtt(subtitleArtifact?.downloadUrl ?? null)
+  if (failed) return <ArtifactLoadError className="max-w-80" onRetry={reload} />
   if (!href) return <Skeleton className="h-44 w-full max-w-80 rounded-lg" />
   return (
     <div className="flex flex-wrap items-start gap-3">

@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'reac
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   ArrowLeftIcon,
   Building2Icon,
@@ -121,10 +122,11 @@ function OrgSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="gap-2" disabled={busy}>
-          <Building2Icon className="text-muted-foreground" />
-          <span className="max-w-40 truncate">{current?.organizationName ?? '—'}</span>
-          <ChevronDownIcon className="text-muted-foreground" />
+        {/* Button 基础类带 shrink-0，390px 下它会把头像顶出屏（整页横向滚动）——这里必须显式允许收缩 */}
+        <Button variant="outline" size="sm" className="min-w-0 max-w-40 shrink gap-2" disabled={busy}>
+          <Building2Icon className="text-muted-foreground shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{current?.organizationName ?? '—'}</span>
+          <ChevronDownIcon className="text-muted-foreground shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-72">
@@ -139,7 +141,7 @@ function OrgSwitcher() {
                 await switchOrganization(membership.organizationId)
                 toast.success(t('org.switched', { name: membership.organizationName }))
               } catch (error) {
-                toast.error(error instanceof Error ? error.message : t('error.generic'))
+                toast.error(apiErrorMessage(error, t))
               } finally {
                 setBusy(false)
               }
@@ -335,12 +337,25 @@ function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: Si
         </div>
       </nav>
 
-      {!collapsed && (
+      {!collapsed && me && (
         <div className="space-y-2">
           <Separator />
-          <div className="flex items-center justify-between gap-2 px-2 pt-1">
-            <span className="text-muted-foreground text-xs">{t('org.role')}</span>
-            <Badge variant="outline">{t(`role.${role ?? 'VIEWER'}`)}</Badge>
+          {/* 头像跨两行，用户名与角色各占一行；徽章跟在第二行末尾 —— 原来的
+              justify-between 把它甩到容器右端，中间空出 150px，读起来像两个控件。 */}
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 px-2 pt-1">
+            <span
+              aria-hidden
+              className="bg-primary/10 text-primary row-span-2 flex size-[26px] shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+            >
+              {initials(me.user.email, me.user.name)}
+            </span>
+            <p className="truncate text-xs font-medium">{me.user.name || me.user.email}</p>
+            <p className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px]">
+              {t('org.role')}
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
+                {t(`role.${role ?? 'VIEWER'}`)}
+              </Badge>
+            </p>
           </div>
         </div>
       )}

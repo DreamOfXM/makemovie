@@ -1,10 +1,10 @@
 'use client'
 
-import { Suspense, useCallback, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useRouter } from 'next/navigation'
 import { ArrowRightIcon, BoxesIcon, CableIcon, ListChecksIcon, RadioTowerIcon, RefreshCwIcon } from 'lucide-react'
-import type { Binding, Catalog, Connection } from '@/lib/api'
+import type { Binding, CallEvidenceMap, Catalog, Connection } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -20,6 +20,47 @@ import { ReadinessPanel } from '@/components/models/readiness-panel'
 type ModelsTab = 'readiness' | 'connections' | 'bindings' | 'catalogs'
 
 const MODELS_TABS: readonly ModelsTab[] = ['readiness', 'connections', 'bindings', 'catalogs']
+
+/**
+ * Drives the horizontal tab rail on narrow screens: reports whether a tab is
+ * still hiding past the right edge (so the amber hint band answers that question
+ * instead of decorating it), and keeps the active tab inside the viewport when
+ * the page loads or the tab changes from a sidebar link. Container queries on
+ * scroll position would do the first part in CSS, but they do not match in the
+ * browsers this ships to.
+ */
+function useTabRail(activeTab: string) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [more, setMore] = useState(false)
+
+  useEffect(() => {
+    const rail = ref.current
+    if (!rail) return
+
+    const active = rail.querySelector<HTMLElement>(`[data-slot='tabs-trigger'][data-state='active']`)
+    if (active) {
+      // A 24px margin on the inner edge: the next tab stays clipped, which reads
+      // as "there is more to scroll" better than any hint text.
+      const peek = 24
+      const rr = rail.getBoundingClientRect()
+      const ar = active.getBoundingClientRect()
+      if (ar.left < rr.left) rail.scrollLeft -= rr.left - ar.left + peek
+      else if (ar.right > rr.right - peek) rail.scrollLeft += ar.right - rr.right + peek
+    }
+
+    const measure = () => setMore(rail.scrollLeft + rail.clientWidth < rail.scrollWidth - 1)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(rail)
+    rail.addEventListener('scroll', measure, { passive: true })
+    return () => {
+      ro.disconnect()
+      rail.removeEventListener('scroll', measure)
+    }
+  }, [activeTab])
+
+  return { ref, more }
+}
 
 export default function ModelsPage() {
   // The scope lives in the URL (?tab=bindings&project=…), so sidebar links
@@ -98,6 +139,12 @@ const ANCHOR_FALLBACK: Record<string, string> = {
   const loadCatalogs = useCallback(() => api<Catalog[]>('/providers/catalogs'), [api])
   const catalogs = useAsync<Catalog[]>(loadCatalogs, [])
 
+  // 就绪度要说「现在跑不跑得通」，只有真实调用履历能回答；探测时间戳不会自己变红。
+  const loadCallEvidence = useCallback(() => api<CallEvidenceMap>('/providers/call-evidence'), [api, organizationId])
+  const callEvidence = useAsync<CallEvidenceMap>(loadCallEvidence, {})
+
+  const rail = useTabRail(tab)
+
   return (
     <>
       <PageHeader
@@ -111,6 +158,7 @@ const ANCHOR_FALLBACK: Record<string, string> = {
               connections.reload()
               bindings.reload()
               catalogs.reload()
+              callEvidence.reload()
             }}
           >
             <RefreshCwIcon />
@@ -122,26 +170,34 @@ const ANCHOR_FALLBACK: Record<string, string> = {
       <FlowGuide onGoto={gotoReveal} />
 
       <Tabs value={tab} onValueChange={value => setTab(value as ModelsTab)}>
-        <TabsList>
-          <TabsTrigger value="readiness">
-            <ListChecksIcon />
-            {t('models.tab.readiness')}
-          </TabsTrigger>
-          <TabsTrigger value="connections">
-            <CableIcon />
-            {t('models.tab.connections')}
-          </TabsTrigger>
-          <TabsTrigger value="bindings">
-            <RadioTowerIcon />
-            {t('models.tab.bindings')}
-          </TabsTrigger>
-          <TabsTrigger value="catalogs">
-            <BoxesIcon />
-            {t('models.tab.catalogs')}
-          </TabsTrigger>
-        </TabsList>
+        <div className="tab-rail-hint" data-more={rail.more ? '1' : '0'}>
+          <TabsList ref={rail.ref} className="tab-rail w-full justify-start rounded-none border-b bg-transparent px-0">
+            <TabsTrigger value="readiness">
+              <ListChecksIcon />
+              {t('models.tab.readiness')}
+            </TabsTrigger>
+            <TabsTrigger value="connections">
+              <CableIcon />
+              {t('models.tab.connections')}
+            </TabsTrigger>
+            <TabsTrigger value="bindings">
+              <RadioTowerIcon />
+              {t('models.tab.bindings')}
+            </TabsTrigger>
+            <TabsTrigger value="catalogs">
+              <BoxesIcon />
+              {t('models.tab.catalogs')}
+            </TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="readiness">
-          <ReadinessPanel connections={connections} bindings={bindings} catalogs={catalogs.data} onGoto={setTab} />
+          <ReadinessPanel
+            connections={connections}
+            bindings={bindings}
+            catalogs={catalogs.data}
+            callEvidence={callEvidence.data}
+            onGoto={setTab}
+          />
         </TabsContent>
         <TabsContent value="connections">
           <ConnectionsPanel connections={connections} catalogs={catalogs.data} bindings={bindings} onManageDefaults={() => setTab('bindings')} />
@@ -159,6 +215,10 @@ const ANCHOR_FALLBACK: Record<string, string> = {
 
 function FlowGuide({ onGoto }: { onGoto: (tab: 'connections' | 'bindings', anchor?: string) => void }) {
   const { t } = useI18n()
+  const { can } = useSession()
+  // Three of the four steps are ADMIN-only writes. Left visible, they are cards that
+  // jump a REVIEWER or VIEWER onto a panel where every control is greyed out.
+  if (!can('providers:manage') && !can('bindings:manage')) return null
   const steps = [
     { text: t('models.flow.step1'), tab: 'connections' as const, tabLabel: t('models.flow.link1'), anchor: 'connections-panel' },
     { text: t('models.flow.step2'), tab: 'connections' as const, tabLabel: t('models.flow.link2'), anchor: 'probe-first' },

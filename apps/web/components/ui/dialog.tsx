@@ -46,7 +46,10 @@ function DialogContent({
         data-slot="dialog-content"
         className={cn(
           'bg-card data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
-          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-xl border p-6 shadow-overlay outline-none',
+          // [&>*]:min-w-0：grid 子项默认 min-width:auto，会被一行不换行的等宽文件名顶宽，
+          // 390 屏上整个弹窗比视口还宽、右侧内容直接被裁掉。弹窗子项一律允许收缩，
+          // 超长文件名交给 truncate 省略。
+          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-xl border p-6 shadow-overlay outline-none [&>*]:min-w-0',
           'sm:max-w-lg',
           className,
         )}

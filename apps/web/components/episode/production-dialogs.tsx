@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { ArrowRightIcon } from 'lucide-react'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   canTransition,
   contentLocales,
@@ -19,6 +20,16 @@ import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -111,7 +122,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
         onDone('rename', name)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }
@@ -258,6 +269,61 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   )
 }
 
+export interface ProjectDeleteDialogProps {
+  project: Project | null
+  busy: boolean
+  onOpenChange(open: boolean): void
+  onConfirm(): void
+}
+
+/**
+ * 删除项目的闸门只有一份。列表页和详情页各写过一遍确认层，其中一处漏了「输入项目名」，
+ * 于是同一个不可逆动作有两个摩擦系数，从列表页删反而更快。
+ */
+export function ProjectDeleteDialog({ project, busy, onOpenChange, onConfirm }: ProjectDeleteDialogProps) {
+  const { t } = useI18n()
+  const [confirm, setConfirm] = useState('')
+  useEffect(() => {
+    if (project === null) setConfirm('')
+  }, [project])
+  const name = project?.name ?? '\u0000'
+  return (
+    <AlertDialog open={project !== null} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{t('projects.deleteTitle')}</AlertDialogTitle>
+          <AlertDialogDescription>{t('projects.deleteBody', { name: project?.name ?? '' })}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="grid gap-2">
+          <label className="text-sm font-medium" htmlFor="project-delete-confirm">
+            {t('projects.deleteConfirmLabel')}
+          </label>
+          <Input
+            id="project-delete-confirm"
+            value={confirm}
+            placeholder={project?.name}
+            autoComplete="off"
+            onChange={event => setConfirm(event.target.value)}
+          />
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>{t('common.cancel')}</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            disabled={busy || confirm.trim() !== name}
+            onClick={event => {
+              event.preventDefault()
+              onConfirm()
+            }}
+          >
+            {busy ? t('common.loading') : t('common.delete')}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
 export interface EpisodeDialogProps {
   open: boolean
   projectId: string | null
@@ -292,7 +358,7 @@ export function EpisodeDialog({ open, projectId, nextNumber, onOpenChange, onDon
       await createEpisode(api, projectId, { number, title })
       onDone(number)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }
@@ -420,7 +486,7 @@ export function StoryboardDialog({ state, episodeId, onOpenChange, onDone }: Sto
         onDone('create', form.number)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }
@@ -585,7 +651,7 @@ export function StatusDialog({ storyboard, onOpenChange, onDone }: StatusDialogP
       })
       onDone(target)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }

@@ -1,4 +1,4 @@
-import type { ContentLocale, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
+import type { ContentLocale, FailureKind, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
 
 function resolveApiBase(): string {
   const configured = process.env.NEXT_PUBLIC_API_URL
@@ -135,6 +135,18 @@ export interface ProbeResponse {
   results: ProbeResult[]
 }
 
+/** What one (provider, model) pair has actually done on this org's account. */
+export interface CallEvidence {
+  ok: number
+  failed: number
+  lastStatus: 'SUCCEEDED' | 'FAILED'
+  lastAt: string
+  lastKind: FailureKind
+}
+
+/** Keyed by `callEvidenceKey`, i.e. `"<provider>|<model>"`. */
+export type CallEvidenceMap = Record<string, CallEvidence>
+
 export interface Binding {
   id: string
   slot: string
@@ -222,6 +234,16 @@ export interface Project {
   episodes?: ProjectEpisodeSummary[]
 }
 
+/** How far an episode has actually got, tallied server-side over its generation
+ *  tasks. Counts shots, not tasks: a re-run replaces a shot's frame rather than
+ *  adding a second one. */
+export interface EpisodeProgress {
+  frames: number
+  videos: number
+  composed: number
+  delivered: number
+}
+
 export interface Episode {
   id: string
   projectId: string
@@ -235,6 +257,8 @@ export interface Episode {
   storyboards?: Storyboard[]
   /** Statuses of this episode's source versions, so lists can flag drafts awaiting review. */
   sourceVersions?: { status: string }[]
+  /** Only the project's episode list carries this; a single-episode fetch leaves it undefined. */
+  progress?: EpisodeProgress
 }
 
 export interface StoryboardAssetLink {
@@ -250,6 +274,12 @@ export interface StoryboardAssetDto {
   status: string
   role: string
 }
+
+/**
+ * 这一镜成片里听到什么。null = 未选，按镜型默认（有台词=只用配音，无台词=只用原声）。
+ * 与 packages/db 的 AudioSource 枚举同名同集，改名要两处一起改。
+ */
+export type ShotAudioSource = 'VOICE' | 'NATIVE' | 'VOICE_NATIVE' | 'IMPORTED'
 
 export interface Storyboard {
   id: string
@@ -273,6 +303,14 @@ export interface Storyboard {
   continuityIn: string
   continuityOut: string
   status: DbWorkflowStatus
+  /** Which of this shot's succeeded clips the human pinned; null means the selection gate is still open. */
+  selectedVideoArtifactId?: string | null
+  /** 人给这一镜选的声音来源；null = 未选，走镜型默认。 */
+  audioSource?: ShotAudioSource | null
+  /** 这一镜导入的配音（人工素材，不挂在任何生成任务上）。 */
+  importedVoice?: GenerationArtifact | null
+  /** 这一镜导入的环境音：垫在配音底下的氛围底，与声音来源那一档正交。 */
+  importedAmbience?: GenerationArtifact | null
   assets?: StoryboardAssetLink[]
   firstFrame?: GenerationArtifact | null
   video?: GenerationArtifact | null
@@ -542,10 +580,14 @@ export interface GenerationArtifact {
   id: string
   mimeType: string
   objectKey: string
+  /** 这份产物是同一对象的第几版;历史栏的「v2」读它,不在前端数列表。 */
+  version: number
   width: number | null
   height: number | null
   durationMs: number | null
   downloadUrl: string
+  /** 人工导入音频的原始文件名；生成产物为 null。 */
+  filename?: string | null
 }
 
 /** One succeeded VIDEO version of a shot: the selection gate's raw material. */
@@ -569,6 +611,8 @@ export interface ShotboardShot {
   durationMs: number
   description: string
   dialogue: string
+  /** 烧进画面的字幕文本；null = 沿用 dialogue。只有导入音频才会需要改它。 */
+  subtitleText: string | null
   speaker: string | null
   sourceExcerpt: string
   continuityIn: string
@@ -583,11 +627,16 @@ export interface ShotboardShot {
   inflight: string[]
   qc: { kind: string; status: string; score: number | null }[]
   selectedVideoArtifactId: string | null
+  audioSource: ShotAudioSource | null
+  importedVoice: GenerationArtifact | null
+  importedAmbience: GenerationArtifact | null
   videoCandidates: ShotVideoCandidate[]
   usage: { inputUnits: number; outputUnits: number; models: string[]; calls: number } | null
   /** 放映条与预映共用的占位裁决:钦定成片 > 成功片段 > 在产 > 仅分镜图 > 空。 */
   slot: 'chosen' | 'video' | 'running' | 'frame' | 'empty'
   attention: string[]
+  /** 这件事从什么时候开始是你的：来自产物落地/失败/人推进状态的真时间戳，无从取就为 null。 */
+  waitingSince: string | null
 }
 
 /** One row of the cast block: the asset's own dossier plus where it appears. */
@@ -611,7 +660,7 @@ export interface ShotboardResponse {
   status: string
   shots: ShotboardShot[]
   assets: ShotboardCastAsset[]
-  assetsPending: { id: string; kind: string; name: string; status: string }[]
+  assetsPending: { id: string; kind: string; name: string; status: string; waitingSince: string | null }[]
 }
 
 export interface GenerationTask {
@@ -628,6 +677,9 @@ export interface GenerationTask {
   updatedAt: string
   artifacts: GenerationArtifact[]
   qc: GenerationQc | null
+  /** 每次尝试的质检分，最新在前。最后一次不等于最高一次，
+   * 「连抽 3 次 · 最高 64 分」这句话只有这个全量列表撑得起。 */
+  scores: number[]
   /** Why the winning attempt had to retry: rejected candidates and reference-image
    * degradations kept on the succeeded task. Raw vendor text, never translated. */
   retryTrace: {
@@ -680,6 +732,8 @@ export interface EpisodeComposition {
 export interface GenerationsResponse {
   batches: GenerationBatch[]
   composition: EpisodeComposition | null
+  /** 质检线与重试上限由后端下发:界面自己写死一份,worker 一改阈值界面就开始说谎。 */
+  limits?: { qcThreshold: number }
 }
 
 /** One stage × provider × model bucket of the usage ledger. Physical units only:
@@ -692,6 +746,9 @@ export interface UsageRow {
   taskCount: number
   entryCount: number
   retriedTaskCount: number
+  /** Tasks that ended FAILED on this provider+model. The ledger never records a failure, so
+   * this comes off the task table and counts only what a model is attributable to. */
+  failedTaskCount: number
   inputUnits: number
   outputUnits: number
   binding: { slot: string; connectionId: string; connectionName: string; scope: 'project' | 'organization' } | null
@@ -708,7 +765,7 @@ export interface UsageProjectRow {
 
 export interface UsageReport {
   rows: UsageRow[]
-  total: { taskCount: number; entryCount: number; retriedTaskCount: number; inputUnits: number; outputUnits: number }
+  total: { taskCount: number; entryCount: number; retriedTaskCount: number; failedTaskCount: number; inputUnits: number; outputUnits: number }
   /** Space-scope reports only: the totals decomposed per project. */
   byProject?: UsageProjectRow[]
   ungrouped?: { entryCount: number; inputUnits: number; outputUnits: number }

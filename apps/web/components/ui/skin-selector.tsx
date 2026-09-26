@@ -13,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 interface SkinOption {
   value: string
@@ -63,11 +64,18 @@ export function SkinSelector() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative" aria-label={t('skin.label')}>
-          <PaletteIcon className="size-4.5" />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="relative" aria-label={t('skin.label')}>
+              <PaletteIcon className="size-4.5" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {t('skin.label')} · {t('skin.hint')}
+        </TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" className="min-w-[280px]">
         <DropdownMenuLabel>{t('skin.label')}</DropdownMenuLabel>
         <DropdownMenuSeparator />

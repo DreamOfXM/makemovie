@@ -17,7 +17,15 @@ function CardHeader({ className, ...props }: React.ComponentProps<'div'>) {
       data-slot="card-header"
       className={cn(
         '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-2 px-6',
-        'has-data-[slot=card-action]:grid-cols-[1fr_auto] [.border-b]:pb-6',
+        // Two columns only once the card itself is wide enough. A 1fr track also
+        // refuses to shrink below the title's min-content, so without minmax(0,1fr)
+        // a long title pushes the action column off the right edge of the page.
+        'has-data-[slot=card-action]:@lg/card-header:grid-cols-[minmax(0,1fr)_auto] [.border-b]:pb-6',
+        // minmax(0,1fr), never a bare 1fr or an implicit auto track: a grid track
+        // refuses to shrink below its content's min-content width, and a truncating
+        // line has no break opportunity — one long URL pushed the whole page wider
+        // than the screen.
+        'grid-cols-[minmax(0,1fr)]',
         className,
       )}
       {...props}
@@ -37,7 +45,13 @@ function CardAction({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot="card-action"
-      className={cn('col-start-2 row-span-2 row-start-1 self-start justify-self-end', className)}
+      className={cn(
+        // Unconditional col-start-2 would mint an implicit second track even when
+        // the header is stacked, so the title column gets max-content width and
+        // pushes the actions off the page.
+        'self-start @lg/card-header:col-start-2 @lg/card-header:row-span-2 @lg/card-header:row-start-1 @lg/card-header:justify-self-end',
+        className,
+      )}
       {...props}
     />
   )

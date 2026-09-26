@@ -16,6 +16,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
+import { Hint } from '@/components/ui/hint'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { StatusBadge } from '@/components/ui/status-badge'
@@ -24,6 +25,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
+import { apiErrorMessage } from '@/lib/api-error'
 
 /** Summary row shared by GET source-versions and GET script-versions. */
 export interface VersionSummary {
@@ -195,11 +197,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       setManualOpen(false)
       reloadAll()
     } catch (error) {
-      if (error instanceof ApiError && error.message === 'sources:duplicate') {
-        setUploadError(t('sources.duplicateError'))
-      } else {
-        setUploadError(error instanceof Error ? error.message : t('error.generic'))
-      }
+      setUploadError(apiErrorMessage(error, t))
     } finally {
       setUploading(false)
     }
@@ -213,7 +211,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       toast.success(t('sources.approved', { version: version.version }))
       reloadAll()
     } catch (error) {
-      toast.error(friendlyError(error, t('sources.alreadyApproved'), 'sources:alreadyApproved'))
+      toast.error(apiErrorMessage(error, t))
       reloadAll()
     } finally {
       setBusy(null)
@@ -253,7 +251,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       reloadAll()
       onScriptApproved?.()
     } catch (error) {
-      toast.error(friendlyError(error, t('sources.alreadyApproved'), 'sources:alreadyApproved'))
+      toast.error(apiErrorMessage(error, t))
       reloadAll()
     } finally {
       setBusy(null)
@@ -276,7 +274,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       // 亮到任务落定,而不是只在请求的几百毫秒里转一下。
       batches.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
     }
@@ -294,7 +292,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       toast.success(archived ? t('sources.archivedToast') : t('sources.unarchivedToast'))
       reloadAll()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
     }
@@ -314,7 +312,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
       } else if (error instanceof ApiError && error.message === 'sources:scriptInUse') {
         toast.error(t('sources.scriptInUseError'))
       } else {
-        toast.error(error instanceof Error ? error.message : t('error.generic'))
+        toast.error(apiErrorMessage(error, t))
       }
     } finally {
       setBusy(null)
@@ -324,7 +322,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
 
   function friendlyError(error: unknown, mapped: string, code: string): string {
     if (error instanceof ApiError && error.message === code) return mapped
-    return error instanceof Error ? error.message : t('error.generic')
+    return apiErrorMessage(error, t)
   }
 
   const loading = sourceVersions.loading || scriptVersions.loading
@@ -402,6 +400,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                 <GuardedButton
                   action="episode:write"
                   size="sm"
+                  variant="outline"
                   disabled={uploading || !content.trim()}
                   onClick={() => void upload()}
                 >
@@ -450,9 +449,11 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                       {busy === `derive-${version.version}` ? t('sources.deriving') : t('sources.derive')}
                     </GuardedButton>
                     <HelpHint text={t('sources.deriveHint')} />
-                    <Button variant="ghost" size="sm" onClick={() => void setArchived('source', version, true)} title={t('sources.archive')}>
-                      <ArchiveIcon />
-                    </Button>
+                    <Hint text={t('sources.archive')}>
+                      <Button variant="ghost" size="sm" aria-label={t('sources.archive')} onClick={() => void setArchived('source', version, true)}>
+                        <ArchiveIcon />
+                      </Button>
+                    </Hint>
                   </>
                 )}
                 {version.archivedAt && (
@@ -461,15 +462,17 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                   </Button>
                 )}
                 {version.status === 'DRAFT' && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => setDeleteConfirm({ kind: 'source', version })}
-                    title={t('sources.delete')}
-                  >
-                    <Trash2Icon />
-                  </Button>
+                  <Hint text={t('sources.delete')}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      aria-label={t('sources.delete')}
+                      onClick={() => setDeleteConfirm({ kind: 'source', version })}
+                      >
+                        <Trash2Icon />
+                      </Button>
+                  </Hint>
                 )}
               </>
             )}
@@ -494,15 +497,17 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                     <Button variant="ghost" size="sm" onClick={() => void setArchived('source', version, false)}>
                       {t('sources.unarchive')}
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => setDeleteConfirm({ kind: 'source', version })}
-                      title={t('sources.delete')}
-                    >
-                      <Trash2Icon />
-                    </Button>
+                    <Hint text={t('sources.delete')}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        aria-label={t('sources.delete')}
+                        onClick={() => setDeleteConfirm({ kind: 'source', version })}
+                        >
+                          <Trash2Icon />
+                        </Button>
+                    </Hint>
                   </span>
                 </div>
               ))}
@@ -534,6 +539,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
             <GuardedButton
               action="episode:write"
               size="sm"
+              variant="outline"
               disabled={busy === 'ai-script' || scriptGenerating}
               onClick={() => void aiGenerateScript()}
             >
@@ -569,9 +575,11 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                   </GuardedButton>
                 )}
                 {version.status === 'APPROVED' && !version.archivedAt && (
-                  <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, true)} title={t('sources.archive')}>
-                    <ArchiveIcon />
-                  </Button>
+                  <Hint text={t('sources.archive')}>
+                    <Button variant="ghost" size="sm" aria-label={t('sources.archive')} onClick={() => void setArchived('script', version, true)}>
+                      <ArchiveIcon />
+                    </Button>
+                  </Hint>
                 )}
                 {version.archivedAt && (
                   <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, false)}>
@@ -579,15 +587,17 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                   </Button>
                 )}
                 {version.status === 'DRAFT' && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => setDeleteConfirm({ kind: 'script', version })}
-                    title={t('sources.delete')}
-                  >
-                    <Trash2Icon />
-                  </Button>
+                  <Hint text={t('sources.delete')}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      aria-label={t('sources.delete')}
+                      onClick={() => setDeleteConfirm({ kind: 'script', version })}
+                      >
+                        <Trash2Icon />
+                      </Button>
+                  </Hint>
                 )}
               </>
             )}
@@ -613,15 +623,17 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                     <Button variant="ghost" size="sm" onClick={() => void setArchived('script', version, false)}>
                       {t('sources.unarchive')}
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => setDeleteConfirm({ kind: 'script', version })}
-                      title={t('sources.delete')}
-                    >
-                      <Trash2Icon />
-                    </Button>
+                    <Hint text={t('sources.delete')}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        aria-label={t('sources.delete')}
+                        onClick={() => setDeleteConfirm({ kind: 'script', version })}
+                        >
+                          <Trash2Icon />
+                        </Button>
+                    </Hint>
                   </span>
                 </div>
               ))}
@@ -717,7 +729,7 @@ function VersionTable({
       const result = await api<{ version: VersionDetail }>(`/episodes/${episodeId}/${path}/${version.version}`)
       setDetail(result.version)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
       setOpenVersion(null)
     } finally {
       setDetailLoading(false)
@@ -737,7 +749,7 @@ function VersionTable({
       setDraft(null)
       onSaved()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setSaving(false)
     }
@@ -774,9 +786,14 @@ function VersionTable({
                 <TableRow>
                   <TableCell>
                     <p className="font-medium">v{version.version}</p>
-                    <p className="text-muted-foreground font-mono text-xs" title={version.checksum}>
-                      {t('sources.chars', { count: version.contentLength })} · {version.checksum.slice(0, 12)}
-                    </p>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <p className="text-muted-foreground font-mono text-xs">
+                          {t('sources.chars', { count: version.contentLength })} · {version.checksum.slice(0, 12)}
+                        </p>
+                      </TooltipTrigger>
+                      <TooltipContent className="break-all">{`${t('sources.checksum')} ${version.checksum}`}</TooltipContent>
+                    </Tooltip>
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />

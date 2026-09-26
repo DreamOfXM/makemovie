@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   BookCheckIcon,
   BookTextIcon,
@@ -261,7 +262,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
       // multipart file hits (4 MB wire cap) would otherwise show as raw English.
       if (error.status === 413) return t('bookSplit.errorTransportTooLarge')
     }
-    return error instanceof Error ? error.message : t('error.generic')
+    return apiErrorMessage(error, t)
   }
 
   function pickFile() {
@@ -1151,7 +1152,7 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
         setDraft(result.segment.content)
       })
       .catch(err => {
-        if (!cancelled) setError(err instanceof Error ? err.message : t('error.generic'))
+        if (!cancelled) setError(apiErrorMessage(err, t))
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -1171,7 +1172,7 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setSaving(false)
     }
@@ -1186,7 +1187,7 @@ function ChapterDialog({ projectId, segment, onClose, onSaved }: ChapterDialogPr
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setDeleting(false)
       setDeleteOpen(false)

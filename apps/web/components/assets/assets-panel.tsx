@@ -14,6 +14,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { HelpHint } from '@/components/ui/help-hint'
+import { Hint } from '@/components/ui/hint'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -25,6 +26,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
+import { apiErrorMessage } from '@/lib/api-error'
 
 /** Kinds the authoring form offers as presets; the API itself accepts free text. */
 const assetKinds = ['character', 'prop', 'scene'] as const
@@ -109,11 +111,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       setCreateOpen(false)
       reload()
     } catch (error) {
-      if (error instanceof ApiError && error.message === 'assets:duplicate') {
-        setCreateError(t('assets.duplicateError'))
-      } else {
-        setCreateError(error instanceof Error ? error.message : t('error.generic'))
-      }
+      setCreateError(apiErrorMessage(error, t))
     } finally {
       setCreating(false)
     }
@@ -129,7 +127,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       toast.success(t('assets.approved', { name: asset.name, version: version.version }))
       reload()
     } catch (error) {
-      toast.error(friendlyError(error, t('assets.alreadyApproved'), 'assets:alreadyApproved'))
+      toast.error(apiErrorMessage(error, t))
       reload()
     } finally {
       setBusy(null)
@@ -149,7 +147,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       toast.success(t('assets.groupApproved'))
       reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
       reload()
     } finally {
       setBusy(null)
@@ -172,7 +170,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       setGeneratingAssetId(asset.id)
       reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
     }
@@ -190,7 +188,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       toast.success(t('assets.descriptionSaved', { name: asset.name }))
       reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     }
   }
 
@@ -212,7 +210,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
 
   function friendlyError(error: unknown, mapped: string, code: string): string {
     if (error instanceof ApiError && error.message === code) return mapped
-    return error instanceof Error ? error.message : t('error.generic')
+    return apiErrorMessage(error, t)
   }
 
   async function removeVersion(asset: Asset, version: AssetVersion) {
@@ -225,7 +223,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
     } catch (error) {
       if (error instanceof ApiError && error.message === 'assets:versionApproved') toast.error(t('assets.versionApprovedError'))
       else if (error instanceof ApiError && error.message === 'assets:lastVersion') toast.error(t('assets.lastVersionError'))
-      else toast.error(error instanceof Error ? error.message : t('error.generic'))
+      else toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
       setDeleteConfirm(null)
@@ -241,7 +239,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
       reload()
     } catch (error) {
       if (error instanceof ApiError && error.message === 'assets:assetApproved') toast.error(t('assets.assetApprovedError'))
-      else toast.error(error instanceof Error ? error.message : t('error.generic'))
+      else toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
       setDeleteConfirm(null)
@@ -603,7 +601,7 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
             {effective && <span className="font-mono">{t('assets.inUse')} v{effective.version}</span>}
             <span className="font-mono">{t('assets.versionsShort', { count: asset.versions.length })}</span>
             {(asset.usageCount ?? 0) > 0 && (
-              <span title={t('assets.usageHint')}>{t('assets.usageCount', { count: asset.usageCount! })}</span>
+              <Hint text={t('assets.usageHint')}>{t('assets.usageCount', { count: asset.usageCount! })}</Hint>
             )}
             {asset.projectAssetId && (
               <Badge variant="outline" className="font-normal">
@@ -646,7 +644,6 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                 className="text-destructive hover:text-destructive ml-auto"
                 disabled={busy === `del-asset-${asset.id}`}
                 onClick={() => onRemove(asset)}
-                title={t('sources.delete')}
               >
                 <Trash2Icon />
                 {t('sources.delete')}
@@ -670,7 +667,7 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                           status={toneFor(version.status)}
                           label={t(`status.${toneFor(version.status)}`)}
                         />
-                        {inUse && <Badge variant="secondary" title={t('assets.inUseHint')}>{t('assets.inUse')}</Badge>}
+                        {inUse && <Hint text={t('assets.inUseHint')}><Badge variant="secondary">{t('assets.inUse')}</Badge></Hint>}
                       </div>
                       {version.description && (
                         <p className="text-muted-foreground text-xs">{version.description.replace(/^(character|prop|scene)\s+\S+?\s*[:：]\s*/, '')}</p>
@@ -706,29 +703,32 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                           {busy === busyKey ? t('assets.approving') : t('assets.approve')}
                         </GuardedButton>
                         <HelpHint text={t('assets.approveHint')} />
+                        <Hint text={t('sources.delete')}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            aria-label={t('sources.delete')}
+                            disabled={busy === `del-asset-${asset.id}-${version.version}`}
+                            onClick={() => onRemoveVersion(asset, version)}
+                          >
+                            <Trash2Icon />
+                          </Button>
+                        </Hint>
+                      </>
+                    )}
+                    {version.status === 'APPROVED' && onDeprecate && (
+                      <Hint text={t('assets.deprecateHint')}>
                         <Button
                           variant="ghost"
                           size="sm"
                           className="text-destructive hover:text-destructive"
-                          disabled={busy === `del-asset-${asset.id}-${version.version}`}
-                          onClick={() => onRemoveVersion(asset, version)}
-                          title={t('sources.delete')}
+                          disabled={busy === `dep-${asset.id}-${version.version}`}
+                          onClick={() => setDeprecateConfirm(version)}
                         >
-                          <Trash2Icon />
+                          {t('assets.deprecate')}
                         </Button>
-                      </>
-                    )}
-                    {version.status === 'APPROVED' && onDeprecate && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        disabled={busy === `dep-${asset.id}-${version.version}`}
-                        onClick={() => setDeprecateConfirm(version)}
-                        title={t('assets.deprecateHint')}
-                      >
-                        {t('assets.deprecate')}
-                      </Button>
+                      </Hint>
                     )}
                   </div>
                 )

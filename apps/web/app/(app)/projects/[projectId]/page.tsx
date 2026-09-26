@@ -2,25 +2,31 @@
 
 import { useCallback, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { ArrowRightIcon, FilmIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { FilmIcon, MoreHorizontalIcon, MoreVerticalIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   ApiError,
   deleteEpisode,
-  isLiveStoryboard,
   toProjectFormat,
-  toWorkflowStatus,
   type Episode,
   type Project,
 } from '@/lib/api'
-import { translateEnum, useI18n } from '@/lib/i18n'
+import { episodeProgressToken, episodeVerdict, type EpisodeTone, type EpisodeVerdict } from '@/lib/episode-verdict'
+import { translateEnum, useI18n, type TranslateFn } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
-import { cn, formatDateTime, relativeTime } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,14 +39,99 @@ import {
 } from '@/components/ui/alert-dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/ui/page-header'
-import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { TableSkeleton } from '@/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
-import { EpisodeDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
+import { EpisodeDialog, ProjectDeleteDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
 import { BookSplitPanel } from '@/components/sources/book-split-panel'
 import { ProjectSettingsDialog, SettingsButton } from '@/components/ProjectSettingsDialog'
+
+/** The strip's four colours plus the pipeline's own, in the same tokens the
+ *  projects board uses for its lifecycle bars. */
+const toneFill: Record<EpisodeTone, string> = {
+  blocked: 'bg-destructive',
+  waiting: 'bg-warning',
+  running: 'bg-info',
+  done: 'bg-success',
+  // Not `bg-border`: that is a hairline colour, and as a fill it vanishes into the
+  // card behind it in the light skins — which is finding 12 all over again.
+  idle: 'bg-muted-foreground/25',
+}
+
+const toneBadge: Record<EpisodeTone, 'destructive' | 'warning' | 'info' | 'success' | 'muted'> = {
+  blocked: 'destructive',
+  waiting: 'warning',
+  running: 'info',
+  done: 'success',
+  idle: 'muted',
+}
+
+function stageLabel(t: TranslateFn, verdict: EpisodeVerdict, frames: number): string {
+  switch (verdict.stage) {
+    case 'blocked': return t('projects.stage.blocked', { count: verdict.count })
+    case 'review': return t('projects.stage.review', { count: verdict.count })
+    case 'source': return t('projects.stage.source', { count: verdict.count })
+    case 'running': return t('projects.stage.running', { frames, shots: verdict.shots })
+    case 'deliverable': return t('projects.stage.deliverable')
+    case 'delivered': return t('projects.stage.delivered')
+    case 'start': return t('projects.stage.start')
+    case 'none': return t('projects.stage.none')
+  }
+}
+
+function progressLabel(t: TranslateFn, episode: Episode, verdict: EpisodeVerdict): string {
+  const { token, count } = episodeProgressToken(episode, verdict)
+  if (token === 'delivered') return t('projects.progress.delivered')
+  if (token === 'composed') return t('projects.progress.composed')
+  if (token === 'nothing') return t('projects.progress.empty')
+  return t(`projects.progress.${token}`, { count })
+}
+
+/**
+ * One cell per episode, coloured by where that episode actually stopped. The cells are
+ * links, because a strip that only decorates the table underneath it would be the same
+ * information twice; with a 40-episode season the digits would collapse to ink, so they
+ * only appear while there is room for them.
+ */
+/** One cell per episode, filled with the colour of where that episode actually
+ *  stopped. No digits: they would sit on a saturated fill whose contrast flips
+ *  between the dark and light skins, and the table underneath already numbers the
+ *  episodes in the same order. The cells are links anyway, so the strip is a way to
+ *  get to EP 14, not a caption for it. */
+function LifecycleStrip({ rows, done }: { rows: Array<{ episode: Episode; verdict: EpisodeVerdict; label: string }>; done: number }) {
+  const { t } = useI18n()
+  return (
+    <div className="flex items-center gap-3 border-b px-6 py-3">
+      <span className="text-subtle-foreground shrink-0 text-xs">{t('projects.lifecycleLabel')}</span>
+      <div className="flex min-w-0 flex-1 gap-px overflow-hidden rounded-sm">
+        {rows.map(row => (
+          <Tooltip key={row.episode.id}>
+            <TooltipTrigger asChild>
+              <Link
+                href={`/projects/${row.episode.projectId}/episodes/${row.episode.id}`}
+                aria-label={`${t('projects.episode')} ${row.episode.number}: ${row.label}`}
+                className={cn(
+                  'h-4 min-w-3 flex-1 transition-opacity hover:opacity-75',
+                  toneFill[row.verdict.tone],
+                )}
+              />
+            </TooltipTrigger>
+            {/* 色块本身回答不了「这一集停在哪」，这句解释只活在这里，
+                原先挂在原生 title 上等于没有提示。 */}
+            <TooltipContent>
+              {`${t('projects.episode')} ${row.episode.number} · ${row.episode.title} — ${row.label}`}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+      </div>
+      <span className="text-subtle-foreground shrink-0 text-xs font-medium tabular-nums">
+        {t('projects.lifecycleDone', { done, total: rows.length })}
+      </span>
+    </div>
+  )
+}
 
 /**
  * The project surface: everything that belongs to a season rather than to one episode.
@@ -48,11 +139,12 @@ import { ProjectSettingsDialog, SettingsButton } from '@/components/ProjectSetti
  * list you read rather than a workbench you scroll.
  */
 export default function ProjectPage() {
-  const { t, locale } = useI18n()
+  const { t } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
   const params = useParams<{ projectId: string }>()
   const projectId = params.projectId
+  const router = useRouter()
 
   const loadProjects = useCallback(() => api<Project[]>('/projects'), [api, organizationId])
   const projects = useAsync<Project[]>(loadProjects, [])
@@ -85,7 +177,7 @@ export default function ProjectPage() {
       if (error instanceof ApiError && error.message === 'episodes:notDeletable') {
         toast.error(t('projects.episodeNotDeletable'))
       } else {
-        toast.error(error instanceof Error ? error.message : t('error.generic'))
+        toast.error(apiErrorMessage(error, t))
       }
     } finally {
       setEpisodeDeleting(false)
@@ -122,7 +214,28 @@ export default function ProjectPage() {
     () => episodes.data.reduce((highest, episode) => Math.max(highest, episode.number), 0) + 1,
     [episodes.data],
   )
-  const completed = episodes.data.filter(episode => toWorkflowStatus(episode.status) === 'completed').length
+  /** Every number this page reads, resolved once per load: the strip's colours, the
+   *  「1/6 完成」 counter and the header subtitle all come out of the same verdicts, so
+   *  they cannot drift apart the way the old `episode.status` column drifted from reality. */
+  const board = useMemo(() => {
+    const rows = [...episodes.data]
+      .sort((a, b) => a.number - b.number)
+      .map(episode => {
+        const verdict = episodeVerdict(episode)
+        const frames = episode.progress?.frames ?? 0
+        return {
+          episode,
+          verdict,
+          label: stageLabel(t, verdict, frames),
+          detail: progressLabel(t, episode, verdict),
+        }
+      })
+    return {
+      rows,
+      shots: rows.reduce((total, row) => total + row.verdict.shots, 0),
+      done: rows.filter(row => row.verdict.done).length,
+    }
+  }, [episodes.data, t])
   // A film is locked to its single auto-created episode, so the "new episode"
   // entries would only ever bounce off episodes:filmLockedToOne.
   const isFilm = project !== null && toProjectFormat(project.format) === 'film'
@@ -135,7 +248,7 @@ export default function ProjectPage() {
       setDeleteTarget(null)
       window.location.assign('/projects')
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDeleting(false)
     }
@@ -149,13 +262,18 @@ export default function ProjectPage() {
         title={project?.name ?? t('common.loading')}
         description={
           project
-            ? t('projects.summary', {
+            ? t('projects.progressSummary', {
+                episodes: board.rows.length,
+                shots: board.shots,
+                done: board.done,
                 contentLanguage: translateEnum(t, 'projects.contentLocale', project.contentLocale),
               })
             : undefined
         }
         actions={
           <>
+            {/* 新建剧集只住在剧集卡上:动作按钮归属其结果所在的模块,页头再放一份
+                只会和它抢注意(用户实测两次提出)。 */}
             {project && (
               <SettingsButton onClick={() => setSettingsOpen(true)} />
             )}
@@ -167,19 +285,25 @@ export default function ProjectPage() {
               <PencilIcon />
               {t('projects.renameTitle')}
             </GuardedButton>
-            {/* 新建剧集只住在剧集卡上:动作按钮归属其结果所在的模块,页头再放一份
-                只会和它抢注意(用户实测两次提出)。 */}
-            {project && (
-              <GuardedButton
-                action="project:delete"
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground hover:text-destructive"
-                onClick={() => setDeleteTarget(project)}
-              >
-                <Trash2Icon />
-                {t('projects.deleteAction')}
-              </GuardedButton>
+            {/* 删除项目从按钮排里拿掉了:它和「风格」长得一模一样，却是这个屏幕上
+                唯一不可逆的动作。收进 ⋯ 之后它是红的一项，还要把项目名打出来才按得下去。 */}
+            {project && can('project:delete') && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon" aria-label={t('projects.moreActions')}>
+                    <MoreVerticalIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onClick={() => setDeleteTarget(project)}
+                  >
+                    <Trash2Icon />
+                    {t('projects.deleteAction')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
           </>
         }
@@ -195,9 +319,6 @@ export default function ProjectPage() {
             <FilmIcon className="text-muted-foreground size-4" />
             {t('projects.episodes')}
           </CardTitle>
-          <CardDescription>
-            {episodes.loading ? t('common.loading') : t('projects.episodeProgress', { done: completed, total: episodes.data.length })}
-          </CardDescription>
           {/* Creating episodes lives where episodes live: the split panel creates
               its own via grouping, this module owns the manual door. Films are
               locked to their single born episode. */}
@@ -205,7 +326,8 @@ export default function ProjectPage() {
             <CardAction>
               <div className="flex items-center gap-1">
                 {episodes.data.length > 1 && (
-                  <Button
+                  <GuardedButton
+                    action="episode:write"
                     variant="ghost"
                     size="sm"
                     className="text-muted-foreground hover:text-destructive"
@@ -213,7 +335,7 @@ export default function ProjectPage() {
                     onClick={() => setEpisodeDeleteAllOpen(true)}
                   >
                     {t('projects.deleteAllEpisodesAction')}
-                  </Button>
+                  </GuardedButton>
                 )}
                 <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setEpisodeDialogOpen(true)}>
                   <PlusIcon />
@@ -247,75 +369,80 @@ export default function ProjectPage() {
             />
           </CardContent>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-14">#</TableHead>
-                <TableHead>{t('common.name')}</TableHead>
-                <TableHead className="w-40">{t('common.status')}</TableHead>
-                <TableHead className="w-28">{t('storyboards.title')}</TableHead>
-                <TableHead className="w-40">{t('common.updatedAt')}</TableHead>
-                <TableHead className="w-24" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {[...episodes.data]
-                .sort((a, b) => a.number - b.number)
-                .map(episode => {
-                  const status = toWorkflowStatus(episode.status)
-                  // 拆分生成的原文先以草稿落在集内,等人审批——列表行必须把这
-                  // 件待办亮出来,否则"生成分集原文"的结果要靠用户自己猜在哪。
-                  const pendingSources = episode.sourceVersions?.filter(version => version.status === 'DRAFT').length ?? 0
+          <>
+            <LifecycleStrip rows={board.rows} done={board.done} />
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10">#</TableHead>
+                  <TableHead>{t('common.name')}</TableHead>
+                  <TableHead className="w-44">{t('projects.stageColumn')}</TableHead>
+                  {/* 390px 下这张表本来就要横向滚 72px，滚掉的正是要点的那枚按钮。
+                      镜头进度是这行里唯一能少的一列：上面那根条已经按集分了色。 */}
+                  <TableHead className="hidden w-36 md:table-cell">{t('projects.progressColumn')}</TableHead>
+                  <TableHead className="w-28" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {board.rows.map(({ episode, verdict, label, detail }) => {
+                  const href = `/projects/${projectId}/episodes/${episode.id}`
+                  // 「交付」不是装饰：这一集真的到门口了才换主按钮，点了就落到
+                  // 该集的交付环节上。其余的行只给一个「打开」。
+                  const ready = verdict.stage === 'deliverable' || verdict.stage === 'delivered'
+                  const canDelete = can('episode:write')
                   return (
                     <TableRow key={episode.id}>
-                      <TableCell className="text-muted-foreground font-mono">{episode.number}</TableCell>
+                      <TableCell className="text-subtle-foreground font-mono">{episode.number}</TableCell>
                       <TableCell>
-                        <Link
-                          href={`/projects/${projectId}/episodes/${episode.id}`}
-                          className="hover:text-primary inline-block max-w-md truncate font-medium transition-colors"
-                        >
+                        <Link href={href} className="hover:text-primary inline-block max-w-md truncate font-medium transition-colors">
                           {episode.title}
                         </Link>
-                        {pendingSources > 0 && (
-                          <Badge variant="warning" className="ml-2 font-normal">
-                            {t('projects.pendingSource', { count: pendingSources })}
-                          </Badge>
-                        )}
-                        <span className="text-subtle-foreground ml-2 text-xs">{relativeTime(episode.updatedAt, locale)}</span>
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={status} label={t(`status.${status}`)} />
+                        <Badge variant={toneBadge[verdict.tone]}>{label}</Badge>
                       </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary">
-                          {t('projects.storyboardCount', { count: episode.storyboards?.filter(isLiveStoryboard).length ?? 0 })}
-                        </Badge>
+                      <TableCell className="hidden text-subtle-foreground text-xs tabular-nums md:table-cell">
+                        {t('projects.shotProgress', { shots: verdict.shots, detail })}
                       </TableCell>
-                      <TableCell className="text-subtle-foreground">{formatDateTime(episode.createdAt, locale)}</TableCell>
                       <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button asChild variant="ghost" size="sm">
-                            <Link href={`/projects/${projectId}/episodes/${episode.id}`}>
-                              <span className="sr-only">{t('projects.openEpisode')}</span>
-                              <ArrowRightIcon className={cn('size-4')} />
-                            </Link>
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground hover:text-destructive"
-                            onClick={() => setEpisodeDeleteTarget(episode)}
-                          >
-                            <span className="sr-only">{t('projects.deleteEpisodeAction')}</span>
-                            <Trash2Icon />
-                          </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          {ready ? (
+                            <Button asChild size="sm">
+                              <Link href={`${href}#step-delivery`}>{t('projects.deliverAction')}</Link>
+                            </Button>
+                          ) : (
+                            <Button asChild variant="outline" size="sm">
+                              <Link href={href}>{t('projects.open')}</Link>
+                            </Button>
+                          )}
+                          {/* 垃圾桶不再常驻:六行六个删除图标紧挨着跳转箭头，是这张表上
+                              最容易误点的位置。收进 ⋯ 之后它只有两下 click 的距离，
+                              而那两下都要看得见字。 */}
+                          {(ready || canDelete) && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon-sm" aria-label={t('projects.moreActions')}>
+                                  <MoreHorizontalIcon />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {ready && <DropdownMenuItem onClick={() => router.push(href)}>{t('projects.openEpisode')}</DropdownMenuItem>}
+                                {canDelete && (
+                                  <DropdownMenuItem variant="destructive" onClick={() => setEpisodeDeleteTarget(episode)}>
+                                    {t('projects.deleteEpisodeAction')}
+                                  </DropdownMenuItem>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
                   )
                 })}
-            </TableBody>
-          </Table>
+              </TableBody>
+            </Table>
+          </>
         )}
       </Card>
 
@@ -387,27 +514,14 @@ export default function ProjectPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={deleteTarget !== null} onOpenChange={open => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('projects.deleteTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('projects.deleteBody', { name: deleteTarget?.name ?? '' })}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              disabled={deleting}
-              onClick={event => {
-                event.preventDefault()
-                if (deleteTarget) void removeProject(deleteTarget)
-              }}
-            >
-              {deleting ? t('common.loading') : t('common.delete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ProjectDeleteDialog
+        project={deleteTarget}
+        busy={deleting}
+        onOpenChange={open => !open && setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void removeProject(deleteTarget)
+        }}
+      />
 
       <ProjectSettingsDialog
         open={settingsOpen}

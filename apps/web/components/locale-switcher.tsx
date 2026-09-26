@@ -10,6 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const locales: { value: Locale; labelKey: string }[] = [
   { value: 'en', labelKey: 'locale.en' },
@@ -20,11 +21,16 @@ export function LocaleSwitcher() {
   const { locale, setLocale, t } = useI18n()
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label={t('locale.label')} title={t('locale.label')}>
-          <LanguagesIcon />
-        </Button>
-      </DropdownMenuTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label={t('locale.label')}>
+              <LanguagesIcon />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{t('locale.hint')}</TooltipContent>
+      </Tooltip>
       <DropdownMenuContent align="end" className="min-w-36">
         {locales.map(option => (
           <DropdownMenuItem key={option.value} onClick={() => setLocale(option.value)}>

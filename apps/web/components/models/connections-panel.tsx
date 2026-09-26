@@ -3,6 +3,7 @@
 import { Fragment, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { capabilitySlots, modelModalities } from '@studio/domain'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   CircleAlertIcon,
   KeyRoundIcon,
@@ -106,7 +107,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
       else toast.success(t('models.probeDone', { verified, failed }))
       connections.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setProbingId(null)
     }
@@ -120,7 +121,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
       else toast.error(result.message ?? t('models.modelNotVerified', { model: capability.model }))
       connections.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setVerifyingId(null)
     }
@@ -131,7 +132,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
       await api(`/providers/connections/${connection.id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
       connections.mutate(current => current.map(item => (item.id === connection.id ? { ...item, enabled } : item)))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     }
   }
 
@@ -148,7 +149,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
       setDeleteTarget(null)
       connections.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDeleting(false)
     }
@@ -635,7 +636,6 @@ function VerifyButton({ capability, verifying, onVerify }: { capability: Capabil
             variant="ghost"
             size="icon-sm"
             aria-label={label}
-            title={generationModality ? t('models.verifyCredentialHint') : label}
             disabled={verifying}
             onClick={onVerify}
           >
@@ -695,7 +695,7 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
       }
       onDone()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }
@@ -866,7 +866,7 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
       })
       onAdded(created.model)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }

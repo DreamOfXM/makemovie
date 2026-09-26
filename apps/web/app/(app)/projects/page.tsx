@@ -12,23 +12,15 @@ import { useSession } from '@/lib/session'
 import { cn, relativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { apiErrorMessage } from '@/lib/api-error'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/ui/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
-import { ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
+import { ProjectDeleteDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
 
 /** Statuses that mean a human owes this episode a decision, worst first. */
 const decisionStatuses: WorkflowStatus[] = ['blocked', 'needs_review']
@@ -86,11 +78,11 @@ export default function ProjectsPage() {
       setProjects(page.projects)
       setCursor(page.nextCursor)
     } catch (err) {
-      setError(err instanceof Error ? err.message : null)
+      setError(apiErrorMessage(err, t))
     } finally {
       setLoading(false)
     }
-  }, [api, organizationId])
+  }, [api, organizationId, t])
 
   const loadMore = useCallback(async () => {
     if (cursor === null || loadingMore) return
@@ -141,7 +133,7 @@ export default function ProjectsPage() {
       setDeleteTarget(null)
       await loadFirstPage()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setDeleting(false)
     }
@@ -257,27 +249,14 @@ export default function ProjectsPage() {
         }}
       />
 
-      <AlertDialog open={deleteTarget !== null} onOpenChange={open => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('projects.deleteTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('projects.deleteBody', { name: deleteTarget?.name ?? '' })}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              disabled={deleting}
-              onClick={event => {
-                event.preventDefault()
-                if (deleteTarget) void removeProject(deleteTarget)
-              }}
-            >
-              {deleting ? t('common.loading') : t('common.delete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ProjectDeleteDialog
+        project={deleteTarget}
+        busy={deleting}
+        onOpenChange={open => !open && setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void removeProject(deleteTarget)
+        }}
+      />
     </>
   )
 }
@@ -345,14 +324,19 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
         <div className="flex items-center gap-2">
           <div className="bg-muted flex h-2 min-w-0 flex-1 items-center gap-px overflow-hidden rounded-full">
             {episodes.map((episode, index) => (
-              <Link
-                key={episode.id}
-                href={`/projects/${project.id}/episodes/${episode.id}`}
-                title={`EP${episode.number} ${episode.title}`}
-                className={cn('h-full flex-1 opacity-90 transition-opacity hover:opacity-100', lifecycleFill[statuses[index]])}
-              >
-                <span className="sr-only">{`EP${episode.number} ${episode.title} · ${t(`status.${statuses[index]}`)}`}</span>
-              </Link>
+              <Tooltip key={episode.id}>
+                {/* 这一格屏幕上只是一段色条，没有任何可见文字：谁在哪一集、停在哪一步，
+                    原先只写在原生 title 上，等于鼠标扫过去也读不到。 */}
+                <TooltipTrigger asChild>
+                  <Link
+                    href={`/projects/${project.id}/episodes/${episode.id}`}
+                    className={cn('h-full flex-1 opacity-90 transition-opacity hover:opacity-100', lifecycleFill[statuses[index]])}
+                  >
+                    <span className="sr-only">{`EP${episode.number} ${episode.title} · ${t(`status.${statuses[index]}`)}`}</span>
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent>{`EP${episode.number} ${episode.title} · ${t(`status.${statuses[index]}`)}`}</TooltipContent>
+              </Tooltip>
             ))}
             {episodes.length === 0 && <span className="bg-border/40 h-full flex-1 rounded-full" />}
           </div>

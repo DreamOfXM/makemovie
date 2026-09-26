@@ -8,6 +8,7 @@ import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { StyleSelector } from '@/components/StyleSelector'
+import { apiErrorMessage } from '@/lib/api-error'
 
 interface ProjectSettingsDialogProps {
   open: boolean
@@ -44,7 +45,7 @@ export function ProjectSettingsDialog({
       onStyleChanged()
       onOpenChange(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setSaving(false)
     }

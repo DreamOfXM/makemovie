@@ -1,6 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { apiErrorMessage } from '@/lib/api-error'
+import { useI18n } from '@/lib/i18n'
 
 export interface AsyncState<T> {
   data: T
@@ -17,8 +19,9 @@ export interface AsyncState<T> {
  * exists.
  */
 export function useAsync<T>(loader: (() => Promise<T>) | null, fallback: T): AsyncState<T> {
+  const { t } = useI18n()
   const [data, setData] = useState<T>(fallback)
-  const [error, setError] = useState<string | null>(null)
+  const [failure, setFailure] = useState<{ cause: unknown } | null>(null)
   const [loading, setLoading] = useState(loader !== null)
   const [nonce, setNonce] = useState(0)
 
@@ -33,11 +36,11 @@ export function useAsync<T>(loader: (() => Promise<T>) | null, fallback: T): Asy
       .then(result => {
         if (cancelled) return
         setData(result)
-        setError(null)
+        setFailure(null)
       })
       .catch((cause: unknown) => {
         if (cancelled) return
-        setError(cause instanceof Error ? cause.message : 'Unexpected error')
+        setFailure({ cause })
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -49,5 +52,13 @@ export function useAsync<T>(loader: (() => Promise<T>) | null, fallback: T): Asy
 
   const reload = useCallback(() => setNonce(value => value + 1), [])
 
-  return { data, error, loading, reload, mutate: setData }
+  // Translated during render, not when it lands: switching language re-labels a
+  // failure that is already on screen.
+  return {
+    data,
+    error: failure === null ? null : apiErrorMessage(failure.cause, t),
+    loading,
+    reload,
+    mutate: setData,
+  }
 }

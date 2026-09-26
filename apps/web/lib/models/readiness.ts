@@ -1,5 +1,5 @@
-import { canBind, type CapabilitySlot, type ModelModality } from '@studio/domain'
-import type { Binding, Catalog, Connection, GenerationStage } from '@/lib/api'
+import { canBind, callEvidenceKey, isTerminalFailure, type CapabilitySlot, type FailureKind, type ModelModality } from '@studio/domain'
+import type { Binding, CallEvidenceMap, Catalog, Connection, GenerationStage } from '@/lib/api'
 
 export interface BindableCapability {
   capabilityId: string
@@ -85,6 +85,13 @@ const slotUsage: Record<CapabilitySlot, SlotUsage> = {
 
 export type SlotReadinessState = 'ready' | 'needsBinding' | 'missing'
 
+/** 本槽全部可用模型最近一次真实调用都撞在同一类终局原因上。 */
+export interface SlotCallBlock {
+  kind: FailureKind
+  at: string
+  models: string[]
+}
+
 export interface SlotReadiness {
   slot: CapabilitySlot
   usage: SlotUsage
@@ -94,15 +101,21 @@ export interface SlotReadiness {
   usableCount: number
   /** Usable, but only through project-scoped bindings — other projects still have nothing. */
   projectOnly: boolean
+  /**
+   * 绑定一条没变、探测记录也还是绿的，但这一档模型现在跑不通。探测时间戳只证明
+   * 「曾经通过」，额度用尽和权限被收回不会自己把它改红（2026-09-26 全站验收 B2）。
+   */
+  callBlocked: SlotCallBlock | null
   state: SlotReadinessState
 }
 
 /**
  * Mirrors `resolveSlotCandidates`: a binding counts only while it is enabled, its
- * capability's entitlement was confirmed, and its connection is still enabled.
- * Computed here so the console can say what is missing without another round trip.
+ * capability was verified against the vendor (entitlement, or at least the key), and
+ * its connection is still enabled. Computed here so the console can say what is
+ * missing without another round trip.
  */
-export function slotReadiness(connections: Connection[], bindings: Binding[]): SlotReadiness[] {
+export function slotReadiness(connections: Connection[], bindings: Binding[], evidence: CallEvidenceMap = {}): SlotReadiness[] {
   const pool = bindableCapabilities(connections)
   return (Object.keys(slotUsage) as CapabilitySlot[]).map(slot => {
     const usage = slotUsage[slot]
@@ -115,9 +128,33 @@ export function slotReadiness(connections: Connection[], bindings: Binding[]): S
       bindableCount: candidatesForSlot(pool, slot).length,
       usableCount,
       projectOnly: usableCount > 0 && usable.every(binding => binding.projectId !== null),
+      callBlocked: callBlock(usable, evidence),
       state: usableCount > 0 ? 'ready' : candidatesForSlot(pool, slot).length > 0 ? 'needsBinding' : 'missing',
     }
   })
+}
+
+/**
+ * 只有「一个都不通」才算这个槽位跑不通：只要还有一个可用模型最近一次真调用成功、
+ * 或者根本没调用过（未知 ≠ 坏），就绪度就不许改口。
+ */
+function callBlock(usable: Binding[], evidence: CallEvidenceMap): SlotCallBlock | null {
+  const failing = new Map<string, { model: string; at: string; kind: FailureKind }>()
+  const seen = new Set<string>()
+  for (const binding of usable) {
+    const provider = binding.capability?.connection?.provider
+    const model = binding.capability?.model
+    if (!provider || !model) return null
+    const key = callEvidenceKey(provider, model)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const record = evidence[key]
+    if (!record || record.lastStatus !== 'FAILED' || !isTerminalFailure(record.lastKind)) return null
+    failing.set(key, { model, at: record.lastAt, kind: record.lastKind })
+  }
+  if (failing.size === 0) return null
+  const latest = [...failing.values()].sort((left, right) => right.at.localeCompare(left.at))[0]
+  return { kind: latest.kind, at: latest.at, models: [...failing.values()].map(item => item.model) }
 }
 
 /** The three rules `resolveSlotCandidates` applies: enabled binding, verified capability, enabled connection. */
@@ -145,7 +182,15 @@ function requiredSlots(readiness: SlotReadiness[]): SlotReadiness[] {
 }
 
 export function readyCount(readiness: SlotReadiness[]): number {
-  return requiredSlots(readiness).filter(item => item.state === 'ready').length
+  return requiredSlots(readiness).filter(item => item.state === 'ready' && !item.callBlocked).length
+}
+
+/**
+ * 面板只挑一个「现在挡你」的行：要么没绑可用模型，要么绑了但这一档模型现在跑不通。
+ * 后者不看真实调用就会绿着撒谎——探测时间戳不会自己变红。
+ */
+export function isHeldUp(item: SlotReadiness): boolean {
+  return item.usage.required && (item.state !== 'ready' || item.callBlocked !== null)
 }
 
 /** Slots that are wired but hold no usable model, worst first. */

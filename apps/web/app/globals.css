@@ -225,6 +225,117 @@
   .theme-pending {
     visibility: hidden;
   }
+
+  /* Horizontal tab rail. The amber band sits on a wrapper, not on the scroller:
+     an abspos child of a scroll container translates with the content, so a ::after
+     on the rail itself would drift left as the user scrolls. The band only shows
+     when data-more says a tab is still hiding past the right edge — a mask on the
+     scroller would dim the last tab even when the rail fits, and `scroll-state()`
+     container queries do not match in this toolchain. `clip` (not `hidden`) on the
+     y axis keeps the rail the nearest scroll container, so a focused tab still
+     scrolls back into view. */
+  .tab-rail {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: clip;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-padding-right: 24px;
+  }
+  .tab-rail::-webkit-scrollbar {
+    display: none;
+  }
+  .tab-rail [data-slot='tabs-trigger'] {
+    scroll-margin-left: 18px;
+    scroll-margin-right: 24px;
+  }
+  .tab-rail-hint {
+    position: relative;
+    padding-bottom: 7px;
+  }
+  .tab-rail-hint::after {
+    position: absolute;
+    right: 0;
+    bottom: 1px;
+    left: 0;
+    height: 6px;
+    content: '';
+    pointer-events: none;
+    opacity: 0;
+    border-radius: 99px;
+    transition: opacity 150ms ease;
+    background: linear-gradient(90deg, transparent, oklch(0.78 0.14 75 / 45%));
+  }
+  .tab-rail-hint[data-more='1']::after {
+    opacity: 1;
+  }
+
+  /* Narrow-screen behaviour for every table in the app, so it is set once rather than
+     re-derived per page. The fade is a sibling of the scroller for the same reason the
+     tab band above is: an abspos child of a scroll container slides with the content.
+     It only shows while data-more says columns are still hiding past the right edge. */
+  [data-slot='table-more'] {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 28px;
+    content: '';
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease;
+    background: linear-gradient(90deg, transparent, var(--color-card));
+  }
+
+  [data-slot='table-container'][data-more='1'] + [data-slot='table-more'] {
+    opacity: 1;
+  }
+
+  /* Pinned cells carry their own hairline instead of relying on the row border:
+     `border-collapse: collapse` paints borders on <tr>, and a sticky cell leaves
+     that painting context behind, so the separator has to be redrawn as a shadow. */
+  [data-slot='table'] [data-pin] {
+    position: sticky;
+    z-index: 1;
+    background-color: var(--color-card);
+  }
+
+  [data-slot='table'] [data-pin='left'] {
+    left: 0;
+    box-shadow: 1px 0 0 0 color-mix(in oklch, var(--color-border) 70%, transparent);
+  }
+
+  [data-slot='table'] [data-pin='right'] {
+    right: 0;
+    box-shadow: -1px 0 0 0 color-mix(in oklch, var(--color-border) 70%, transparent);
+  }
+
+  [data-slot='table-body'] [data-slot='table-row']:hover [data-pin] {
+    background-color: color-mix(in oklch, var(--color-muted) 50%, var(--color-card));
+  }
+
+  /* 放映条的每一格。浅色主题下 muted 填充与页面底色几乎同值，整条会糊成一片，
+     所以描边和斜纹一律用 token 表达——同一条规则在深浅两套主题里都成立。
+     底色说「这一镜能不能直接用」，底部亮线说「人签过没有」，两个通道不抢同一件事。 */
+  .strip-cell {
+    border: 1px solid color-mix(in oklch, var(--color-border) 80%, transparent);
+  }
+  .strip-cell[data-empty='1'] {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      color-mix(in oklch, var(--color-muted-foreground) 30%, transparent) 0 2px,
+      transparent 2px 6px
+    );
+  }
+  .strip-cell[data-chosen='1'] {
+    box-shadow: inset 0 -2px 0 0 color-mix(in oklch, var(--color-foreground) 62%, transparent);
+  }
+  /* 词放不下的判断走实际渲染宽度（ShotStrip 的 fitWords 量的 scrollWidth）。
+     旧版这里是一条固定 44px 的容器查询，它不知道词有多长：窄格里的短词被整格抹白，
+     宽格里的长词照样溢出。截断成「等你…」比不写字更难看，所以放不下就不写。 */
+  .strip-cell[data-clip='1'] > .strip-word {
+    display: none;
+  }
 }
 
 /* Skins — the SkinSelector sets data-skin on <html>. Only the primary family

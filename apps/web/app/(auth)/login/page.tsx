@@ -10,12 +10,20 @@ import { useSession } from '@/lib/session'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BootScreen } from '@/components/boot-screen'
 import { LocaleSwitcher } from '@/components/locale-switcher'
 import { ThemeToggle } from '@/components/theme-toggle'
+import { apiErrorMessage } from '@/lib/api-error'
 
 type Mode = 'login' | 'register'
 
@@ -29,7 +37,7 @@ const heroPoints = ['auth.heroPoint1', 'auth.heroPoint2', 'auth.heroPoint3'] as 
 
 export default function LoginPage() {
   const { t } = useI18n()
-  const { status, signIn, switchOrganization } = useSession()
+  const { status, signIn, signOut, switchOrganization } = useSession()
   const router = useRouter()
 
   const [mode, setMode] = useState<Mode>('register')
@@ -92,7 +100,7 @@ export default function LoginPage() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }
@@ -101,16 +109,24 @@ export default function LoginPage() {
   async function switchToOrg(organizationId: string) {
     try {
       await switchOrganization(organizationId)
-      // Find organization name from allMemberships for toast message
       const org = allMemberships.find(m => m.organizationId === organizationId)
-      if (org) {
-        toast.success(`切换到 ${org.organizationName}`)
-      } else {
-        toast.success('组织切换成功')
-      }
+      toast.success(t('auth.switchedOrganization', { name: org?.organizationName ?? '' }))
       router.replace('/projects')
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
+    }
+  }
+
+  // The picker opens on an established session (switching is an authenticated call),
+  // so backing out of it has to revoke that session — otherwise the screen says
+  // "cancelled" while the visitor is signed in to the first organization.
+  async function cancelOrgPicker() {
+    setBusy(true)
+    try {
+      await signOut()
+    } finally {
+      setShowOrgPicker(false)
+      setBusy(false)
     }
   }
 
@@ -246,38 +262,34 @@ export default function LoginPage() {
         </div>
       </section>
 
-      {/* Organization Picker Modal */}
-      {showOrgPicker && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="w-full max-w-md p-6 space-y-4">
-            <CardHeader>
-              <CardTitle>选择组织</CardTitle>
-              <CardDescription>您属于多个组织，请选择要登录的组织</CardDescription>
-            </CardHeader>
-            <div className="space-y-2">
-              {allMemberships.map(membership => (
-                <Button
-                  key={membership.organizationId}
-                  onClick={() => switchToOrg(membership.organizationId)}
-                  className="w-full h-12 text-left px-4"
-                  variant="outline"
-                  disabled={busy}
-                >
-                  <span className="font-medium">{membership.organizationName}</span>
-                  <span className="text-muted-foreground ml-auto text-xs">{t(`role.${membership.role}`)}</span>
-                </Button>
-              ))}
-            </div>
-            <Button
-              variant="ghost"
-              onClick={() => setShowOrgPicker(false)}
-              disabled={busy}
-            >
-              取消
-            </Button>
-          </Card>
-        </div>
-      )}
+      {/* The org picker is a real modal: the visitor is already signed in when it
+          opens, so focus trapping, Esc and the overlay all have to mean "back out",
+          not "leave the dialog behind". */}
+      <Dialog open={showOrgPicker} onOpenChange={open => { if (!open) void cancelOrgPicker() }}>
+        <DialogContent showCloseButton={false} className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('auth.pickOrganization')}</DialogTitle>
+            <DialogDescription>{t('auth.pickOrganizationHint')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {allMemberships.map(membership => (
+              <Button
+                key={membership.organizationId}
+                onClick={() => switchToOrg(membership.organizationId)}
+                className="h-12 w-full px-4 text-left"
+                variant="outline"
+                disabled={busy}
+              >
+                <span className="font-medium">{membership.organizationName}</span>
+                <span className="text-muted-foreground ml-auto text-xs">{t(`role.${membership.role}`)}</span>
+              </Button>
+            ))}
+          </div>
+          <Button variant="ghost" onClick={() => void cancelOrgPicker()} disabled={busy}>
+            {t('common.cancel')}
+          </Button>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

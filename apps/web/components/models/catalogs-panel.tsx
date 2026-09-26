@@ -3,6 +3,7 @@
 import { useCallback, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { modelModalities } from '@studio/domain'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   BoxesIcon,
   ChevronDownIcon,
@@ -34,11 +35,13 @@ import { Card, CardAction, CardDescription, CardHeader, CardTitle } from '@/comp
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
+import { Hint } from '@/components/ui/hint'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 
@@ -63,7 +66,7 @@ export function CatalogsPanel({ catalogs, onChanged }: { catalogs: AsyncState<Ca
       await action()
       refresh()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('error.generic'))
+      toast.error(apiErrorMessage(err, t))
     }
   }
 
@@ -106,16 +109,17 @@ export function CatalogsPanel({ catalogs, onChanged }: { catalogs: AsyncState<Ca
         <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-sm">
           <span className="text-xs font-medium">{t('models.hiddenProviders')}</span>
           {hidden.data.providers.map(entry => (
-            <button
-              key={entry.provider}
-              type="button"
-              onClick={() => unhideProvider(entry.provider)}
-              className="bg-muted hover:bg-muted/70 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors"
-              title={t('models.restore')}
-            >
-              <EyeIcon className="size-3" />
-              {entry.label}
-            </button>
+            <Hint key={entry.provider} text={t('models.restore')}>
+              <button
+                type="button"
+                onClick={() => unhideProvider(entry.provider)}
+                aria-label={`${entry.label} · ${t('models.restore')}`}
+                className="bg-muted hover:bg-muted/70 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors"
+              >
+                <EyeIcon className="size-3" />
+                {entry.label}
+              </button>
+            </Hint>
           ))}
         </div>
       )}
@@ -223,16 +227,19 @@ function CatalogCard({
         <div className="flex flex-wrap items-center gap-2 border-t px-6 py-3">
           <span className="text-muted-foreground text-xs font-medium">{t('models.hiddenModels', { count: hiddenModels.length })}</span>
           {hiddenModels.map(row => (
-            <button
-              key={row.model}
-              type="button"
-              onClick={() => unhideModel(row.model)}
-              className="bg-muted hover:bg-muted/70 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors"
-              title={t('models.restore')}
-            >
-              <EyeIcon className="size-3" />
-              {row.displayName}
-            </button>
+            <Tooltip key={row.model}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => unhideModel(row.model)}
+                  className="bg-muted hover:bg-muted/70 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors"
+                >
+                  <EyeIcon className="size-3" />
+                  {row.displayName}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top">{t('models.restoreHint')}</TooltipContent>
+            </Tooltip>
           ))}
         </div>
       )}
@@ -344,9 +351,14 @@ function CatalogModelRow({ model, manage, onHide, onDelete }: { model: CatalogMo
               </AlertDialog>
             </>
           ) : (
-            <Button variant="ghost" size="icon-sm" aria-label={t('models.hideModel')} title={t('models.hideModel')} onClick={onHide}>
-              <EyeOffIcon />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label={t('models.hideModel')} onClick={onHide}>
+                  <EyeOffIcon />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="left">{t('models.hideModelHint')}</TooltipContent>
+            </Tooltip>
           )}
         </TableCell>
       )}
@@ -415,7 +427,7 @@ function AddCatalogModelDialog({ provider, open, onOpenChange, onDone }: AddCata
       onDone()
       onOpenChange(false)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }

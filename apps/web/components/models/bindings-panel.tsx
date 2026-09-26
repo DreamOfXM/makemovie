@@ -12,6 +12,7 @@ import { useAsync, type AsyncState } from '@/lib/use-async'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -137,7 +138,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
       bindings.reload()
       resolved.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setRestoring(false)
     }
@@ -184,7 +185,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
       bindings.mutate(current => current.map(item => (item.id === binding.id ? { ...item, enabled } : item)))
       toast.success(enabled ? t('models.bindingEnabled') : t('models.bindingDisabled'))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     }
   }
 
@@ -197,7 +198,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
       bindings.reload()
       resolved.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setUnbinding(false)
     }
@@ -669,7 +670,7 @@ function BindDialog({ open, pool, projects, defaultSlot, defaultScope, onOpenCha
       toast.success(t('models.bound', { model: selected.model, slot: translateEnum(t, 'slots', slot) }))
       onDone()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('error.generic'))
+      setError(apiErrorMessage(err, t))
     } finally {
       setBusy(false)
     }

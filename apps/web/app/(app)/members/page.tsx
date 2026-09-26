@@ -9,6 +9,7 @@ import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
 import { formatDateTime, initials } from '@/lib/utils'
+import { apiErrorMessage } from '@/lib/api-error'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -66,7 +67,7 @@ export default function MembersPage() {
       members.mutate(current => current.map(item => (item.userId === member.userId ? { ...item, role: next } : item)))
       toast.success(t('members.roleChanged', { email: member.email, role: t(`role.${next}`) }))
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setChangingId(null)
     }
@@ -80,7 +81,7 @@ export default function MembersPage() {
       setRemoveTarget(null)
       members.reload()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('error.generic'))
+      toast.error(apiErrorMessage(error, t))
     } finally {
       setRemoving(false)
     }
@@ -140,10 +141,12 @@ export default function MembersPage() {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead>{t('members.name')}</TableHead>
+                <TableHead pin="left">{t('members.name')}</TableHead>
                 <TableHead>{t('members.role')}</TableHead>
                 <TableHead>{t('members.joinedAt')}</TableHead>
-                <TableHead className="text-right">{t('common.actions')}</TableHead>
+                <TableHead className="text-right" pin="right">
+                  {t('common.actions')}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -152,12 +155,16 @@ export default function MembersPage() {
                 const removeReason = removeBlockReason(member)
                 return (
                   <TableRow key={member.userId}>
-                    <TableCell>
+                    <TableCell pin="left">
                       <div className="flex items-center gap-3">
                         <span className="bg-primary/10 text-primary flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold">
                           {initials(member.email, member.name)}
                         </span>
-                        <div className="min-w-0">
+                        {/* The name cell is sticky-left, so its width is subtracted from
+                            the 356px a phone shows before the role select even starts.
+                            At 12rem the select was left a 16px sliver; 26vw caps the cell
+                            at ~180px on a phone and is inert from 738px up, where 12rem wins. */}
+                        <div className="min-w-0 max-w-[min(12rem,26vw)]">
                           <p className="flex flex-wrap items-center gap-2 font-medium">
                             <span className="truncate">{member.name ?? member.email}</span>
                             {member.userId === me?.user.id && <Badge variant="muted">{t('members.you')}</Badge>}
@@ -194,7 +201,7 @@ export default function MembersPage() {
                     <TableCell className="text-muted-foreground whitespace-nowrap">
                       {formatDateTime(member.joinedAt, locale)}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="text-right" pin="right">
                       {removeReason ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -348,7 +355,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
         setUserExists(true)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '')
+      setError(apiErrorMessage(err, t))
       setUserExists(false)
     } finally {
       setChecking(false)
@@ -365,7 +372,7 @@ function AddMemberDialog({ open, onOpenChange, onDone }: AddMemberDialogProps) {
       onDone()
     } catch (err) {
       // Handle common error messages
-      const errorMsg = err instanceof Error ? err.message : t('error.generic')
+      const errorMsg = apiErrorMessage(err, t)
       setError(errorMsg)
       
       // If user exists but not in org, show better message
