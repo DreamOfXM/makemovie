@@ -38,10 +38,13 @@ interface UsageRowDto {
   /** Ledger rows aggregated here. Normally equal to `taskCount`; the gap is the rows
    * whose task no longer exists, which cannot be counted as tasks. */
   entryCount: number
-  /** Tasks that needed more than one attempt to pass the quality gate. Failures are not
-   * reportable from the ledger at all — a failed task never writes an entry — so they
-   * belong to the task listing, not here. */
+  /** Tasks that needed more than one attempt to pass the quality gate. */
   retriedTaskCount: number
+  /** Tasks that ended FAILED on this exact provider+model. The ledger cannot speak of
+   * failures — a failed task never writes an entry — so this comes off the task table and
+   * covers only the failures a model is attributable to: a task that died before a
+   * provider was picked names no model and lands in no row. */
+  failedTaskCount: number
   inputUnits: number
   outputUnits: number
   /** What the organization is bound to for this stage right now, which is not necessarily
@@ -61,7 +64,7 @@ interface UsageProjectDto {
 
 interface UsageReportDto {
   rows: UsageRowDto[]
-  total: { taskCount: number; entryCount: number; retriedTaskCount: number; inputUnits: number; outputUnits: number }
+  total: { taskCount: number; entryCount: number; retriedTaskCount: number; failedTaskCount: number; inputUnits: number; outputUnits: number }
   /** Space-scope view only: the same totals decomposed per project, so the organization
    * ledger can point at a project without a second round-trip. Rows whose task is gone
    * belong to no project and are reported in `ungrouped` rather than dropped. */
@@ -123,6 +126,7 @@ interface Group {
   modality: string
   taskIds: Set<string>
   retriedTaskIds: Set<string>
+  failedTaskCount: number
   entryCount: number
   inputUnits: number
   outputUnits: number
@@ -229,7 +233,7 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
         const key = `${stage ?? '-'}\u0000${entry.provider}\u0000${entry.model}`
         let group = groups.get(key)
         if (!group) {
-          group = { stage, provider: entry.provider, model: entry.model, modality: entry.modality, taskIds: new Set(), retriedTaskIds: new Set(), entryCount: 0, inputUnits: 0, outputUnits: 0 }
+          group = { stage, provider: entry.provider, model: entry.model, modality: entry.modality, taskIds: new Set(), retriedTaskIds: new Set(), failedTaskCount: 0, entryCount: 0, inputUnits: 0, outputUnits: 0 }
           groups.set(key, group)
         }
         group.entryCount += 1
@@ -242,6 +246,33 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
         if (task.attempts > 1) group.retriedTaskIds.add(task.id)
       }
 
+      // Failures come off the task table, not the ledger: a failed attempt consumes
+      // nothing the ledger records, so the only place a failure exists is the task that
+      // ended FAILED. Tasks that died before a model was picked name no provider+model
+      // and therefore belong to no row; the column is "how often *this model* failed".
+      const failedTasks = await app.db.generationTask.findMany({
+        where: {
+          organizationId: auth.organizationId,
+          status: 'FAILED',
+          provider: { not: null },
+          model: { not: null },
+          ...(episodeId ? { batch: { episode: { id: episodeId } } } : projectId ? { batch: { episode: { projectId } } } : {}),
+          ...(from.value || to.value
+            ? { createdAt: { ...(from.value ? { gte: from.value } : {}), ...(to.value ? { lte: to.value } : {}) } }
+            : {}),
+        },
+        select: { stage: true, provider: true, model: true },
+      })
+      for (const task of failedTasks) {
+        const key = `${task.stage}\u0000${task.provider}\u0000${task.model}`
+        let group = groups.get(key)
+        if (!group) {
+          group = { stage: task.stage, provider: task.provider ?? '', model: task.model ?? '', modality: '', taskIds: new Set(), retriedTaskIds: new Set(), failedTaskCount: 0, entryCount: 0, inputUnits: 0, outputUnits: 0 }
+          groups.set(key, group)
+        }
+        group.failedTaskCount += 1
+      }
+
       const candidateCache = new Map<CapabilitySlot, SlotCandidate[]>()
       async function candidatesFor(slot: CapabilitySlot): Promise<SlotCandidate[]> {
         const cached = candidateCache.get(slot)
@@ -251,9 +282,14 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
         return candidates
       }
 
+      // Null-stage rows (their task is gone) sort last, everything else by stage,
+      // provider, model. The rank must be computed on both sides and subtracted:
+      // returning a constant when both sides are null makes the comparator
+      // inconsistent, and the resulting order implementation-defined.
+      const stageRank = (stage: Stage | null) => (stage === null ? 1 : 0)
       const ordered = [...groups.values()].sort(
         (a, b) =>
-          (a.stage === null ? 1 : b.stage === null ? -1 : 0) ||
+          stageRank(a.stage) - stageRank(b.stage) ||
           String(a.stage ?? '').localeCompare(String(b.stage ?? '')) ||
           a.provider.localeCompare(b.provider) ||
           a.model.localeCompare(b.model),
@@ -275,6 +311,7 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
           taskCount: group.taskIds.size,
           entryCount: group.entryCount,
           retriedTaskCount: group.retriedTaskIds.size,
+          failedTaskCount: group.failedTaskCount,
           inputUnits: group.inputUnits,
           outputUnits: group.outputUnits,
           binding: match && slot ? { slot, connectionId: match.connectionId, connectionName: match.connectionName, scope: match.scope } : null,
@@ -308,6 +345,7 @@ export async function usageRoutes(app: FastifyInstance): Promise<void> {
           taskCount: rows.reduce((sum, row) => sum + row.taskCount, 0),
           entryCount: rows.reduce((sum, row) => sum + row.entryCount, 0),
           retriedTaskCount: rows.reduce((sum, row) => sum + row.retriedTaskCount, 0),
+          failedTaskCount: rows.reduce((sum, row) => sum + row.failedTaskCount, 0),
           inputUnits: rows.reduce((sum, row) => sum + row.inputUnits, 0),
           outputUnits: rows.reduce((sum, row) => sum + row.outputUnits, 0),
         },

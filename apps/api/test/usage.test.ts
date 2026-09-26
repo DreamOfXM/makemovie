@@ -19,6 +19,7 @@ interface UsageRow {
   taskCount: number
   entryCount: number
   retriedTaskCount: number
+  failedTaskCount: number
   inputUnits: number
   outputUnits: number
   binding: UsageBinding | null
@@ -26,7 +27,7 @@ interface UsageRow {
 
 interface UsageReport {
   rows: UsageRow[]
-  total: { taskCount: number; entryCount: number; retriedTaskCount: number; inputUnits: number; outputUnits: number }
+  total: { taskCount: number; entryCount: number; retriedTaskCount: number; failedTaskCount: number; inputUnits: number; outputUnits: number }
   byProject?: { projectId: string; projectName: string; taskCount: number; entryCount: number; inputUnits: number; outputUnits: number }[]
   ungrouped?: { entryCount: number; inputUnits: number; outputUnits: number }
   units: { input: string; output: string }
@@ -134,6 +135,32 @@ async function seedRun(
   return { batch, task, entry }
 }
 
+/**
+ * A run that ended badly, written the way the worker writes it: the task carries the
+ * provider and model it tried, and no ledger entry follows it. Consumption and failure
+ * are recorded on opposite sides of the schema, which is why the report reads both.
+ */
+async function seedFailure(
+  tenant: Tenant,
+  options: { stage: Stage; episodeId?: string; provider?: string | null; model?: string | null; createdAt?: Date },
+) {
+  const batch = await env.db.generationBatch.create({
+    data: { organizationId: tenant.organizationId, episodeId: options.episodeId ?? tenant.episodeId, stage: options.stage, plannedCount: 1 },
+  })
+  return env.db.generationTask.create({
+    data: {
+      organizationId: tenant.organizationId,
+      batchId: batch.id,
+      stage: options.stage,
+      status: 'FAILED' as TaskStatus,
+      provider: options.provider === null ? null : options.provider ?? 'mock',
+      model: options.model === null ? null : options.model ?? 'mock-t2v',
+      attempts: 1,
+      createdAt: options.createdAt ?? at(0),
+    },
+  })
+}
+
 async function getUsage(token: string, query: Record<string, string> = {}): Promise<{ statusCode: number; body: UsageReport }> {
   const search = new URLSearchParams(query).toString()
   const res = await env.app.inject({ method: 'GET', url: `/api/usage${search ? `?${search}` : ''}`, headers: authHeaders(token) })
@@ -164,15 +191,42 @@ describe('GET /usage', () => {
     expect(body.rows).toHaveLength(2)
 
     const video = rowFor(body, 'VIDEO', 'mock-t2v')!
-    expect(video).toMatchObject({ stage: 'VIDEO', provider: 'mock', model: 'mock-t2v', modality: 't2v', taskCount: 2, entryCount: 2, retriedTaskCount: 1, inputUnits: 200, outputUnits: 9000 })
+    expect(video).toMatchObject({ stage: 'VIDEO', provider: 'mock', model: 'mock-t2v', modality: 't2v', taskCount: 2, entryCount: 2, retriedTaskCount: 1, failedTaskCount: 0, inputUnits: 200, outputUnits: 9000 })
     // One entry per succeeded task, so the two counts agree here; what separates them is
     // that one of the two runs passed the quality gate only on its second attempt, which
     // the task's attempt count records and the ledger does not.
-    expect(body.total).toEqual({ taskCount: 3, entryCount: 3, retriedTaskCount: 1, inputUnits: 600, outputUnits: 11048 })
+    expect(body.total).toEqual({ taskCount: 3, entryCount: 3, retriedTaskCount: 1, failedTaskCount: 0, inputUnits: 600, outputUnits: 11048 })
 
     // The report names the connection the organization is bound to for that stage today.
     expect(video.binding).toEqual({ slot: 'video_t2v', connectionId: expect.any(String), connectionName: 'usage-group-main', scope: 'organization' })
     expect(rowFor(body, 'SCRIPT', 'mock-text')!.binding).toMatchObject({ slot: 'script_text', connectionName: 'usage-group-main' })
+  })
+
+  it('counts failures off the task side and keeps them inside the same scope', async () => {
+    const tenant = await createTenant('usage-failed@example.com', 'Usage Failed Org', 'usage-failed-main')
+    await seedRun(tenant, { stage: 'VIDEO', model: 'mock-t2v', modality: 't2v', inputUnits: 120, outputUnits: 5000 })
+    await seedFailure(tenant, { stage: 'VIDEO', model: 'mock-t2v' })
+    await seedFailure(tenant, { stage: 'VIDEO', model: 'mock-t2v' })
+    // A model that never once succeeded still owns its failures: the row says what was
+    // tried, not only what was billed. `IMAGE` is the API's name for the first-frame stage.
+    await seedFailure(tenant, { stage: 'FIRST_FRAME', model: 'mock-image' })
+    // A task that died before a model was picked names nothing, so it belongs to no row.
+    await seedFailure(tenant, { stage: 'VIDEO', provider: null, model: null })
+    // The other episode's failure stays out of an episode-scoped query.
+    await seedFailure(tenant, { stage: 'VIDEO', model: 'mock-t2v', episodeId: tenant.secondEpisodeId })
+
+    const { body } = await getUsage(tenant.token)
+    // Space scope is one row per model, so both episodes' failures land on the same line.
+    expect(rowFor(body, 'VIDEO', 'mock-t2v')).toMatchObject({ taskCount: 1, entryCount: 1, inputUnits: 120, failedTaskCount: 3 })
+    expect(rowFor(body, 'IMAGE', 'mock-image')).toMatchObject({ taskCount: 0, entryCount: 0, inputUnits: 0, outputUnits: 0, failedTaskCount: 1 })
+    expect(body.total.failedTaskCount).toBe(4)
+    // Units never move because of a failure: the ledger recorded the one success and nothing else.
+    expect(body.total).toMatchObject({ taskCount: 1, entryCount: 1, inputUnits: 120, outputUnits: 5000 })
+
+    const scoped = await getUsage(tenant.token, { episodeId: tenant.episodeId })
+    expect(rowFor(scoped.body, 'VIDEO', 'mock-t2v')!.failedTaskCount).toBe(2)
+    const otherEpisode = await getUsage(tenant.token, { episodeId: tenant.secondEpisodeId })
+    expect(otherEpisode.body.total.failedTaskCount).toBe(1)
   })
 
   it('leaves the binding null for a model the organization is no longer bound to', async () => {
@@ -218,7 +272,7 @@ describe('GET /usage', () => {
     await seedRun(theirs, { stage: 'MUSIC', model: 'mock-music', modality: 'music', inputUnits: 88888, outputUnits: 99999 })
 
     const ours = await getUsage(mine.token)
-    expect(ours.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, inputUnits: 111, outputUnits: 700 })
+    expect(ours.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 111, outputUnits: 700 })
     expect(ours.body.rows.every(row => row.inputUnits !== 88888)).toBe(true)
 
     const theirsReport = await getUsage(theirs.token)
@@ -250,7 +304,7 @@ describe('GET /usage', () => {
     expect(all.body.total.inputUnits).toBe(30)
     const episodeOne = await getUsage(tenant.token, { episodeId: tenant.episodeId })
     expect(episodeOne.body.rows).toHaveLength(1)
-    expect(episodeOne.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, inputUnits: 10, outputUnits: 100 })
+    expect(episodeOne.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 10, outputUnits: 100 })
     const project = await getUsage(tenant.token, { projectId: tenant.projectId })
     expect(project.body.total.taskCount).toBe(2)
   })
@@ -273,7 +327,7 @@ describe('GET /usage', () => {
 
     const open = await getUsage(tenant.token, { from: iso(60), to: iso(0) })
     expect(open.body.rows).toHaveLength(0)
-    expect(open.body.total).toEqual({ taskCount: 0, entryCount: 0, retriedTaskCount: 0, inputUnits: 0, outputUnits: 0 })
+    expect(open.body.total).toEqual({ taskCount: 0, entryCount: 0, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 0, outputUnits: 0 })
 
     const malformed = await env.app.inject({ method: 'GET', url: '/api/usage?from=last-tuesday', headers: authHeaders(tenant.token) })
     expect(malformed.statusCode).toBe(400)
@@ -297,7 +351,7 @@ describe('GET /usage', () => {
     // attributed to any stage, so it stands apart instead of silently borrowing one.
     expect(all.body.rows[0]).toMatchObject({ stage: 'VIDEO', taskCount: 1, entryCount: 1, inputUnits: 3, outputUnits: 30 })
     expect(all.body.rows[1]).toMatchObject({ stage: null, taskCount: 0, entryCount: 1, inputUnits: 7, outputUnits: 70 })
-    expect(all.body.total).toEqual({ taskCount: 1, entryCount: 2, retriedTaskCount: 0, inputUnits: 10, outputUnits: 100 })
+    expect(all.body.total).toEqual({ taskCount: 1, entryCount: 2, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 10, outputUnits: 100 })
 
     // The space ledger names the project its attributed units came from, and leaves the
     // entry that belongs to none on its own line rather than borrowing a neighbour.
@@ -307,10 +361,31 @@ describe('GET /usage', () => {
 
     const scoped = await getUsage(tenant.token, { projectId: tenant.projectId })
     expect(scoped.body.rows).toHaveLength(1)
-    expect(scoped.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, inputUnits: 3, outputUnits: 30 })
+    expect(scoped.body.total).toEqual({ taskCount: 1, entryCount: 1, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 3, outputUnits: 30 })
     // Asking for one project already is the breakdown; it does not repeat itself.
     expect(scoped.body.byProject).toBeUndefined()
     expect(scoped.body.ungrouped).toBeUndefined()
+  })
+
+  it('orders taskless rows deterministically instead of by comparator accident', async () => {
+    const tenant = await createTenant('usage-order@example.com', 'Usage Order Org', 'usage-order-main')
+    // Taskless rows all compare "null stage" against each other, and the old
+    // comparator returned a constant 1 there — an inconsistent comparator whose
+    // output order was whatever the sort implementation felt like. Seed in
+    // non-alphabetical order with descending timestamps so neither insertion
+    // order nor time order can masquerade as the sorted one.
+    await seedRun(tenant, { stage: 'SCRIPT', model: 'mock-text', modality: 'text', inputUnits: 1, outputUnits: 10 })
+    for (const [index, model] of ['m-c', 'm-a', 'm-b'].entries()) {
+      await seedRun(tenant, { stage: 'SCRIPT', model, modality: 'text', inputUnits: 1, outputUnits: 10, taskId: null, createdAt: at(-index * 60) })
+    }
+
+    const { body } = await getUsage(tenant.token)
+    expect(body.rows.map(row => [row.stage, row.model])).toEqual([
+      ['SCRIPT', 'mock-text'],
+      [null, 'm-a'],
+      [null, 'm-b'],
+      [null, 'm-c'],
+    ])
   })
 
   it('splits the space ledger by project so the heaviest consumer leads', async () => {
@@ -336,7 +411,7 @@ describe('GET /usage', () => {
     expect(body.byProject?.reduce((sum, row) => sum + row.inputUnits, 0)).toBe(body.total.inputUnits)
 
     const inSecond = await getUsage(tenant.token, { projectId: second.json().id as string })
-    expect(inSecond.body.total).toEqual({ taskCount: 2, entryCount: 2, retriedTaskCount: 0, inputUnits: 250, outputUnits: 10024 })
+    expect(inSecond.body.total).toEqual({ taskCount: 2, entryCount: 2, retriedTaskCount: 0, failedTaskCount: 0, inputUnits: 250, outputUnits: 10024 })
   })
 
   it('requires a session', async () => {
@@ -388,13 +463,13 @@ function assertNoPriceTags(payload: string): void {
     throw new Error(`${boundary} — the report carried no rows, so its shape went unverified.`)
   }
   const rowKeys = Object.keys(rows[0] ?? {}).sort().join(',')
-  const expectedRows = 'binding,entryCount,inputUnits,modality,model,outputUnits,provider,retriedTaskCount,stage,taskCount'
+  const expectedRows = 'binding,entryCount,failedTaskCount,inputUnits,modality,model,outputUnits,provider,retriedTaskCount,stage,taskCount'
   if (rowKeys !== expectedRows) {
     throw new Error(`${boundary} — usage row keys changed to "${rowKeys}".`)
   }
 
   const totalKeys = Object.keys(body.total as Record<string, unknown>).sort().join(',')
-  if (totalKeys !== 'entryCount,inputUnits,outputUnits,retriedTaskCount,taskCount') {
+  if (totalKeys !== 'entryCount,failedTaskCount,inputUnits,outputUnits,retriedTaskCount,taskCount') {
     throw new Error(`${boundary} — usage total keys changed to "${totalKeys}".`)
   }
 
