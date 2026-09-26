@@ -35,6 +35,7 @@ interface ArtifactDto {
   id: string
   mimeType: string
   objectKey: string
+  version: number
   width: number | null
   height: number | null
   durationMs: number | null
@@ -54,6 +55,7 @@ interface TaskDto {
   updatedAt: string
   artifacts: ArtifactDto[]
   qc: { kind: string; score: number; status: string } | null
+  scores: number[]
   retryTrace: { attempt: number | null; candidateErrors: string[]; reference: { model: string; conditioned: boolean; reason?: string }[] } | null
 }
 
@@ -486,12 +488,17 @@ describe('artifact content', () => {
       id: artifact.id,
       mimeType: 'image/png',
       objectKey: artifact.objectKey,
+      version: artifact.version,
       width: 320,
       height: 240,
       durationMs: null,
       downloadUrl: `/artifacts/${artifact.id}/content`,
+      // 生成产物永远没有原始文件名：那个名字只属于人自己传上来的音频。
+      filename: null,
     }])
     expect(task.qc).toEqual({ kind: 'visual', score: 0.9, status: 'COMPLETED' })
+    // qc 是最新一次的裁决；历史栏的「最高分」要的是全部尝试，两者必须同时下发。
+    expect(task.scores).toEqual([0.9, 0.4])
 
     // An audit that could not happen writes a null score. It must stay null: a
     // coerced 0 would render as a red 0%, i.e. a failed judgment nobody made.
@@ -503,6 +510,8 @@ describe('artifact content', () => {
       .flatMap(batch => batch.tasks)
       .find(candidate => candidate.id === videoTaskId)!
     expect(unjudgedTask.qc).toEqual({ kind: 'visual-audit', score: null, status: 'NEEDS_REVIEW' })
+    // 判不了的那次不进 scores：UI 拿它算最高分会凭空多出一回判定。
+    expect(unjudgedTask.scores).toEqual([0.9, 0.4])
   })
 })
 

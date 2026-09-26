@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { Prisma, type PrismaClient } from '@studio/db'
-import { modelModalities, isModelModality, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
+import { modelModalities, isModelModality, reduceCallEvidence, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
 import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogModel, type ProviderAdapter, type ProviderCatalog } from '@studio/providers'
 import { decryptSecret, encryptSecret } from '@studio/security'
 import { recordAudit } from '../lib/audit.js'
@@ -164,6 +164,19 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       include: { capabilities: { orderBy: { model: 'asc' } } },
     })
     return connections.map(({ encryptedSecret, accessKeyEncrypted, ...rest }) => ({ ...rest, apiKeySet: encryptedSecret.length > 0, accessKeySet: Boolean(accessKeyEncrypted) }))
+  })
+
+  /**
+   * 探测时间戳只证明「曾经通过」：额度用尽、权限被收回之后它不会自己变红。
+   * 就绪度面板要报「现在跑不跑得通」，只能对着真实调用履历算。
+   */
+  app.get('/providers/call-evidence', { preHandler: requirePermission('read') }, async request => {
+    const auth = request.auth!
+    const tasks = await app.db.generationTask.findMany({
+      where: { organizationId: auth.organizationId, status: { in: ['SUCCEEDED', 'FAILED'] } },
+      select: { provider: true, model: true, status: true, errorSnapshot: true, updatedAt: true },
+    })
+    return Object.fromEntries(reduceCallEvidence(tasks))
   })
 
   app.post<{ Body: ConnectionBody }>('/providers/connections', { preHandler: requirePermission('providers:manage') }, async (request, reply) => {

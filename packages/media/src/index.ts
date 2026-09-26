@@ -262,11 +262,26 @@ export interface AigcLabel {
   metadata: Record<string, string>
 }
 
+/**
+ * 这一镜成片里听到什么。`voice` 只用人声轨，`native` 只留模型自带音轨，
+ * `voice_native` 把原声当氛围垫在配音下面。null = 没人钦定，沿用老语义
+ * （有配音就丢原声，没配音才留原声）——保持未改动镜头的成片逐字节不变。
+ */
+export type ShotAudioMode = 'voice' | 'native' | 'voice_native'
+
 export interface ComposeInput {
   /** Final video clips, in shot order. */
   clips: string[]
   /** Spoken audio per clip, aligned by index; null or missing means the shot is silent. */
   voices?: (string | null)[]
+  /** Audio source per clip, aligned by index; see `ShotAudioMode`. */
+  audioSources?: (ShotAudioMode | null)[]
+  /**
+   * 人工导入的环境音 per clip, aligned by index. Orthogonal to `audioSources`: whatever
+   * the shot's voice is, this beds under it at the ambience level — so a shot whose
+   * model-native audio carries its own spoken words can still get a room tone.
+   */
+  ambiences?: (string | null)[]
   /** Music bed, looped under the voice (ducked when the ffmpeg build has sidechaincompress, otherwise a fixed level) and cut to the master. */
   bgm?: string
   /** SubRip file muxed as a soft subtitle track; burning in would re-encode the whole video. */
@@ -544,7 +559,7 @@ export async function aigcBadgeCapability(): Promise<{ canBurn: boolean; drawtex
 
 export class FfmpegComposer implements Composer {
   async compose(input: ComposeInput, output: string): Promise<ComposeResult> {
-    const { clips, voices, bgm, srt, label } = input
+    const { clips, voices, audioSources, ambiences, bgm, srt, label } = input
     if (clips.length === 0) throw new Error('compose requires at least one clip')
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-compose-'))
     try {
@@ -568,7 +583,10 @@ export class FfmpegComposer implements Composer {
         if (badge) labeling = { explicit: 'burned', implicit: 'written' }
       }
 
-      const voiceResult = voices?.some(Boolean) ? await buildVoiceTrack(voices, clips, workdir) : undefined
+      // 只有真需要拼轨时才建轨：没人钦定声音来源、又没有一句配音的整集，
+      // 走的还是「母带自带原声」那条老路（原声按拼接时的原始电平入片）。
+      const needsTrack = Boolean(voices?.some(Boolean) || audioSources?.some(Boolean) || ambiences?.some(Boolean))
+      const voiceResult = needsTrack ? await buildVoiceTrack(voices ?? [], clips, workdir, audioSources, ambiences) : undefined
       const voice = voiceResult?.track
       const audio = bgm ? await mixBgm(bgm, voice, master, workdir) : voice
       // 台词溢出(一句话比画面长)时用末帧定格补齐画面——L-cut 的收尾,
@@ -789,6 +807,8 @@ async function buildVoiceTrack(
   voices: (string | null)[],
   clips: string[],
   workdir: string,
+  audioSources?: (ShotAudioMode | null)[],
+  ambiences?: (string | null)[],
 ): Promise<{ track: string; overflowMs: number }> {
   let videoCursorMs = 0
   let audioCursorMs = 0
@@ -798,18 +818,25 @@ async function buildVoiceTrack(
   for (const [index, clip] of clips.entries()) {
     const shotStartMs = videoCursorMs
     const clipSeconds = Math.max(1, await probeDuration(clip)) / 1000
-    const voice = voices[index]
-    const native = !voice && (await hasAudioStream(clip))
-    if (voice) {
+    const voice = voices[index] ?? null
+    const mode: ShotAudioMode = audioSources?.[index] ?? (voice ? 'voice' : 'native')
+    const useVoice = voice !== null && mode !== 'native'
+    const useNative = mode !== 'voice'
+    const ambience = ambiences?.[index] ?? null
+    if (useVoice && voice) {
       // 台词比前一句还长时按 L-cut 顺延起播点;音频轨长过画面由 overflow 交给末帧定格。
       const startMs = Math.max(shotStartMs, audioCursorMs)
       placed.push({ file: voice, startMs })
       audioCursorMs = startMs + Math.max(100, await probeDuration(voice))
-    } else if (native) {
-      // 无台词但片段自带音轨(模型生成的环境声):原样保留,合成后才不会"突然变哑"。
+    }
+    // 这一镜的氛围底：导入的环境音优先，它按镜头长度切齐后走与原生音轨同一条
+    // 0.6 压电平的路。人既然点名了这条街声，就不该再叠一层模型自己混好的原声
+    // （那里面可能带着它自己"念"出来的词）。
+    const bedSource = ambience ?? (useNative && (await hasAudioStream(clip)) ? clip : null)
+    if (bedSource) {
       const segment = path.join(workdir, `ambient-${index}.wav`)
       await run('ffmpeg', [
-        '-y', '-v', 'error', '-i', clip,
+        '-y', '-v', 'error', '-i', bedSource,
         '-af', `${AUDIO_SHAPE},apad,atrim=0:${clipSeconds.toFixed(3)}`,
         '-c:a', 'pcm_s16le', segment,
       ])

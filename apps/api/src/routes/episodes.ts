@@ -1,6 +1,10 @@
-import type { FastifyInstance, FastifyReply } from 'fastify'
-import { Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
+import { basename, extname, join } from 'node:path'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { AudioSource, Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
 import { can, canTransition, durationOutOfRange, formatDefaults, formatDurationRange, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
+import { buildObjectKey, probeDuration } from '@studio/media'
 import { recordAudit } from '../lib/audit.js'
 import { authenticate, requirePermission } from '../plugins/auth.js'
 import type { AuthContext } from '../types.js'
@@ -22,14 +26,74 @@ async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizatio
   return db.episode.findFirst({ where: { id: episodeId, project: { organizationId } } })
 }
 
+const emptyProgress = { frames: 0, videos: 0, composed: 0, delivered: 0 }
+
+/**
+ * How far each episode of a project has actually got, for the project console's
+ * shot-progress column. Neither the episode row nor its shot list says it: media
+ * hangs off generation tasks, one re-generated shot has several of them, and only
+ * the live breakdown counts. Superseded shots are filtered through the task's own
+ * `storyboard` relation so a paid-for frame sitting on a replaced shot never gets
+ * tallied as progress the viewer can no longer reach.
+ */
+async function episodeProgress(db: PrismaClient, projectId: string) {
+  const [tasks, compositions, deliveries] = await Promise.all([
+    db.generationTask.findMany({
+      where: {
+        batch: { episode: { projectId } },
+        stage: { in: ['FIRST_FRAME', 'VIDEO'] },
+        status: 'SUCCEEDED',
+        storyboard: { supersededAt: null },
+        mediaArtifacts: { some: {} },
+      },
+      select: { stage: true, storyboardId: true, storyboard: { select: { episodeId: true } } },
+    }),
+    db.composition.findMany({ where: { episode: { project: { id: projectId } } }, select: { episodeId: true } }),
+    db.delivery.findMany({ where: { episode: { project: { id: projectId } } }, select: { episodeId: true } }),
+  ])
+
+  const out = new Map<string, typeof emptyProgress>()
+  const of = (episodeId: string) => {
+    let row = out.get(episodeId)
+    if (!row) {
+      row = { ...emptyProgress }
+      out.set(episodeId, row)
+    }
+    return row
+  }
+
+  // Sets, because the rows are tasks and the answer is shots: two successful
+  // first-frame runs of the same shot are one shot with a picture.
+  const frames = new Map<string, Set<string>>()
+  const videos = new Map<string, Set<string>>()
+  for (const task of tasks) {
+    const episodeId = task.storyboard?.episodeId
+    const shotId = task.storyboardId
+    if (!episodeId || !shotId) continue
+    const bucket = task.stage === 'FIRST_FRAME' ? frames : videos
+    const set = bucket.get(episodeId) ?? new Set<string>()
+    set.add(shotId)
+    bucket.set(episodeId, set)
+  }
+  for (const [episodeId, shots] of frames) of(episodeId).frames = shots.size
+  for (const [episodeId, shots] of videos) of(episodeId).videos = shots.size
+  for (const row of compositions) of(row.episodeId).composed += 1
+  for (const row of deliveries) of(row.episodeId).delivered += 1
+  return out
+}
+
 // Tasks are walked oldest-to-newest so the latest revision overwrites any stale one in
 // the map. The shot comes from the task's own `storyboardId`, not from a segment of its
 // idempotency key: that key is an anti-collision token, and reading a relation out of it
 // would silently detach every shot from its media the day the key format changed.
-async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string>; inflight: Map<string, Set<string>>; taskIds: Map<string, string[]> }> {
+async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; importedVoice: Map<string, ArtifactDto>; importedAmbience: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string>; inflight: Map<string, Set<string>>; taskIds: Map<string, string[]>; landedAt: Map<string, Date>; errorAt: Map<string, Date> }> {
   const firstFrame = new Map<string, ArtifactDto>()
   const video = new Map<string, ArtifactDto>()
   const voice = new Map<string, ArtifactDto>()
+  // 人工导入的音频不挂在任何生成任务上，上面那场遍历天然拿不到它；按镜头上的
+  // 指针单独取，这样「移除导入」后指针清空、地图也就没有这一项，不会谎报。
+  const importedVoice = new Map<string, ArtifactDto>()
+  const importedAmbience = new Map<string, ArtifactDto>()
   // 失败原因与产物同样是一等数据:没有它,用户对着"已失败"三个字只能懵逼。
   // 但错误与产物必须同一场遍历裁决——错误曾独立查询"最新失败",结果重生成
   // 成功之后旧失败仍然是最新的失败,横幅永远挂在成功的视频头上。
@@ -37,6 +101,11 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
   const videoError = new Map<string, string>()
   const inflight = new Map<string, Set<string>>()
   const taskIds = new Map<string, string[]>()
+  // 等待时钟的两个来源：最近一次落地的产物、最近一次仍然成立的失败。
+  // 分镜本身没有时间字段（schema 里 Storyboard 无 createdAt/updatedAt），
+  // 「等了多久」只能从这两类真事件取，宁可显示不出来也不编。
+  const landedAt = new Map<string, Date>()
+  const errorAt = new Map<string, Date>()
   const tasks = await db.generationTask.findMany({
     where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO', 'AUDIO'] }, storyboardId: { not: null }, status: { in: ['SUCCEEDED', 'FAILED', 'QUEUED', 'RUNNING'] } },
     include: { mediaArtifacts: { orderBy: { version: 'desc' }, take: 1 } },
@@ -57,12 +126,15 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
       if (task.stage === 'FIRST_FRAME') {
         firstFrame.set(task.storyboardId, toArtifactDto(artifact))
         frameError.delete(task.storyboardId)
+        errorAt.delete(`${task.storyboardId}:FIRST_FRAME`)
       } else if (task.stage === 'VIDEO') {
         video.set(task.storyboardId, toArtifactDto(artifact))
         videoError.delete(task.storyboardId)
+        errorAt.delete(`${task.storyboardId}:VIDEO`)
       } else {
         voice.set(task.storyboardId, toArtifactDto(artifact))
       }
+      landedAt.set(task.storyboardId, artifact.createdAt)
     } else if (task.status === 'FAILED' && task.errorSnapshot) {
       let message = task.errorSnapshot
       try {
@@ -73,15 +145,39 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
       }
       if (task.stage === 'FIRST_FRAME') frameError.set(task.storyboardId, message.slice(0, 400))
       else if (task.stage === 'VIDEO') videoError.set(task.storyboardId, message.slice(0, 400))
+      else continue
+      errorAt.set(`${task.storyboardId}:${task.stage}`, task.updatedAt)
     } else if (task.status === 'QUEUED' || task.status === 'RUNNING') {
       const stages = inflight.get(task.storyboardId) ?? new Set<string>()
       stages.add(task.stage)
       inflight.set(task.storyboardId, stages)
-      if (task.stage === 'FIRST_FRAME') frameError.delete(task.storyboardId)
-      else if (task.stage === 'VIDEO') videoError.delete(task.storyboardId)
+      if (task.stage === 'FIRST_FRAME') {
+        frameError.delete(task.storyboardId)
+        errorAt.delete(`${task.storyboardId}:FIRST_FRAME`)
+      } else if (task.stage === 'VIDEO') {
+        videoError.delete(task.storyboardId)
+        errorAt.delete(`${task.storyboardId}:VIDEO`)
+      }
     }
   }
-  return { firstFrame, video, voice, frameError, videoError, inflight, taskIds }
+  const pointers = await db.storyboard.findMany({
+    where: { episodeId, OR: [{ importedVoiceArtifactId: { not: null } }, { importedAmbienceArtifactId: { not: null } }] },
+    select: { id: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true },
+  })
+  const pointerIds = pointers
+    .flatMap(pointer => [pointer.importedVoiceArtifactId, pointer.importedAmbienceArtifactId])
+    .filter((id): id is string => id !== null)
+  if (pointerIds.length > 0) {
+    const rows = await db.mediaArtifact.findMany({ where: { id: { in: pointerIds } } })
+    const byId = new Map(rows.map(row => [row.id, toArtifactDto(row)]))
+    for (const pointer of pointers) {
+      const voiceArtifact = pointer.importedVoiceArtifactId ? byId.get(pointer.importedVoiceArtifactId) : undefined
+      if (voiceArtifact) importedVoice.set(pointer.id, voiceArtifact)
+      const ambienceArtifact = pointer.importedAmbienceArtifactId ? byId.get(pointer.importedAmbienceArtifactId) : undefined
+      if (ambienceArtifact) importedAmbience.set(pointer.id, ambienceArtifact)
+    }
+  }
+  return { firstFrame, video, voice, importedVoice, importedAmbience, frameError, videoError, inflight, taskIds, landedAt, errorAt }
 }
 
 interface StoryboardAssetDto {
@@ -130,15 +226,22 @@ interface StoryboardDto {
   continuityOut: string
   status: DbWorkflowStatus
   supersededAt: string | null
+  /** Which of this shot's succeeded clips the human pinned. Null means the selection gate is still open. */
+  selectedVideoArtifactId: string | null
+  /** 人给这一镜选的声音来源。Null = 未选，合成按镜型默认（有台词=只用配音，无台词=只用原声）。 */
+  audioSource: AudioSource | null
   assets: StoryboardRow['assets']
   firstFrame: ArtifactDto | null
   video: ArtifactDto | null
   voice: ArtifactDto | null
+  importedVoice: ArtifactDto | null
+  /** 这一镜导入的环境音（垫在配音底下的氛围底）。与 audioSource 正交。 */
+  importedAmbience: ArtifactDto | null
   firstFrameError: string | null
   videoError: string | null
 }
 
-function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string> }): StoryboardDto {
+function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; importedVoice: Map<string, ArtifactDto>; importedAmbience: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string> }): StoryboardDto {
   return {
     id: storyboard.id,
     episodeId: storyboard.episodeId,
@@ -156,10 +259,14 @@ function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<str
     continuityOut: storyboard.continuityOut,
     status: storyboard.status,
     supersededAt: storyboard.supersededAt?.toISOString() ?? null,
+    selectedVideoArtifactId: storyboard.selectedVideoArtifactId,
+    audioSource: storyboard.audioSource,
     assets: storyboard.assets,
     firstFrame: media.firstFrame.get(storyboard.id) ?? null,
     video: media.video.get(storyboard.id) ?? null,
     voice: media.voice.get(storyboard.id) ?? null,
+    importedVoice: media.importedVoice.get(storyboard.id) ?? null,
+    importedAmbience: media.importedAmbience.get(storyboard.id) ?? null,
     firstFrameError: media.frameError.get(storyboard.id) ?? null,
     videoError: media.videoError.get(storyboard.id) ?? null,
   }
@@ -171,6 +278,34 @@ function toStoryboardAssetDto(link: StoryboardAssetLink): StoryboardAssetDto {
 
 async function findStoryboardInOrg(db: PrismaClient, storyboardId: string, organizationId: string) {
   return db.storyboard.findFirst({ where: { id: storyboardId, episode: { project: { organizationId } } } })
+}
+
+// 导入音频的上限按音频本身定，不跟整本书那条 4 MB 文字天花板走：一段一分钟的
+// 配音 WAV 就超了，而全局 multipart 上限一动等于放宽每一个上传端点。
+const VOICE_IMPORT_MAX_BYTES = 32 * 1024 * 1024
+const VOICE_IMPORT_TYPES = new Map([
+  ['.wav', 'audio/wav'],
+  ['.mp3', 'audio/mpeg'],
+  ['.m4a', 'audio/mp4'],
+  ['.aac', 'audio/aac'],
+  ['.ogg', 'audio/ogg'],
+  ['.flac', 'audio/flac'],
+])
+
+/** 本镜导入的音频有两种角色：顶替配音的，和垫在配音底下的氛围底。 */
+type ImportedAudioRole = 'voice' | 'ambience'
+type ShotAudioRequest = FastifyRequest<{ Params: { storyboardId: string } }>
+
+/** ffprobe 只吃路径，所以探测时长要落一次临时盘；用完即删，不留孤儿文件。 */
+async function withTempFile<T>(bytes: Buffer, filename: string, fn: (file: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), 'studio-voice-'))
+  const file = join(dir, basename(filename))
+  try {
+    await writeFile(file, bytes)
+    return await fn(file)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 }
 
 function statusAction(target: WorkflowStatus): Action {
@@ -238,18 +373,22 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'Project not found' })
-      return app.db.episode.findMany({
-        where: { projectId: project.id },
-        // Superseded shots are history, so an episode's shot list — and the count the
-        // console shows next to it — describes the breakdown in use. Source statuses
-        // ride along so the project page can flag "draft source awaiting review"
-        // without a per-episode round trip.
-        include: {
-          storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] },
-          sourceVersions: { select: { status: true } },
-        },
-        orderBy: { number: 'asc' },
-      })
+      const [episodes, progress] = await Promise.all([
+        app.db.episode.findMany({
+          where: { projectId: project.id },
+          // Superseded shots are history, so an episode's shot list — and the count the
+          // console shows next to it — describes the breakdown in use. Source statuses
+          // ride along so the project page can flag "draft source awaiting review"
+          // without a per-episode round trip.
+          include: {
+            storyboards: { where: { supersededAt: null }, orderBy: [{ revision: 'asc' }, { number: 'asc' }] },
+            sourceVersions: { select: { status: true } },
+          },
+          orderBy: { number: 'asc' },
+        }),
+        episodeProgress(app.db, project.id),
+      ])
+      return episodes.map(episode => ({ ...episode, progress: progress.get(episode.id) ?? emptyProgress }))
     },
   )
 
@@ -464,6 +603,205 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // 每镜声音来源：配音 / 原声 / 两者叠加 / 导入。清空即回到镜型默认（有台词=只用
+  // 配音，无台词=只用原声）——默认规则留在代码里，翻默认不必回填历史行。
+  app.post<{ Params: { storyboardId: string }; Body: { audioSource?: AudioSource | null } }>(
+    '/storyboards/:storyboardId/audio-source',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      if (request.body?.audioSource === undefined) return reply.code(400).send({ error: 'audioSource is required, null restores the shot-type default' })
+      const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+      if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+      if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+      const { audioSource } = request.body
+      if (audioSource !== null && !(Object.values(AudioSource) as string[]).includes(audioSource)) {
+        return reply.code(400).send({ error: 'unknown audioSource' })
+      }
+      // 「配音」这一路必须有声音可放：本镜写的台词，或人导入的那条音频。两者都没有时
+      // 这一档是空选择，拒掉而不是让成片静音。
+      if ((audioSource === 'VOICE' || audioSource === 'VOICE_NATIVE') && storyboard.dialogue === '' && !storyboard.importedVoiceArtifactId) {
+        return reply.code(409).send({ error: 'this shot has no dialogue and no imported audio to play' })
+      }
+      if (audioSource === 'IMPORTED' && !storyboard.importedVoiceArtifactId) {
+        return reply.code(409).send({ error: 'import an audio file for this shot first' })
+      }
+      const updated = await app.db.storyboard.update({
+        where: { id: storyboard.id },
+        data: { audioSource },
+        select: { id: true, audioSource: true },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'storyboard.set-audio-source',
+        entityType: 'Storyboard',
+        entityId: storyboard.id,
+        payload: { audioSource },
+      })
+      return updated
+    },
+  )
+
+  // 每镜字幕文本。字幕是硬烧进画面的，交付后改不掉，所以改文本这件事必须在合成前
+  // 就能做，且要留痕。清空 = 回到「沿用台词」，也就是合成原本的取值路径。
+  // 长度不设自造的天花板：台词本身没有上限，两条路径该有同样的边界。
+  app.post<{ Params: { storyboardId: string }; Body: { subtitleText?: string | null } }>(
+    '/storyboards/:storyboardId/subtitle',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      if (request.body?.subtitleText === undefined) {
+        return reply.code(400).send({ error: 'subtitleText is required, null restores the dialogue' })
+      }
+      const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+      if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+      if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+      const { subtitleText } = request.body
+      if (subtitleText !== null && typeof subtitleText !== 'string') {
+        return reply.code(400).send({ error: 'subtitleText must be a string or null' })
+      }
+      const next = subtitleText?.trim() ?? ''
+      const updated = await app.db.storyboard.update({
+        where: { id: storyboard.id },
+        data: { subtitleText: next === '' ? null : next },
+        select: { id: true, subtitleText: true },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'storyboard.set-subtitle',
+        entityType: 'Storyboard',
+        entityId: storyboard.id,
+        payload: { subtitleText: updated.subtitleText },
+      })
+      return updated
+    },
+  )
+
+  // 导入 / 更换本镜音频。两条轨走同一段流程，区别只在落哪根指针：
+  // voice = 这一镜的人声（上传即选中，顺手把声音来源落到「导入音频」）；
+  // ambience = 垫在配音下面的环境音（不碰声音来源那一档，选的是氛围底）。
+  // 文件不属于任何生成任务，所以它靠 storyboardId 被认回来，版本号按这一镜已导入
+  // 过几条累计（objectKey + version 是全库唯一约束）。
+  async function importShotAudio(request: ShotAudioRequest, reply: FastifyReply, role: ImportedAudioRole) {
+    const auth = request.auth!
+    const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+    if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+    if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+    // 整本书那条 4 MB 上限是按字符数算的，音频必须自带天花板，否则先缓冲进内存。
+    // 自己判长度而不是让插件抛错：抛错会变成 500，人看到的只是一句「服务器错误」。
+    const file = await request.file({ throwFileSizeLimit: false, limits: { fileSize: VOICE_IMPORT_MAX_BYTES, files: 1 } })
+    if (!file) return reply.code(400).send({ error: 'audio file is required' })
+    const base = basename(file.filename ?? '')
+    const extension = extname(base).toLowerCase()
+    const mimeType = VOICE_IMPORT_TYPES.get(extension)
+    if (!mimeType) {
+      return reply.code(400).send({ error: `only ${[...VOICE_IMPORT_TYPES.keys()].join(' ')} files are accepted` })
+    }
+    const bytes = await file.toBuffer()
+    // 到了上限 busboy 不报错，只是丢弃剩余字节并把 truncated 置真——只比长度
+    // 等于没比：一条 40MB 的配音会被当成合法的 32MB 文件存下来，尾巴静音且无人知情。
+    if (file.file.truncated || bytes.byteLength > VOICE_IMPORT_MAX_BYTES) {
+      return reply.code(413).send({ error: `file is larger than ${Math.round(VOICE_IMPORT_MAX_BYTES / 1024 / 1024)} MB` })
+    }
+    if (bytes.byteLength === 0) return reply.code(400).send({ error: 'file is empty' })
+    const episode = await app.db.episode.findUnique({ where: { id: storyboard.episodeId }, select: { id: true, projectId: true } })
+    if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+    const durationMs = await withTempFile(bytes, base, probeDuration)
+    const version = (await app.db.mediaArtifact.count({ where: { storyboardId: storyboard.id, stage: 'AUDIO' } })) + 1
+    const objectKey = buildObjectKey({
+      tenantId: auth.organizationId,
+      projectId: episode.projectId,
+      episodeId: episode.id,
+      stage: 'AUDIO',
+      entityId: `${storyboard.id}-${role}`,
+      version,
+      extension: extension.slice(1),
+    })
+    const stored = await app.storage.put(objectKey, new Uint8Array(bytes), mimeType)
+    const artifact = await app.db.mediaArtifact.create({
+      data: {
+        organizationId: auth.organizationId,
+        stage: 'AUDIO',
+        storyboardId: storyboard.id,
+        objectKey: stored.key,
+        checksum: stored.checksum,
+        mimeType: stored.mimeType,
+        version,
+        durationMs: durationMs || null,
+        metadata: JSON.stringify({ imported: true, role, filename: base }),
+      },
+    })
+    // 只有配音会改声音来源。环境音是叠加层，改它不该把人已经钦定的那一档顶掉。
+    const updated = await app.db.storyboard.update({
+      where: { id: storyboard.id },
+      data: role === 'voice'
+        ? { importedVoiceArtifactId: artifact.id, audioSource: 'IMPORTED' }
+        : { importedAmbienceArtifactId: artifact.id },
+      select: { id: true, audioSource: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true },
+    })
+    await recordAudit(app.db, {
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: `storyboard.import-${role}`,
+      entityType: 'Storyboard',
+      entityId: storyboard.id,
+      payload: { artifactId: artifact.id, filename: base, bytes: stored.sizeBytes },
+    })
+    return reply.code(201).send({ ...updated, artifact: toArtifactDto(artifact) })
+  }
+
+  // 移除本镜导入的音频：回到镜型默认。文件行留着——它是人提供的素材，删掉一次
+  // 选择理由不该连素材一起销毁。
+  async function removeShotAudio(request: ShotAudioRequest, reply: FastifyReply, role: ImportedAudioRole) {
+    const auth = request.auth!
+    const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+    if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+    const pointer = role === 'voice' ? storyboard.importedVoiceArtifactId : storyboard.importedAmbienceArtifactId
+    if (!pointer) return reply.code(409).send({ error: `this shot has no imported ${role} audio` })
+    const updated = await app.db.storyboard.update({
+      where: { id: storyboard.id },
+      data: role === 'voice'
+        ? { importedVoiceArtifactId: null, ...(storyboard.audioSource === 'IMPORTED' ? { audioSource: null } : {}) }
+        : { importedAmbienceArtifactId: null },
+      select: { id: true, audioSource: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true },
+    })
+    await recordAudit(app.db, {
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: `storyboard.remove-${role}-import`,
+      entityType: 'Storyboard',
+      entityId: storyboard.id,
+      payload: { artifactId: pointer },
+    })
+    return updated
+  }
+
+  app.post<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/voice-import',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => importShotAudio(request, reply, 'voice'),
+  )
+
+  app.delete<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/voice-import',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => removeShotAudio(request, reply, 'voice'),
+  )
+
+  app.post<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/ambience-import',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => importShotAudio(request, reply, 'ambience'),
+  )
+
+  app.delete<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/ambience-import',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => removeShotAudio(request, reply, 'ambience'),
+  )
+
   app.get<{ Params: { storyboardId: string } }>(
     '/storyboards/:storyboardId/assets',
     { preHandler: requirePermission('read') },
@@ -608,13 +946,17 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         list.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.version - a.version)
       }
 
-      const [qcRows, assetsPending, episodeAssets] = await Promise.all([
+      const [qcRows, assetsPending, episodeAssets, statusEvents] = await Promise.all([
         shotIds.length
           ? app.db.qualityCheck.findMany({ where: { storyboardId: { in: shotIds } }, orderBy: { id: 'asc' } })
           : Promise.resolve([]),
         app.db.asset.findMany({
           where: { episodeId: episode.id, status: { not: 'APPROVED' }, versions: { some: {} } },
-          select: { id: true, kind: true, name: true, status: true },
+          select: {
+            id: true, kind: true, name: true, status: true,
+            // 待验收的素材等的是最新那一版，那一版落地即是计时起点。
+            versions: { where: { artifactId: { not: null } }, orderBy: { version: 'desc' }, take: 1, select: { artifact: { select: { createdAt: true } } } },
+          },
           orderBy: { name: 'asc' },
         }),
         // 班底块:素材自己的档案(长相在最新已审批版本上),出演映射从活体分镜反推。
@@ -626,7 +968,31 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           },
           orderBy: { name: 'asc' },
         }),
+        // 队列的「等了多久」对阻塞/等审两件事没有别的来源：WorkflowState 不存时间戳，
+        // 人推进状态时才有一条 storyboard.status 审计。没有审计就干脆不显示时钟。
+        shotIds.length
+          ? app.db.auditEvent.findMany({
+              where: { organizationId: auth.organizationId, entityType: 'Storyboard', entityId: { in: shotIds }, action: 'storyboard.status' },
+              select: { entityId: true, payload: true, createdAt: true },
+              orderBy: { createdAt: 'desc' },
+            })
+          : Promise.resolve([]),
       ])
+      const statusAtByShot = new Map<string, Date>()
+      for (const event of statusEvents) {
+        let to: string | null = null
+        try {
+          const parsed: unknown = JSON.parse(event.payload)
+          if (parsed && typeof parsed === 'object' && 'to' in parsed && typeof (parsed as { to: unknown }).to === 'string') {
+            to = (parsed as { to: string }).to
+          }
+        } catch {
+          continue
+        }
+        if (to !== 'needs_review' && to !== 'blocked') continue
+        // 新→旧遍历，每个镜头只认第一次命中的那条：最近一次让它变成你的事。
+        if (!statusAtByShot.has(event.entityId)) statusAtByShot.set(event.entityId, event.createdAt)
+      }
       // ids are cuids, so ascending id is ascending time here: last write per (shot, kind) wins.
       const latestQc = new Map<string, { kind: string; status: string; score: number | null }>()
       for (const qc of qcRows) {
@@ -685,6 +1051,8 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         if (storyboard.status === 'BLOCKED') attention.push('shot_blocked')
         if (frameError) attention.push('frame_failed')
         if (videoError) attention.push('video_failed')
+        // 等你审是一等缺口：卡在这一步的是人，不是机器，队列必须算它一件。
+        if (storyboard.status === 'NEEDS_REVIEW') attention.push('awaiting_review')
         if (linkedAssets.some(a => a.status !== 'APPROVED' && a.hasVersions)) attention.push('asset_gate')
         // 只有真存在多版本可选却没人钦定的镜头才进待处理泳道——单版本没有抉择，
         // 逼人选一次是摩擦不是审计。
@@ -706,6 +1074,16 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
               : media.firstFrame.get(storyboard.id)
                 ? 'frame'
                 : 'empty'
+        // 等待时钟按「哪件事现在压着你」同源取值：失败优先，其次待钦定的最新一版，
+        // 再次人推进到等审/阻塞的那一刻，最后才退到最近落地的产物。全都没有就是 null，
+        // 前端那一栏索性不显示——没有来源的时间不许上屏。
+        const waitingSince =
+          (frameError ? media.errorAt.get(`${storyboard.id}:FIRST_FRAME`) : undefined) ??
+          (videoError ? media.errorAt.get(`${storyboard.id}:VIDEO`) : undefined) ??
+          (attention.includes('selection_open') && candidates[0] ? new Date(candidates[0].createdAt) : undefined) ??
+          statusAtByShot.get(storyboard.id) ??
+          media.landedAt.get(storyboard.id) ??
+          null
         return {
           id: storyboard.id,
           number: storyboard.number,
@@ -714,6 +1092,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           durationMs: storyboard.durationMs,
           description: storyboard.description,
           dialogue: storyboard.dialogue,
+          subtitleText: storyboard.subtitleText,
           speaker: storyboard.speaker,
           sourceExcerpt: storyboard.sourceExcerpt,
           continuityIn: storyboard.continuityIn,
@@ -723,6 +1102,9 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           firstFrame: media.firstFrame.get(storyboard.id) ?? null,
           video: selectedArtifact ? toArtifactDto(selectedArtifact) : media.video.get(storyboard.id) ?? null,
           voice: media.voice.get(storyboard.id) ?? null,
+          importedVoice: media.importedVoice.get(storyboard.id) ?? null,
+          importedAmbience: media.importedAmbience.get(storyboard.id) ?? null,
+          audioSource: storyboard.audioSource,
           firstFrameError: frameError,
           videoError,
           inflight: inflightStages,
@@ -732,6 +1114,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           usage: usage ? { inputUnits: usage.inputUnits, outputUnits: usage.outputUnits, models: [...usage.models], calls: usage.calls } : null,
           slot,
           attention,
+          waitingSince: waitingSince ? waitingSince.toISOString() : null,
         }
       })
 
@@ -751,7 +1134,13 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           referenceCount: referenceCountByAsset.get(asset.id) ?? 0,
           thumbnail: asset.versions[0]?.artifact ? toArtifactDto(asset.versions[0].artifact) : null,
         })),
-        assetsPending,
+        assetsPending: assetsPending.map(asset => ({
+          id: asset.id,
+          kind: asset.kind,
+          name: asset.name,
+          status: asset.status,
+          waitingSince: asset.versions[0]?.artifact?.createdAt.toISOString() ?? null,
+        })),
       }
     },
   )

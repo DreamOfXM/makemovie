@@ -72,7 +72,7 @@ export async function memberRoutes(app: FastifyInstance): Promise<void> {
       if (typeof role !== 'string' || !isRole(role) || role === 'OWNER') return reply.code(400).send({ error: 'role must be one of ADMIN, EDITOR, REVIEWER, VIEWER' })
 
       const db = app.db
-      const user = await db.user.findUnique({ where: { email } })
+      const user = await db.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
       if (!user) return reply.code(404).send({ error: 'No registered user with this email; ask them to register first' })
       const existing = await db.organizationMember.findUnique({ where: { organizationId_userId: { organizationId: auth.organizationId, userId: user.id } } })
       if (existing) return reply.code(409).send({ error: 'User is already a member' })

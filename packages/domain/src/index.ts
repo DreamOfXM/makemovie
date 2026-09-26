@@ -234,3 +234,95 @@ export function isRole(value: string): value is Role {
   return (roles as readonly string[]).includes(value)
 }
 
+/**
+ * 一次生成失败的「因」。分类决定界面怎么说、以及重抽有没有意义：
+ * 视觉审计没过线该重抽，额度用尽抽一百次也不会变——两者都写成「没过线」，
+ * 用户就会去改提示词，而真原因在账单上（2026-09-26 全站验收 B1）。
+ */
+export const failureKinds = ['quota', 'access', 'param', 'network', 'audit', 'unknown'] as const
+export type FailureKind = (typeof failureKinds)[number]
+
+/** 模式只收本机库里真出现过的报文（dashscope 错误码 + worker 自写文案），扩族要带样本。 */
+const FAILURE_PATTERNS: readonly [FailureKind, RegExp][] = [
+  ['audit', /threshold not met|visual-audit:/i],
+  ['quota', /AllocationQuota|FreeTierOnly|free quota exhausted|insufficient balance|arrearage/i],
+  ['access', /AccessDenied|NoPermission|Forbidden|Unauthorized|InvalidApiKey/i],
+  ['param', /InvalidParameter|BadRequest|url error/i],
+  ['network', /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up/i],
+]
+
+/**
+ * `errorSnapshot` 是文本列：任务级是一条 JSON 数组（候选链逐个错因），
+ * 审计级是 `visual-audit: threshold not met …` 裸句。两种都吃。
+ */
+export function classifyFailure(raw: string | null | undefined): FailureKind {
+  if (!raw) return 'unknown'
+  let text = raw
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (Array.isArray(parsed)) text = parsed.map(String).join(' | ')
+  } catch {
+    // 裸句，按原样分类
+  }
+  return FAILURE_PATTERNS.find(([, pattern]) => pattern.test(text))?.[0] ?? 'unknown'
+}
+
+/** 充值、开通权限或改参数之前，再抽一次也不会改变的因。 */
+export function isTerminalFailure(kind: FailureKind): boolean {
+  return kind === 'quota' || kind === 'access' || kind === 'param'
+}
+
+/** 一个（provider, model）迄今的真实调用履历。 */
+export interface CallEvidence {
+  ok: number
+  failed: number
+  lastStatus: 'SUCCEEDED' | 'FAILED'
+  lastAt: Date
+  lastKind: FailureKind
+}
+
+/** `GenerationTask` 里够算履历的那几列；探测时间戳证明不了这个。 */
+export interface CallEvidenceRow {
+  provider: string | null
+  model: string | null
+  status: string
+  errorSnapshot: string | null
+  updatedAt: Date
+}
+
+export function callEvidenceKey(provider: string | null | undefined, model: string): string {
+  return `${provider ?? '?'}|${model.trim()}`
+}
+
+/**
+ * 每个（provider, model）最近一次真调用是什么结果。失败任务把整条候选链写进 model
+ * （"a → b"），链上每个模型都真的试过并失败了，所以拆开逐个记账。
+ */
+export function reduceCallEvidence(rows: Iterable<CallEvidenceRow>): Map<string, CallEvidence> {
+  const byModel = new Map<string, CallEvidence>()
+  for (const row of rows) {
+    if (!row.model) continue
+    for (const name of row.model.split(' → ')) {
+      const key = callEvidenceKey(row.provider, name)
+      const entry: CallEvidence = byModel.get(key) ?? {
+        ok: 0,
+        failed: 0,
+        lastStatus: 'FAILED',
+        lastAt: new Date(0),
+        lastKind: 'unknown',
+      }
+      if (row.status === 'SUCCEEDED') entry.ok += 1
+      else {
+        entry.failed += 1
+        entry.lastKind = classifyFailure(row.errorSnapshot)
+      }
+      if (row.updatedAt >= entry.lastAt) {
+        entry.lastAt = row.updatedAt
+        entry.lastStatus = row.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED'
+      }
+      byModel.set(key, entry)
+    }
+  }
+  return byModel
+}
+

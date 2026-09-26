@@ -1,9 +1,12 @@
 import type { Stage } from '@studio/db'
 import type { ModelModality } from '@studio/domain'
 import { sha256 } from '@studio/media'
+import { QC_THRESHOLD } from '@studio/pipeline'
 import type { QcMode } from './config.js'
 
-export const QC_THRESHOLD = 0.7
+// The floor is a pipeline rule, not a worker rule: the console reads the same number off
+// the generations endpoint. Re-exported so `./qc.js` stays the one place worker code imports it from.
+export { QC_THRESHOLD }
 
 /**
  * `fake-qc` is the placeholder: a score nobody should read as a quality signal.

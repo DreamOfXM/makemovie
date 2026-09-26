@@ -169,10 +169,13 @@ describe('episode assets', () => {
         id: artifact.id,
         mimeType: 'image/png',
         objectKey: `${organizationId}/assets/v2.png`,
+        version: 1,
         width: null,
         height: null,
         durationMs: null,
         downloadUrl: `/artifacts/${artifact.id}/content`,
+        // 生成产物没有原始文件名可言：只有人工导入那一档才带名字。
+        filename: null,
       },
     })
     expect(assets[1].versions[1]).toMatchObject({ version: 1, description: '第一版参考图', status: 'APPROVED', artifact: null })

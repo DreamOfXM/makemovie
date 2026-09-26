@@ -26,6 +26,36 @@ async function tone(file: string, frequency: number, seconds: number): Promise<v
   await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', `sine=frequency=${frequency}:duration=${seconds}`, file])
 }
 
+/** 模型自带音轨的片段:画面 testsrc + 一个高频正弦,用来和配音(440Hz)区分。 */
+async function clipWithNativeAudio(file: string, seconds: number, frequency: number): Promise<void> {
+  await run('ffmpeg', [
+    '-y', '-v', 'error',
+    '-f', 'lavfi', '-i', `testsrc=duration=${seconds}:size=320x240:rate=15`,
+    '-f', 'lavfi', '-i', `sine=frequency=${frequency}:duration=${seconds}`,
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', file,
+  ])
+}
+
+/**
+ * 只问「这个频段有没有声」,不问响度:成片要过 loudnorm,平均电平一律被拉回
+ * -16 LUFS,用音量判「原声留没留」四种模式会测出同一个数。
+ * `windowMs` 量画面的某一段:氛围底越界进下一镜时,全片平均会把证据抹平。
+ */
+async function bandLevel(file: string, fromHz: number, toHz: number, windowMs?: readonly [number, number]): Promise<number> {
+  const seek = windowMs
+    ? ['-ss', (windowMs[0] / 1000).toFixed(3), '-t', ((windowMs[1] - windowMs[0]) / 1000).toFixed(3)]
+    : []
+  const { stderr } = await run('ffmpeg', [
+    ...seek, '-i', file, '-vn',
+    '-af', `highpass=f=${fromHz},lowpass=f=${toHz},volumedetect`,
+    '-f', 'null', '-',
+  ])
+  const mean = /mean_volume: (-?[\d.]+|-?inf) dB/.exec(stderr)
+  if (!mean) return Number.NEGATIVE_INFINITY
+  const value = Number.parseFloat(mean[1])
+  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+}
+
 describe('ffmpeg composer', () => {
   let workdir: string
   let composer: FfmpegComposer
@@ -139,6 +169,131 @@ describe('ffmpeg composer', () => {
     // The one-second loop has to cover a two-second picture.
     expect(composed.durationMs).toBeGreaterThanOrEqual(1900)
     expect(composed.durationMs).toBeLessThanOrEqual(2100)
+  })
+
+  // 声音来源四档的成片契约:选哪档、听到什么。配音用 440Hz、原声用 2kHz,
+  // 两条频段各自探能,不接受"有声音流"这种糊弄断言。
+  describe('per-shot audio source', () => {
+    const VOICE_BAND: readonly [number, number] = [300, 700]
+    const NATIVE_BAND: readonly [number, number] = [1500, 2600]
+
+    async function composeWith(mode: 'voice' | 'native' | 'voice_native' | null) {
+      const a = path.join(workdir, 'a.mp4')
+      await clipWithNativeAudio(a, 2, 2000)
+      const voice = path.join(workdir, 'voice.wav')
+      await tone(voice, 440, 2)
+      const output = path.join(workdir, 'out.mp4')
+      await composer.compose({ clips: [a], voices: [voice], ...(mode ? { audioSources: [mode] } : {}) }, output)
+      return { voice: await bandLevel(output, ...VOICE_BAND), native: await bandLevel(output, ...NATIVE_BAND) }
+    }
+
+    // aac 编码会把纯正弦泄漏到相邻频段(实测缺席一侧约 -46dB、在场一侧约 -22dB),
+    // 所以判据是「该响的比不该响的响 12dB 以上」,不是某个绝对音量。
+    it('plays only the voice when the shot is set to voice', async () => {
+      const levels = await composeWith('voice')
+      expect(levels.voice).toBeGreaterThan(-35)
+      expect(levels.voice - levels.native).toBeGreaterThan(12)
+    })
+
+    it('plays only the model audio when the shot is set to native, even though a voice exists', async () => {
+      const levels = await composeWith('native')
+      expect(levels.native).toBeGreaterThan(-35)
+      expect(levels.native - levels.voice).toBeGreaterThan(12)
+    })
+
+    it('keeps both when the shot is set to voice plus native', async () => {
+      const levels = await composeWith('voice_native')
+      expect(levels.voice).toBeGreaterThan(-35)
+      expect(levels.native).toBeGreaterThan(-35)
+    })
+
+    // 没人钦定时不许改行为:有配音就丢原声,和这套控件上线前逐字节一致。
+    it('drops the model audio when nobody picked a source', async () => {
+      const levels = await composeWith(null)
+      expect(levels.voice).toBeGreaterThan(-35)
+      expect(levels.voice - levels.native).toBeGreaterThan(12)
+    })
+
+    it('stays silent when a native-only shot has no audio stream to play', async () => {
+      const a = path.join(workdir, 'a.mp4')
+      await clip(a, 2)
+      const voice = path.join(workdir, 'voice.wav')
+      await tone(voice, 440, 2)
+      const output = path.join(workdir, 'out.mp4')
+
+      await composer.compose({ clips: [a], voices: [voice], audioSources: ['native'] }, output)
+
+      const result = await probe(output)
+      expect(result.streams.filter(s => s.codec_type === 'audio').length).toBeLessThanOrEqual(1)
+      expect(await bandLevel(output, 300, 2600)).toBeLessThan(-70)
+    })
+  })
+
+  // 环境音是与声音来源正交的一栏:档说人声从哪来,这一条说配音底下垫什么。
+  // 三条断言各钉住一件事——它能进混、它占的是原声那一格、它出不了这一镜。
+  describe('imported ambience bed', () => {
+    const VOICE_BAND: readonly [number, number] = [300, 700]
+    // 底用 120Hz：与配音(440)和原声(2k)都拉开两个倍频以上。aac 编码会把纯正弦泄漏到
+    // 相邻频段(实测缺席一侧约 -46dB、在场一侧约 -22dB),挨得太近就分不出谁在响。
+    const BED_BAND: readonly [number, number] = [60, 220]
+    const NATIVE_BAND: readonly [number, number] = [1500, 2600]
+
+    // 「只用配音」原本意味着这一镜只有人声、底是空的;导入一条底就该填上,
+    // 不必去赌模型原声里有没有它自己念出来的词。
+    it('beds an imported file under a shot that plays only the voice', async () => {
+      const a = path.join(workdir, 'a.mp4')
+      await clip(a, 2)
+      const voice = path.join(workdir, 'voice.wav')
+      await tone(voice, 440, 2)
+      const bed = path.join(workdir, 'bed.wav')
+      await tone(bed, 120, 2)
+      const output = path.join(workdir, 'out.mp4')
+
+      await composer.compose({ clips: [a], voices: [voice], audioSources: ['voice'], ambiences: [bed] }, output)
+
+      const levels = {
+        voice: await bandLevel(output, ...VOICE_BAND),
+        bed: await bandLevel(output, ...BED_BAND),
+      }
+      expect(levels.voice).toBeGreaterThan(-35)
+      expect(levels.bed).toBeGreaterThan(-35)
+    })
+
+    // 同一条底不许和模型原声叠在一起:两层环境声糊成一片,比只有一层更难用。
+    it('takes the slot the model audio would use instead of stacking on it', async () => {
+      const a = path.join(workdir, 'a.mp4')
+      await clipWithNativeAudio(a, 2, 2000)
+      const voice = path.join(workdir, 'voice.wav')
+      await tone(voice, 440, 2)
+      const bed = path.join(workdir, 'bed.wav')
+      await tone(bed, 120, 2)
+      const output = path.join(workdir, 'out.mp4')
+
+      await composer.compose({ clips: [a], voices: [voice], audioSources: ['voice_native'], ambiences: [bed] }, output)
+
+      const bedLevel = await bandLevel(output, ...BED_BAND)
+      const nativeLevel = await bandLevel(output, ...NATIVE_BAND)
+      expect(bedLevel).toBeGreaterThan(-35)
+      expect(nativeLevel - bedLevel).toBeLessThan(-12)
+    })
+
+    // 底比镜头长只能切到这一镜末尾:它一旦越过剪点,下一镜就凭空多了上一条街的声音。
+    it('trims a bed that outlives its shot instead of spilling into the next', async () => {
+      const a = path.join(workdir, 'a.mp4')
+      const b = path.join(workdir, 'b.mp4')
+      await clip(a, 2)
+      await clip(b, 2)
+      const bed = path.join(workdir, 'bed.wav')
+      await tone(bed, 120, 4)
+      const output = path.join(workdir, 'out.mp4')
+
+      await composer.compose({ clips: [a, b], ambiences: [bed, null] }, output)
+
+      const inside = await bandLevel(output, ...BED_BAND, [250, 1750])
+      const after = await bandLevel(output, ...BED_BAND, [2250, 3750])
+      expect(inside).toBeGreaterThan(-35)
+      expect(after - inside).toBeLessThan(-12)
+    })
   })
 
   it('builds subrip timestamps from millisecond offsets', () => {

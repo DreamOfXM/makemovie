@@ -8,6 +8,7 @@ import { buildObjectKey, extensionFor, REFERENCE_IMAGE_MAX_BYTES_10MB, synthesiz
 import {
   advancePipeline,
   buildStoryboardPrompt,
+  MAX_ATTEMPTS,
   mergeStoryboardReplies,
   planStoryboardSegments,
   targetShotDurationMs,
@@ -20,8 +21,6 @@ import type { PipelineDeps } from './deps.js'
 import { taskLog, type LogAnchor } from './execution-log.js'
 import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
-
-export const MAX_ATTEMPTS = 3
 
 type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { include: { episode: { include: { project: true } } } } } }>
 

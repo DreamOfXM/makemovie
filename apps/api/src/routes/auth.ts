@@ -8,6 +8,19 @@ import { authenticate } from '../plugins/auth.js'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+/**
+ * Email is an identifier, and the address a person types is not how Postgres compares one:
+ * rows created before this normalisation still hold capitals, so every lookup that has to
+ * find one of them matches case-insensitively instead of assuming the column is lowercase.
+ */
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase()
+}
+
+function emailWhere(email: string) {
+  return { email: { equals: email, mode: 'insensitive' as const } }
+}
+
 function organizationSlug(name: string): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   return `${base || 'org'}-${randomBytes(3).toString('hex')}`
@@ -25,13 +38,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     '/register',
     authRouteOptions,
     async (request, reply) => {
-      const { email, password, name, organizationName } = request.body ?? {}
+      const { email: rawEmail, password, name, organizationName } = request.body ?? {}
+      const email = rawEmail ? normalizeEmail(rawEmail) : undefined
       if (!email || !EMAIL_PATTERN.test(email)) return reply.code(400).send({ error: 'A valid email is required' })
       if (!password || password.length < 8) return reply.code(400).send({ error: 'Password must be at least 8 characters' })
       if (!organizationName?.trim()) return reply.code(400).send({ error: 'organizationName is required' })
 
       const db = app.db
-      if (await db.user.findUnique({ where: { email } })) {
+      if (await db.user.findFirst({ where: emailWhere(email) })) {
         return reply.code(409).send({ error: 'Email already registered' })
       }
 
@@ -60,11 +74,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     '/login',
     authRouteOptions,
     async (request, reply) => {
-      const { email, password, organizationId } = request.body ?? {}
+      const { email: rawEmail, password, organizationId } = request.body ?? {}
+      const email = rawEmail ? normalizeEmail(rawEmail) : undefined
       if (!email || !password) return reply.code(400).send({ error: 'email and password are required' })
 
       const db = app.db
-      const user = await db.user.findUnique({ where: { email }, include: { memberships: { include: { organization: true } } } })
+      const user = await db.user.findFirst({ where: emailWhere(email), include: { memberships: { include: { organization: true } } } })
       if (!user || user.memberships.length === 0 || !(await verifyPassword(password, user.passwordHash))) {
         return reply.code(401).send({ error: 'Invalid credentials' })
       }

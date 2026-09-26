@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, TaskStatus, WorkflowStatus } from '@studio/db'
 import { syncBatchStatus } from '@studio/db'
-import { COMPOSITION_STEP, advancePipeline, buildGenerationPlan, createComposition, generationStages, isGenerationStage, liveStoryboards, toApiStage, triggerStage, type GenerationStage } from '@studio/pipeline'
+import { COMPOSITION_STEP, QC_THRESHOLD, advancePipeline, buildGenerationPlan, createComposition, generationStages, isGenerationStage, liveStoryboards, toApiStage, triggerStage, type GenerationStage } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -59,6 +59,9 @@ interface TaskDto {
   updatedAt: Date
   artifacts: ArtifactDto[]
   qc: QcDto | null
+  /** 每次尝试的质检分，最新在前。一镜重抽三次就有三份被评过的产物，
+   *  而最后一次不是最高那次 —— 历史栏写「最高分」只能靠这个全量列表。 */
+  scores: number[]
   retryTrace: RetryTraceDto | null
 }
 
@@ -105,7 +108,8 @@ async function latestChecks(db: PrismaClient, tasks: TaskRow[]): Promise<Quality
 
 function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
   const artifactIds = new Set(task.mediaArtifacts.map((artifact: MediaArtifact) => artifact.id))
-  const check = checks.find(candidate => candidate.artifactId !== null && artifactIds.has(candidate.artifactId))
+  const own = checks.filter(candidate => candidate.artifactId !== null && artifactIds.has(candidate.artifactId))
+  const [newest] = own
   return {
     id: task.id,
     stage: toApiStage(task.stage),
@@ -118,7 +122,8 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     artifacts: task.mediaArtifacts.map(toArtifactDto),
-    qc: check ? { kind: check.kind, score: check.score, status: check.status } : null,
+    qc: newest ? { kind: newest.kind, score: newest.score, status: newest.status } : null,
+    scores: own.flatMap(check => (check.score === null ? [] : [check.score])),
     retryTrace: parseRetryTrace(task.responseSnapshot),
   }
 }
@@ -279,6 +284,8 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       return {
         batches: await toBatchDtos(app.db, batches),
         composition: composition ? await toCompositionDto(app.db, composition) : null,
+        // 质检线随数据一起下发:界面自己写死一份,worker 一改阈值界面就开始说谎。
+        limits: { qcThreshold: QC_THRESHOLD },
       }
     },
   )

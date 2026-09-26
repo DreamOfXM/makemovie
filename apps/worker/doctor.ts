@@ -3,6 +3,14 @@
 // 用法:仓库根目录 pnpm doctor（自动读根 .env 的 DATABASE_URL）
 import { readFileSync } from 'node:fs'
 import { PrismaClient } from '@studio/db'
+import {
+  callEvidenceKey,
+  classifyFailure,
+  isTerminalFailure,
+  reduceCallEvidence,
+  type CallEvidence,
+  type FailureKind,
+} from '@studio/domain'
 import { aigcBadgeCapability } from '@studio/media'
 import { listCatalogs } from '@studio/providers'
 import { usableFirstFrames } from '@studio/pipeline'
@@ -49,21 +57,58 @@ function ok(message: string) {
   process.stdout.write(`    ✅ ${message}\n`)
 }
 
+/** 探测记录只到「曾经通过」，真调用结果才回答「现在跑不跑得通」。 */
+const FAILURE_TEXT: Record<FailureKind, string> = {
+  quota: '额度用尽',
+  access: '无调用权限',
+  param: '参数被模型拒收',
+  network: '网络中断',
+  audit: '质量未过线',
+  unknown: '未识别的原因',
+}
+
+function day(value: Date): string {
+  return value.toISOString().slice(0, 10)
+}
+
+/**
+ * 每个（provider, model）最近一次真调用是什么结果。失败任务把整条候选链写进 model
+ * （"a → b"），链上每个模型都真的试过并失败了，所以拆开逐个记账。
+ */
+async function recentCallEvidence(): Promise<Map<string, CallEvidence>> {
+  const tasks = await db.generationTask.findMany({
+    where: { status: { in: ['SUCCEEDED', 'FAILED'] } },
+    select: { provider: true, model: true, status: true, errorSnapshot: true, updatedAt: true },
+  })
+  return reduceCallEvidence(tasks)
+}
+
 async function checkModelConfig(): Promise<void> {
   process.stdout.write('\n【模型配置】\n')
   const catalogs = listCatalogs()
   const capabilities = await db.modelCapability.findMany({
     include: { connection: true, bindings: { where: { enabled: true } } },
   })
+  const calls = await recentCallEvidence()
 
   for (const capability of capabilities) {
     if (capability.bindings.length === 0) continue
     const slots = capability.bindings.map(binding => binding.slot).join(',')
     const verified = capability.entitlementVerifiedAt !== null || capability.credentialVerifiedAt !== null
+    const evidence = calls.get(callEvidenceKey(capability.connection.provider, capability.model))
+
     if (!verified) {
       fail(`${capability.model}（槽位 ${slots}）已绑定但从未探测成功——它不会被任何阶段选中,等于白绑。去模型配置里点探测。`)
+    } else if (evidence?.lastStatus === 'FAILED') {
+      // 探测时间戳只证明「曾经通过」：额度用尽、权限被收回之后它不会自己变红。
+      // 对着一个最近一次真调用就失败的模型打绿勾,体检就变成了说谎的绿灯。
+      const line = `${capability.model}（槽位 ${slots}）探测记录还在,但最近一次真实调用（${day(evidence.lastAt)}）因「${FAILURE_TEXT[evidence.lastKind]}」失败——累计 ${evidence.failed} 败 / ${evidence.ok} 胜。`
+      if (isTerminalFailure(evidence.lastKind)) fail(`${line}充值、开通权限或改参数之前,再抽也不会有结果。`)
+      else warn(`${line}网络或质量原因还能重抽,但这一档现在不稳。`)
+    } else if (evidence?.lastStatus === 'SUCCEEDED') {
+      ok(`${capability.model}（槽位 ${slots}）已验证 · 最近一次真实调用（${day(evidence.lastAt)}）成功,累计 ${evidence.ok} 胜${evidence.failed > 0 ? ` / ${evidence.failed} 败` : ''}`)
     } else {
-      ok(`${capability.model}（槽位 ${slots}）已验证`)
+      ok(`${capability.model}（槽位 ${slots}）探测通过 · 还没有真实调用记录,这句只到「能连上、有权限」为止`)
     }
 
     // 目录漂移:目录声明的能力与模型行不一致,就是 qwen-image-edit 参考图开关事故的形态。
@@ -161,8 +206,9 @@ async function checkEpisode(episodeId: string, label: string): Promise<void> {
     select: { stage: true, model: true, errorSnapshot: true, createdAt: true },
   })
   for (const task of recentFailed) {
-    const quota = task.errorSnapshot?.includes('FreeTierOnly') || task.errorSnapshot?.includes('quota')
-    const headline = quota ? '额度耗尽' : (task.errorSnapshot ?? '').slice(0, 80)
+    // 终因单独点名：那三类意味着「配置没错，得先充值/开权限/改参数」，不是链路坏了。
+    const kind = classifyFailure(task.errorSnapshot)
+    const headline = isTerminalFailure(kind) ? FAILURE_TEXT[kind] : (task.errorSnapshot ?? '').slice(0, 80)
     warn(`最近失败: ${task.stage} · ${task.model ?? '?'} · ${headline}`)
   }
 }

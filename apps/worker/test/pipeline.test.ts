@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Prisma, type CapabilitySlot } from '@studio/db'
 import { MOCK_SCRIPT_TEXT, MOCK_SCRIPT_TEXT_EN, MOCK_STORYBOARD_JSON, MOCK_STORYBOARD_JSON_EN, MOCK_VLM_VERDICT, MockProviderAdapter } from '@studio/providers'
-import { advancePipeline, generationSeed, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
+import { advancePipeline, generationSeed, planComposition, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
 import { toReferenceImage } from '@studio/media'
 import { encryptSecret } from '@studio/security'
 import type { RunTaskCandidate } from '@studio/jobs'
@@ -814,6 +814,193 @@ describe('compose-episode', () => {
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'subtitle'])
     expect(Buffer.from(await env.storage.read((await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })).objectKey)).toString('utf8')).toContain('走吧。')
+  })
+
+  // 导入的音频念的常常不是剧本里那句。字幕硬烧进画面、交付后改不掉，所以这一镜
+  // 必须能单独说一句话：覆盖生效，且台词本身一个字不动。
+  it('burns the per-shot subtitle override instead of the dialogue', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    const [first, second] = seed.storyboardIds as [string, string]
+    await env.db.storyboard.update({ where: { id: first }, data: { dialogue: '这条街不能待了。', subtitleText: '这条街我待够了。' } })
+    // 空镜没有台词，也可以只有一行字幕：音频里念了什么，画面下沿就该写什么。
+    await env.db.storyboard.update({ where: { id: second }, data: { subtitleText: '（远处传来警笛）' } })
+    await env.attachSucceededVideo(seed, first, 1, { durationMs: 1000 })
+    await env.attachSucceededVideo(seed, second, 1, { durationMs: 1000 })
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(updated.status).toBe('COMPLETED')
+    const subtitle = await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })
+    const cues = Buffer.from(await env.storage.read(subtitle.objectKey)).toString('utf8')
+    expect(cues).toContain('这条街我待够了。')
+    expect(cues).toContain('（远处传来警笛）')
+    expect(cues).not.toContain('这条街不能待了。')
+    // 两镜两条 cue：覆盖不会把没台词的那一镜挤出字幕轨。
+    expect(cues.match(/-->/g)).toHaveLength(2)
+    expect((await env.db.storyboard.findUniqueOrThrow({ where: { id: first }, select: { dialogue: true } })).dialogue).toBe('这条街不能待了。')
+  })
+
+  // 四档不只是界面标签：母带清单要能反查「这一镜的声音是哪来的」，
+  // 否则日后「双声从哪来」只能靠重抽猜。
+  describe('per-shot audio source', () => {
+    async function composeShot(shot: string, seed: Seed, storyboardIds: string[]) {
+      const composition = await env.db.composition.create({
+        data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds }) },
+      })
+      await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+      const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+      expect(updated.status).toBe('COMPLETED')
+      return (JSON.parse(updated.manifest) as { audio: Record<string, { mode: string; voiceArtifactId: string | null; ambienceArtifactId: string | null }> }).audio[shot]
+    }
+
+    /**
+     * 人导入的文件不挂在任何生成任务下，夹具必须照搬这一点：一条带成功任务的 AUDIO 产物
+     * 会被「取这一镜最新配音」的规则当成配音，那样测的就不是底，而是一条假配音。
+     */
+    async function importedBed(seed: Seed, storyboardId: string, seconds: number): Promise<string> {
+      const sampleRate = 8000
+      const data = Buffer.alloc(Math.round(seconds * sampleRate) * 2)
+      const header = Buffer.alloc(44)
+      header.write('RIFF', 0)
+      header.writeUInt32LE(36 + data.byteLength, 4)
+      header.write('WAVE', 8)
+      header.write('fmt ', 12)
+      header.writeUInt32LE(16, 16)
+      header.writeUInt16LE(1, 20)
+      header.writeUInt16LE(1, 22)
+      header.writeUInt32LE(sampleRate, 24)
+      header.writeUInt32LE(sampleRate * 2, 28)
+      header.writeUInt16LE(2, 32)
+      header.writeUInt16LE(16, 34)
+      header.write('data', 36)
+      header.writeUInt32LE(data.byteLength, 40)
+      const bytes = new Uint8Array(Buffer.concat([header, data]))
+      const stored = await env.storage.put(`${seed.organizationId}/${seed.episodeId}/AUDIO/imported/${randomUUID()}.wav`, bytes, 'audio/wav')
+      const artifact = await env.db.mediaArtifact.create({
+        data: {
+          organizationId: seed.organizationId,
+          stage: 'AUDIO',
+          storyboardId,
+          objectKey: stored.key,
+          checksum: stored.checksum,
+          mimeType: 'audio/wav',
+          version: (await env.db.mediaArtifact.count({ where: { storyboardId, stage: 'AUDIO' } })) + 1,
+          durationMs: Math.round(seconds * 1000),
+          metadata: JSON.stringify({ imported: true, role: 'ambience', filename: '街道环境声.wav' }),
+        },
+      })
+      return artifact.id
+    }
+
+    it('names the TTS line a defaulted shot used and the import that replaces it', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      const tts = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+
+      // 没钦定 = 走镜型默认：有台词即配音，但清单要如实记下用的是哪条。
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'voice', voiceArtifactId: tts.artifactId, ambienceArtifactId: null })
+
+      const imported = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot, version: 5 })
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'IMPORTED', importedVoiceArtifactId: imported.artifactId } })
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'imported', voiceArtifactId: imported.artifactId, ambienceArtifactId: null })
+    })
+
+    // 「导入音频」这一档的意思就是这个人给的那个文件，晚到的 TTS 不许插队。
+    it('takes the imported file over the newer TTS line when the shot is set to import', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      const imported = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      const newerTts = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      await env.db.generationTask.update({ where: { id: imported.taskId }, data: { createdAt: new Date(Date.now() - 3_600_000) } })
+
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'IMPORTED', importedVoiceArtifactId: imported.artifactId } })
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'imported', voiceArtifactId: imported.artifactId, ambienceArtifactId: null })
+      // 对照：同一镜改回「只用配音」，取的就是那条更新的任务产物。
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'VOICE' } })
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'voice', voiceArtifactId: newerTts.artifactId, ambienceArtifactId: null })
+    })
+
+    it('feeds no voice at all to a shot set to native', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'NATIVE' } })
+
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'native', voiceArtifactId: null, ambienceArtifactId: null })
+    })
+
+    // 指针是裸 id，文件行可能被钉到别处；这种情况回落到默认并留痕，绝不炸掉整次合成。
+    it('falls back to the shot-type default when the import dangles', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      const tts = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'IMPORTED', importedVoiceArtifactId: 'ghost-artifact' } })
+
+      // 不拿一条人没要过的 TTS 冒充导入文件：宁可不响，也不谎报来源。
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'default', voiceArtifactId: null, ambienceArtifactId: null })
+    })
+
+    // 环境音与声音来源是两栏：档说人声从哪来，这一条说配音底下垫什么。
+    // 清单里两个 id 同时出现，才证明「配音 + 导入环境音」真的进了母带。
+    it('records the imported bed alongside the voice it beds under', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      const tts = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      const bed = await importedBed(seed, shot, 2)
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'VOICE', importedAmbienceArtifactId: bed } })
+
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'voice', voiceArtifactId: tts.artifactId, ambienceArtifactId: bed })
+    })
+
+    // 与配音同一口径：悬空即当作没导入，退回这一镜原本的声音，绝不谎报氛围底来自哪里。
+    it('drops a bed whose file row is gone instead of failing the cut', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      const tts = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'VOICE', importedAmbienceArtifactId: 'ghost-artifact' } })
+
+      expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'voice', voiceArtifactId: tts.artifactId, ambienceArtifactId: null })
+    })
+
+    // 换一条氛围底 = 母带里的声音变了，即使镜头清单、声音来源、已落地的配音都没动。
+    // 两条底都在母带规划之前导入，所以放行只可能来自 ambienceArtifactId 这一项。
+    it('re-cuts a planned master when only the bed changed', async () => {
+      const seed = await env.seed({ storyboards: 1 })
+      const [shot] = seed.storyboardIds as [string]
+      await env.db.storyboard.update({ where: { id: shot }, data: { dialogue: '这条街不能待了。' } })
+      await env.attachSucceededVideo(seed, shot, 1)
+      await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot })
+      const firstBed = await importedBed(seed, shot, 2)
+      const secondBed = await importedBed(seed, shot, 3)
+      await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'VOICE', importedAmbienceArtifactId: firstBed } })
+
+      const composition = await env.db.composition.create({
+        data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: [shot] }) },
+      })
+      await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+      expect((await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })).status).toBe('COMPLETED')
+
+      expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: false, reason: 'composition:alreadyPlanned' })
+
+      await env.db.storyboard.update({ where: { id: shot }, data: { importedAmbienceArtifactId: secondBed } })
+      expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: true })
+    })
   })
 })
 

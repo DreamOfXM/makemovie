@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { PrismaClient, SlotCandidate, Stage } from '@studio/db'
+import type { AudioSource, PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
 import type { CapabilitySlot, ContentLocale } from '@studio/domain'
 import { isContentLocale, planVideoModels } from '@studio/domain'
@@ -17,6 +17,14 @@ import { applyStyleToPrompt, getStyleById, type StylePreset } from './styles/ind
 
 export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
 export type GenerationStage = (typeof generationStages)[number]
+
+/**
+ * The quality floor and the retry ceiling, in one place on purpose: the worker gates on
+ * them, and the console colours scores and writes 「连抽 N 次」 with the same two numbers.
+ * A second copy in either side is how the UI starts lying about what the pipeline did.
+ */
+export const QC_THRESHOLD = 0.7
+export const MAX_ATTEMPTS = 3
 
 // P7 prompt guards: the chain lives in guards.ts; the console and the tests meet it here.
 export { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE } from './guards.js'
@@ -130,6 +138,8 @@ export interface LiveStoryboard {
   durationMs: number
   /** Spoken lines; the empty string marks a silent shot. */
   dialogue: string
+  /** 人钦定的声音来源；null = 按镜型默认。合成门与母带新鲜度都要读它。 */
+  audioSource: AudioSource | null
 }
 
 /**
@@ -142,7 +152,7 @@ export interface LiveStoryboard {
 export async function liveStoryboards(db: PrismaClient, episodeId: string): Promise<LiveStoryboard[]> {
   return db.storyboard.findMany({
     where: { episodeId, supersededAt: null },
-    select: { id: true, revision: true, number: true, title: true, durationMs: true, dialogue: true },
+    select: { id: true, revision: true, number: true, title: true, durationMs: true, dialogue: true, audioSource: true },
     orderBy: [{ revision: 'asc' }, { number: 'asc' }],
   })
 }
@@ -251,13 +261,23 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
   // a dialogue script would deadlock composition on installations that never
   // signed up for audio.
   const voiced = await voicedStoryboardIds(db, episodeId)
-  if (storyboards.some(storyboard => storyboard.dialogue !== '')) {
+  // 只有真需要 TTS 人声的镜头才受这道门管：钦定「只用原声」的镜头本来就不出人声，
+  // 钦定「导入音频」的镜头由下面那道门单独验（导入件不来自任何生成任务）。
+  const ttsNeeded = storyboards.filter(storyboard => needsTtsVoice(storyboard))
+  if (ttsNeeded.length > 0) {
     const episode = await db.episode.findUnique({ where: { id: episodeId }, select: { projectId: true, project: { select: { organizationId: true } } } })
     const candidates = episode
       ? await resolveSlotCandidates(db, episode.project.organizationId, episode.projectId, 'tts_voice')
       : []
-    if (candidates.length > 0 && storyboards.some(storyboard => storyboard.dialogue !== '' && !voiced.has(storyboard.id))) {
+    if (candidates.length > 0 && ttsNeeded.some(storyboard => !voiced.has(storyboard.id))) {
       return { ready: false, reason: 'composition:missingVoice' }
+    }
+  }
+  const importedNeeded = storyboards.filter(storyboard => needsImportedVoice(storyboard))
+  if (importedNeeded.length > 0) {
+    const landed = await importedVoiceStoryboardIds(db, importedNeeded.map(storyboard => storyboard.id))
+    if (importedNeeded.some(storyboard => !landed.has(storyboard.id))) {
+      return { ready: false, reason: 'composition:missingImportedVoice' }
     }
   }
 
@@ -273,7 +293,7 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
     const voicedSince = await db.generationTask.count({
       where: { batchId: { in: voicedBatchIds }, stage: 'AUDIO', status: 'SUCCEEDED', id: { gt: latest.id }, mediaArtifacts: { some: { stage: 'AUDIO' } } },
     })
-    if (voicedSince === 0 && !(await selectionChanged(db, episodeId, latest.manifest))) {
+    if (voicedSince === 0 && !(await selectionChanged(db, episodeId, latest.manifest)) && !(await audioChanged(db, episodeId, latest.manifest))) {
       return { ready: false, reason: 'composition:alreadyPlanned' }
     }
   }
@@ -293,6 +313,92 @@ async function selectionChanged(db: PrismaClient, episodeId: string, manifest: s
   if (chosen.length === 0) return false
   const recorded = manifestSelections(manifest)
   return chosen.some(shot => recorded?.[shot.id]?.artifactId !== shot.selectedVideoArtifactId)
+}
+
+/**
+ * 这一镜是否还欠一条 TTS 人声：没人钦定、或钦定的是含配音的档位才算欠。
+ * 「只用原声」的镜头本来就不出人声，「导入音频」由导入门单独验。
+ */
+function needsTtsVoice(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): boolean {
+  if (storyboard.dialogue === '') return false
+  return storyboard.audioSource === null || storyboard.audioSource === 'VOICE' || storyboard.audioSource === 'VOICE_NATIVE'
+}
+
+/**
+ * 这一镜的人声只能来自导入件：要么明选了「导入音频」，要么档里含配音却没有台词
+ * ——无台词镜不排 TTS，它的「配音」只有导入这一条路。缺文件时母带会静默变成没有
+ * 人声，所以这道门必须拦住，而不是让 compose 交出一条空轨。
+ */
+function needsImportedVoice(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): boolean {
+  if (storyboard.audioSource === 'IMPORTED') return true
+  return storyboard.dialogue === '' && (storyboard.audioSource === 'VOICE' || storyboard.audioSource === 'VOICE_NATIVE')
+}
+
+/**
+ * 导入音频已落地的镜头。导入件不挂任何生成任务，所以 `voicedStoryboardIds` 那条
+ * 按任务算的路永远看不见它——只能顺着镜头上的指针查文件行还在不在。
+ */
+export async function importedVoiceStoryboardIds(db: PrismaClient, storyboardIds: string[]): Promise<Set<string>> {
+  if (storyboardIds.length === 0) return new Set()
+  const shots = await db.storyboard.findMany({
+    where: { id: { in: storyboardIds }, importedVoiceArtifactId: { not: null } },
+    select: { id: true, importedVoiceArtifactId: true },
+  })
+  const artifactIds = shots.map(shot => shot.importedVoiceArtifactId).filter((id): id is string => Boolean(id))
+  if (artifactIds.length === 0) return new Set()
+  const present = new Set(
+    (await db.mediaArtifact.findMany({ where: { id: { in: artifactIds }, stage: 'AUDIO' }, select: { id: true } })).map(artifact => artifact.id),
+  )
+  return new Set(shots.filter(shot => shot.importedVoiceArtifactId && present.has(shot.importedVoiceArtifactId)).map(shot => shot.id))
+}
+
+/** 母带里这一镜的声音是怎么来的——与 compose 写进 manifest 的口径一致。 */
+export function recordedAudioMode(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): 'voice' | 'native' | 'voice_native' | 'imported' {
+  switch (storyboard.audioSource) {
+    case 'NATIVE':
+      return 'native'
+    case 'VOICE_NATIVE':
+      return 'voice_native'
+    case 'IMPORTED':
+      return 'imported'
+    case 'VOICE':
+      return 'voice'
+    default:
+      return storyboard.dialogue === '' ? 'native' : 'voice'
+  }
+}
+
+/** What the composer recorded per shot for audio: which source fed the master. */
+export function manifestAudio(manifest: string): Record<string, { mode: string; ambienceArtifactId: string | null }> | null {
+  try {
+    const parsed = JSON.parse(manifest) as { audio?: unknown }
+    if (!parsed.audio || typeof parsed.audio !== 'object') return null
+    const out: Record<string, { mode: string; ambienceArtifactId: string | null }> = {}
+    for (const [shotId, entry] of Object.entries(parsed.audio as Record<string, unknown>)) {
+      const value = entry as { mode?: unknown; ambienceArtifactId?: unknown }
+      if (typeof value?.mode === 'string') {
+        out[shotId] = { mode: value.mode, ambienceArtifactId: typeof value.ambienceArtifactId === 'string' ? value.ambienceArtifactId : null }
+      }
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 人改了声音来源或换了本镜环境音，母带里的音轨就是旧的——与成片钦定同一套语义：
+ * 改主意必须能重出片。老母带没有 audio 段，只有真有人钦定过才算变。
+ */
+async function audioChanged(db: PrismaClient, episodeId: string, manifest: string): Promise<boolean> {
+  const shots = await db.storyboard.findMany({
+    where: { episodeId, supersededAt: null },
+    select: { id: true, dialogue: true, audioSource: true, importedAmbienceArtifactId: true },
+  })
+  const recorded = manifestAudio(manifest)
+  if (!recorded) return shots.some(shot => shot.audioSource !== null || shot.importedAmbienceArtifactId !== null)
+  return shots.some(shot => recorded[shot.id]?.mode !== recordedAudioMode(shot)
+    || (recorded[shot.id]?.ambienceArtifactId ?? null) !== shot.importedAmbienceArtifactId)
 }
 
 /** Order matters: the manifest is the cut order, not a set of ids. */

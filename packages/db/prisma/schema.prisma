@@ -182,6 +182,8 @@ model MediaArtifact {
   organizationId      String
   taskId              String?
   stage               Stage?
+  /// 人工导入音频所属的镜头（生成产物的 artifact 不填，走 task 归属）。
+  storyboardId        String?
   objectKey           String
   checksum            String
   mimeType            String
@@ -193,11 +195,13 @@ model MediaArtifact {
   createdAt           DateTime              @default(now())
   assetVersions       AssetVersion[]        @relation("AssetVersionArtifact")
   task                                        GenerationTask?   @relation(fields: [taskId], references: [id])
+  importedFor         Storyboard?           @relation("ImportedVoice", fields: [storyboardId], references: [id], onDelete: SetNull)
   projectAssetVersions ProjectAssetVersion[]
   qualityChecks       QualityCheck[]
 
   @@unique([objectKey, version])
   @@index([organizationId, stage])
+  @@index([storyboardId, stage])
 }
 
 model ModelCapability {
@@ -441,6 +445,14 @@ model Storyboard {
   dialogue                                                   String            @default("")
   speaker                                                    String?
   selectedVideoArtifactId                                    String?
+  /// 这一镜成片里听到什么。null = 按镜型默认（有台词=只用配音，无台词=只用原声）。
+  audioSource                                                AudioSource?
+  /// 人工导入的配音（裸 id，归属读侧校验）；audioSource=IMPORTED 时它是配音来源。
+  importedVoiceArtifactId                                    String?
+  /// 人工导入的环境音：与声音来源正交，混在配音下面当氛围底，不受模型原声摆布。
+  importedAmbienceArtifactId                                 String?
+  /// 烧进画面的字幕文本。null = 用本镜台词；导入的音频念的不是台词时才改这里。
+  subtitleText                                               String?
   assets                                                     StoryboardAsset[]
   generationTasks                                            GenerationTask[]  @relation("GenerationTask_storyboardIdToStoryboard")
   qualityChecks                                              QualityCheck[]
@@ -448,6 +460,8 @@ model Storyboard {
   generationTask                                             GenerationTask?   @relation("Storyboard_generationTaskIdToGenerationTask", fields: [generationTaskId], references: [id])
   scriptVersion                                              ScriptVersion?    @relation(fields: [scriptVersionId], references: [id])
   batch                                                      GenerationBatch[]
+  /// 这一镜导入过的音频文件（配音与环境音都在里面，由各自指针列决定哪条在播）。
+  importedVoices          MediaArtifact[]   @relation("ImportedVoice")
 
   @@unique([episodeId, revision, number])
   @@index([episodeId, supersededAt])
@@ -550,6 +564,13 @@ model CatalogCustomModel {
   organization           Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@unique([organizationId, provider, model, modality])
+}
+
+enum AudioSource {
+  VOICE
+  NATIVE
+  VOICE_NATIVE
+  IMPORTED
 }
 
 enum CapabilitySlot {
