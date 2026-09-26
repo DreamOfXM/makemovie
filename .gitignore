@@ -17,3 +17,18 @@ docs/PLAN.md
 docs/.plan-archive/
 p4-preview/
 spark-output/
+
+# Local-only artefacts: this repo is the public product facade, so evidence
+# drops, mockups, planning drafts and throwaway DB probes stay untracked.
+# The acceptance checklist's proof paths are relative to docs/, which is why
+# these are ignored in place rather than moved out of the tree.
+.qoder/
+docs/*.html
+docs/*.md
+docs/shot-audio-*/
+docs/shots-*/
+LAN-ACCESS.md
+PLAN_v*.md
+RESEARCH.md
+packages/db/probe_*.cjs
+packages/db/shot-audio-session.cjs
