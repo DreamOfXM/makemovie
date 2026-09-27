@@ -41,7 +41,7 @@ import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
 import { StoryboardCard } from '@/components/storyboards/storyboard-card'
 import { StoryboardHistory } from '@/components/storyboards/storyboard-history'
 import { EpisodeFlow } from '@/components/episode/episode-flow'
-import { ShotboardView } from '@/components/shotboard/shotboard-view'
+import { WorkbenchView } from '@/components/shotboard/workbench/workbench-view'
 import { UsagePanel } from '@/components/shotboard/usage-panel'
 import {
   EpisodeTabs,
@@ -285,21 +285,37 @@ function EpisodeWorkspace() {
 
   // GenerationsPanel owns its own fetch, so a token bump is the page's handle on it.
   const [generationsToken, setGenerationsToken] = useState(0)
-  // 逐镜重生成:操作发生在分镜卡片上(用户看镜头的地方),结果回写同卡片。
-  // 三个阶段同源同入口——首帧/视频/配音都在镜头卡里重做,不再分处两处。
+  // 制作台自持轮询，但页面持有的弹窗（新建/编辑/流转/绑定）落库后要让它立刻重读。
+  const [boardToken, setBoardToken] = useState(0)
+  const bumpBoard = useCallback(() => setBoardToken(value => value + 1), [])
+  // 逐镜重生成:操作发生在制作台右栏(用户看产物的地方),结果回写同一屏。
+  // 三个阶段同源同入口——首帧/视频/配音都在右栏重做;缺产物走「生成」(只补缺),
+  // 有产物走「重跑」(覆盖);调整要求随请求入快照。
   const [regeneratingShot, setRegeneratingShot] = useState<string | null>(null)
-  async function regenerateShotMedia(storyboardId: string, stage: 'IMAGE' | 'VIDEO' | 'AUDIO') {
+  async function regenerateShotMedia(
+    storyboardId: string,
+    stage: 'IMAGE' | 'FIRST_FRAME' | 'VIDEO' | 'AUDIO',
+    note?: string,
+    regenerate = false,
+  ) {
+    const apiStage = stage === 'FIRST_FRAME' ? 'IMAGE' : stage
     setRegeneratingShot(`${storyboardId}:${stage}`)
     try {
       await api(`/episodes/${episodeId}/generations`, {
         method: 'POST',
-        body: JSON.stringify({ stage, storyboardIds: [storyboardId], regenerate: true }),
+        body: JSON.stringify({
+          stage: apiStage,
+          storyboardIds: [storyboardId],
+          ...(regenerate ? { regenerate: true } : {}),
+          promptNote: note?.trim() || undefined,
+        }),
       })
-      toast.success(t('generations.shotRegenerated', { stage: translateEnum(t, 'generations.stage', stage) }))
+      toast.success(t('generations.shotRegenerated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
       setGenerationsToken(token => token + 1)
       storyboardsMedia.reload()
       // 立即刷新批次数据:分镜卡"生成中"的判定源就是它,不等 3s 轮询。
       storyboardBatches.reload()
+      bumpBoard()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
     } finally {
@@ -318,11 +334,13 @@ function EpisodeWorkspace() {
       storyboardBatches.reload()
     }
   }
-  const refreshAfterAdvance = useCallback(() => {    episodes.reload()
+  const refreshAfterAdvance = useCallback(() => {
+    episodes.reload()
     storyboardsMedia.reload()
     episodeAssets.reload()
     setGenerationsToken(token => token + 1)
-  }, [episodes.reload, storyboardsMedia.reload, episodeAssets.reload])
+    bumpBoard()
+  }, [episodes.reload, storyboardsMedia.reload, episodeAssets.reload, bumpBoard])
 
   async function bindStoryboardAssets(storyboardId: string, assets: { assetId: string; role: string }[]) {
     try {
@@ -334,6 +352,7 @@ function EpisodeWorkspace() {
       episodes.reload()
       storyboardsMedia.reload()
       episodeAssets.reload()
+      bumpBoard()
     }
   }
 
@@ -359,8 +378,9 @@ function EpisodeWorkspace() {
       {episodes.error && <ErrorState message={episodes.error} onRetry={episodes.reload} />}
 
       {view === 'board' ? (
-        <ShotboardView
+        <WorkbenchView
           episodeId={episodeId}
+          episodeAssets={episodeAssets.data.assets}
           onOpenShot={shotId => {
             setView('flow')
             setFlowScrollTarget(`shot-${shotId}`)
@@ -369,6 +389,16 @@ function EpisodeWorkspace() {
             setView('flow')
             setFlowScrollTarget('step-assets')
           }}
+          onOpenFlow={() => setView('flow')}
+          onOpenSettings={() => setStyleSettingsOpen(true)}
+          onCreateShot={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
+          onChangeStatus={shot => {
+            // StatusDialog 只读 id/status/number/title 四个字段，映射即可，不必回表拉全量。
+            setStatusTarget(shot as unknown as Storyboard)
+          }}
+          onBindAssets={bindStoryboardAssets}
+          onRegenerate={regenerateShotMedia}
+          refreshToken={boardToken}
         />
       ) : view === 'usage' ? (
         <UsagePanel episodeId={episodeId} projectId={projectId} />
@@ -474,7 +504,7 @@ function EpisodeWorkspace() {
                           onBindAssets={bindStoryboardAssets}
                           onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
                           onChangeStatus={() => setStatusTarget(storyboard)}
-                          onRegenerateStage={can('generation:trigger') ? regenerateShotMedia : undefined}
+                          onRegenerateStage={can('generation:trigger') ? (id, stage) => void regenerateShotMedia(id, stage, undefined, true) : undefined}
                           regeneratingShotStage={regeneratingShot}
                           generatingShotStages={generatingShotStages}
                           shotTasks={shotTaskIndex}
@@ -524,6 +554,7 @@ function EpisodeWorkspace() {
           setStoryboardDialog(null)
           episodes.reload()
           storyboardsMedia.reload()
+          bumpBoard()
           toast.success(mode === 'edit' ? t('storyboards.updated') : t('storyboards.created', { number }))
         }}
       />
@@ -535,6 +566,7 @@ function EpisodeWorkspace() {
           setStatusTarget(null)
           episodes.reload()
           storyboardsMedia.reload()
+          bumpBoard()
           toast.success(t('storyboards.statusChanged', { status: t(`status.${next}`) }))
         }}
       />
