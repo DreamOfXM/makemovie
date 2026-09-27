@@ -21,6 +21,7 @@ const QUOTA_CHAIN = '["dashscope/wan2.7-t2v: AllocationQuota.FreeTierOnly | Free
 const ACCESS_DENIED = '["dashscope/fun-music-v1: AccessDenied | Access denied."]'
 const NETWORK_DROP = '["dashscope/qwen3-tts-flash: fetch failed"]'
 const AUDIT_MISSED = 'visual-audit: threshold not met after 3 attempts'
+const MODERATION = '["dashscope/wan2.2-t2i-flash: DataInspectionFailed | Green net check rejected text (input)"]'
 
 const anArtifact = { id: 'artifact-keep' } as GenerationArtifact
 
@@ -117,6 +118,18 @@ describe('失败归因', () => {
     expect(retryWordForError(zh, QUOTA_CHAIN)).toBe('重抽无效')
     expect(retryWordForError(zh, NETWORK_DROP)).toBe('没送达')
     expect(retryWordForError(zh, AUDIT_MISSED)).toBe('没过线')
+  })
+
+  /**
+   * 内容审查既不是「没过线」（画面根本没生成），也不是「重抽无效」（改了描述就过）。
+   * 这句必须指向唯一有效的动作：先改描述。少这一档，用户会对着红条反复点重抽。
+   */
+  it('内容审查拒收说「先改描述」，不混进「没过线」也不混进「重抽无效」', () => {
+    expect(retryWordForError(zh, MODERATION)).toBe('改描述')
+    const failed = shot({ attention: ['frame_failed'], firstFrame: anArtifact, firstFrameError: MODERATION })
+    expect(badge(failed)).toBe('重抽前先改描述')
+    expect(shotFailureKind(failed)).toBe('moderation')
+    expect(shotDemandText(zh, failed, 'frame_failed')).toBe('上一版首帧还挂在这一镜上 · 模型内容审查未通过 · 与额度无关，请调整描述中的敏感表述后重试')
   })
 
   it('待处理那句先报真因，再报这一镜手上还剩什么', () => {

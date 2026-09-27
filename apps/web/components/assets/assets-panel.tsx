@@ -1,9 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { ChevronDownIcon, ChevronRightIcon, ImagesIcon, LoaderCircleIcon, MapPinIcon, PackageIcon, PencilIcon, PlusIcon, RefreshCwIcon, SparklesIcon, Trash2Icon, UserIcon } from 'lucide-react'
-import { ApiError, type Asset, type AssetVersion, type AssetsResponse, type GenerationArtifact } from '@/lib/api'
+import { ChevronDownIcon, ChevronRightIcon, ImagesIcon, LoaderCircleIcon, MapPinIcon, PackageIcon, PencilIcon, PlusIcon, RefreshCwIcon, SparklesIcon, TriangleAlertIcon, Trash2Icon, UserIcon } from 'lucide-react'
+import { ApiError, type Asset, type AssetVersion, type AssetsResponse, type GenerationArtifact, type GenerationPlan } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -26,7 +26,9 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
+import { PlanDialog } from '@/components/generations/plan-dialog'
 import { apiErrorMessage } from '@/lib/api-error'
+import { assetFailureCopy } from '@/lib/failure-cause'
 
 /** Kinds the authoring form offers as presets; the API itself accepts free text. */
 const assetKinds = ['character', 'prop', 'scene'] as const
@@ -36,6 +38,16 @@ const EMPTY: AssetsResponse = { assets: [] }
 
 function latestVersionOf(asset: Asset): AssetVersion | undefined {
   return asset.versions.reduce<AssetVersion | undefined>((max, version) => (!max || version.version > max.version ? version : max), undefined)
+}
+
+/** 一行素材此刻处于哪一段：在途 / 上一次尝试失败 / 无事。 */
+type RunPhase = 'running' | 'failed' | 'idle'
+
+function runPhaseOf(asset: Asset, awaited: boolean): { phase: RunPhase; error: string | null } {
+  const run = asset.run ?? null
+  if (awaited || run?.status === 'QUEUED' || run?.status === 'RUNNING') return { phase: 'running', error: null }
+  if (run?.status === 'FAILED' || run?.status === 'BLOCKED') return { phase: 'failed', error: run.error }
+  return { phase: 'idle', error: null }
 }
 
 /** Asset rows carry the SCREAMING workflow enum; StatusBadge speaks lowercase tones. */
@@ -65,8 +77,15 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
   // so the form lives behind a button instead of squatting above the list.
   const [createOpen, setCreateOpen] = useState(false)
   const [regenDialog, setRegenDialog] = useState<{ asset: Asset } | null>(null)
-  // 正在重生成的素材:卡片上显示"生成中"进度,新版本落库后清除。
-  const [generatingAssetId, setGeneratingAssetId] = useState<string | null>(null)
+  /**
+   * 刚提交、服务端还没在列表里回显的素材 → 提交时的版本数。它只盖住「POST 返回 → 下一次读到
+   * 任务实况」这段空窗，空的这一格用户看到的就是"点了没反应"。真正的进度一律由 asset.run
+   * 驱动，所以从总览或步骤卡触发的同一件事在这里也看得见，反之这里点掉的总览也看得见。
+   */
+  const [awaiting, setAwaiting] = useState<ReadonlyMap<string, number>>(new Map())
+  const [planning, setPlanning] = useState(false)
+  const [submittingBatch, setSubmittingBatch] = useState(false)
+  const [pendingPlan, setPendingPlan] = useState<{ assetIds: string[]; plan: GenerationPlan } | null>(null)
   // 删除是危险操作,永远二次确认;区分"删版本"与"删整个素材"。
   const [deleteConfirm, setDeleteConfirm] = useState<
     { type: 'version'; asset: Asset; version: AssetVersion } | { type: 'asset'; asset: Asset } | null
@@ -95,6 +114,26 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
   )
   const assets = useAsync<AssetsResponse>(loadAssets, EMPTY)
   const { reload } = assets
+
+  // 缺定妆照 = 一个版本都没有。整集缺图是同一个动作的 N 个对象，所以区块头给一颗
+  // 批量触发；行内那颗只留给"这一条要单独补跑"。
+  const missingCostume = useMemo(
+    () => assets.data.assets.filter(asset => asset.versions.length === 0),
+    [assets.data],
+  )
+  const runningCount = useMemo(
+    () => assets.data.assets.filter(asset => runPhaseOf(asset, awaiting.has(asset.id)).phase === 'running').length,
+    [assets.data, awaiting],
+  )
+  // 已有产物、等你定稿的数量——和"缺图"是两件事：一个要花钱，一个只要点一下。
+  const awaitingReview = useMemo(
+    () => assets.data.assets.filter(asset => asset.versions.length > 0 && !asset.versions.some(v => v.status === 'APPROVED')).length,
+    [assets.data],
+  )
+  const approvedCount = useMemo(
+    () => assets.data.assets.filter(asset => asset.versions.some(v => v.status === 'APPROVED')).length,
+    [assets.data],
+  )
 
   async function create() {
     if (!episodeId) return
@@ -154,25 +193,79 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
     }
   }
 
-  async function regenerateAsset(asset: Asset, note?: string) {
+  /**
+   * 单条触发。0 版本 = 首次生成（幂等路径，同键不重烧已成功的那次）；
+   * 已有版本 = 重跑并新增一版，这时才允许说「重生成」。
+   */
+  async function triggerCostume(asset: Asset, note?: string) {
     if (!episodeId) return
-    setBusy(`regen-asset-${asset.id}`)
+    const regenerate = asset.versions.length > 0
+    setBusy(`regen-${asset.id}`)
     try {
       await api(`/episodes/${episodeId}/generations`, {
         method: 'POST',
-        body: JSON.stringify({ stage: 'ASSET', regenerate: true, assetIds: [asset.id], promptNote: note?.trim() || undefined }),
+        body: JSON.stringify({
+          stage: 'ASSET',
+          assetIds: [asset.id],
+          ...(regenerate ? { regenerate: true } : {}),
+          promptNote: note?.trim() || undefined,
+        }),
       })
-      toast.success(t('assets.regenerated', { name: asset.name }))
+      toast.success(t(regenerate ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
       setRegenDialog(null)
       setRegenNote('')
-      // The request only queues the batch; the image takes 30-90s. Track it so the
-      // asset card can show "generating" instead of silence.
-      setGeneratingAssetId(asset.id)
+      setAwaiting(current => new Map(current).set(asset.id, asset.versions.length))
       reload()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
     } finally {
       setBusy(null)
+    }
+  }
+
+  /**
+   * 区块头的批量触发：先 GET generation-plan 拿到要烧几项（与 POST 同一套门禁），
+   * 确认框摊开账目后人点头才 POST。媒体面板用同一个 PlanDialog，两个入口不许长出两套口径。
+   */
+  async function requestCostumeBatch() {
+    if (!episodeId) return
+    const assetIds = missingCostume.map(asset => asset.id)
+    if (assetIds.length === 0) return
+    setPlanning(true)
+    try {
+      const { plan } = await api<{ plan: GenerationPlan }>(
+        `/episodes/${episodeId}/generation-plan?stage=ASSET&regenerate=0&assetIds=${assetIds.join(',')}`,
+      )
+      if (plan.newCount + plan.retryCount === 0) toast.message(t('generations.planNothingToDo'))
+      else setPendingPlan({ assetIds, plan })
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setPlanning(false)
+    }
+  }
+
+  async function confirmCostumeBatch() {
+    if (!episodeId || !pendingPlan) return
+    const { assetIds } = pendingPlan
+    setPendingPlan(null)
+    setSubmittingBatch(true)
+    try {
+      await api(`/episodes/${episodeId}/generations`, {
+        method: 'POST',
+        body: JSON.stringify({ stage: 'ASSET', assetIds }),
+      })
+      setAwaiting(current => {
+        const next = new Map(current)
+        for (const asset of assets.data.assets) if (assetIds.includes(asset.id)) next.set(asset.id, asset.versions.length)
+        return next
+      })
+      toast.success(t('assets.costumeQueued', { count: assetIds.length }))
+      reload()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setSubmittingBatch(false)
     }
   }
 
@@ -246,24 +339,27 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
     }
   }
 
-  // 重生成进行中:轮询素材列表,新版本落库(或批次失败)即结束进度并刷新。
-  // 图片生成 30-90 秒,这段沉默必须可见,否则用户以为点了没反应。
+  // 本地回声只盖到服务端能自己说话为止：列表里出现这条任务的实况，或版本数已经涨了，就交棒。
   useEffect(() => {
-    if (!generatingAssetId || !episodeId) return
-    const startedVersions = assets.data.assets.find(asset => asset.id === generatingAssetId)?.versions.length ?? 0
-    const timer = setInterval(() => {
-      void api<{ assets: Asset[] }>(`/episodes/${episodeId}/assets`).then(result => {
-        const current = result.assets.find(asset => asset.id === generatingAssetId)
-        if (!current) return
-        const batchFailed = current.versions.length === startedVersions && startedVersions > 0 && current.versions.every(v => v.status !== 'APPROVED') && false
-        if (current.versions.length > startedVersions || batchFailed) {
-          setGeneratingAssetId(null)
-          reload()
-        }
-      }).catch(() => undefined)
-    }, 3000)
+    if (awaiting.size === 0) return
+    const next = new Map(awaiting)
+    for (const asset of assets.data.assets) {
+      const baseline = next.get(asset.id)
+      if (baseline === undefined) continue
+      if (asset.run || asset.versions.length > baseline) next.delete(asset.id)
+    }
+    if (next.size !== awaiting.size) setAwaiting(next)
+  }, [assets.data, awaiting])
+
+  // 排队/运行段：定妆照一张要 30~90 秒，这段沉默必须可见。轮询源是列表本身
+  // （asset.run 由任务状态算出），加上还没回显的本地回声——只在"指示已经亮了"时才轮询
+  // 就是先有鸡还是先有蛋，点了永远看不到反应。
+  const unsettled = awaiting.size > 0 || runningCount > 0
+  useEffect(() => {
+    if (!episodeId || !unsettled) return
+    const timer = setInterval(reload, 3000)
     return () => clearInterval(timer)
-  }, [generatingAssetId, episodeId, assets.data, api, reload])
+  }, [episodeId, unsettled, reload])
 
   return (
     <Card>
@@ -332,6 +428,38 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
         </CardContent>
       ) : (
         <CardContent className="space-y-4">
+          {view === 'episode' && (missingCostume.length > 0 || runningCount > 0) && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2.5">
+              <GuardedButton
+                action="episode:write"
+                size="sm"
+                disabled={planning || submittingBatch || runningCount > 0 || missingCostume.length === 0}
+                onClick={() => void requestCostumeBatch()}
+              >
+                {planning || submittingBatch || runningCount > 0 ? (
+                  <LoaderCircleIcon className="animate-spin" />
+                ) : (
+                  <SparklesIcon />
+                )}
+                {submittingBatch
+                  ? t('assets.costumeSubmitting')
+                  : planning
+                    ? t('assets.costumePlanning')
+                    : runningCount > 0
+                      ? t('assets.costumeRunning', { running: runningCount, total: runningCount + missingCostume.length })
+                      : t('assets.generateCostume', { count: missingCostume.length })}
+              </GuardedButton>
+              <HelpHint text={t('assets.generateCostumeHint')} />
+              <span className="text-muted-foreground ml-auto text-xs">
+                {t('assets.costumeSummary', {
+                  missing: missingCostume.length,
+                  review: awaitingReview,
+                  approved: approvedCount,
+                  total: assets.data.assets.length,
+                })}
+              </span>
+            </div>
+          )}
           {assets.loading && assets.data.assets.length === 0 ? (
             <TableSkeleton rows={2} columns={4} />
           ) : assets.data.assets.length === 0 ? (
@@ -348,13 +476,14 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                 const items = assets.data.assets.filter(asset => asset.kind === group.kind)
                 const collapsed = collapsedKinds.has(group.kind)
                 const pending = items.filter(asset => latestVersionOf(asset)?.status !== 'APPROVED').length
+                const missing = items.filter(asset => asset.versions.length === 0).length
                 const GroupIcon = group.icon
                 return (
                   <section key={group.kind} className="space-y-3">
                     <div className="flex items-center gap-2 border-b pb-2">
                       <button
                         type="button"
-                        className="flex flex-1 items-center gap-2 text-left"
+                        className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
                         onClick={() => toggleKind(group.kind)}
                         aria-expanded={!collapsed}
                       >
@@ -362,6 +491,8 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                         <GroupIcon className="text-muted-foreground size-4" />
                         <h3 className="text-sm font-semibold">{translateEnum(t, 'assets.kind', group.kind)}</h3>
                         <Badge variant="muted">{items.length}</Badge>
+                        {/* 缺图与待审分开标：一个要花钱生成，一个只要点一下定稿。 */}
+                        {missing > 0 && <Badge variant="destructive">{t('assets.missingGroup', { count: missing })}</Badge>}
                         {items.length > 0 && (
                           <Badge variant={pending === 0 ? 'secondary' : 'outline'} className="font-normal">
                             {t('assets.approvedGroup', { approved: items.length - pending, total: items.length })}
@@ -386,20 +517,26 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                     {!collapsed && (items.length === 0 ? (
                       <p className="text-muted-foreground text-sm">{t('assets.groupEmpty')}</p>
                     ) : (
-                      items.map(asset => (
-                        <AssetCard
-                          key={asset.id}
-                          asset={asset}
-                          busy={busy}
-                          generating={generatingAssetId === asset.id}
-                          onApprove={approve}
-                          onRemoveVersion={(a, v) => setDeleteConfirm({ type: 'version', asset: a, version: v })}
-                          onRemove={a => setDeleteConfirm({ type: 'asset', asset: a })}
-                          onRegenerate={can('episode:write') && generatingAssetId !== asset.id ? () => { setRegenNote(''); setRegenDialog({ asset }) } : undefined}
-                          onEditDescription={can('episode:write') ? editDescription : undefined}
-                          onDeprecate={can('episode:write') ? deprecateVersion : undefined}
-                        />
-                      ))
+                      items.map(asset => {
+                        const { phase, error } = runPhaseOf(asset, awaiting.has(asset.id))
+                        const mayWrite = can('episode:write')
+                        return (
+                          <AssetCard
+                            key={asset.id}
+                            asset={asset}
+                            busy={busy}
+                            phase={phase}
+                            runError={error}
+                            onApprove={approve}
+                            onRemoveVersion={(a, v) => setDeleteConfirm({ type: 'version', asset: a, version: v })}
+                            onRemove={a => setDeleteConfirm({ type: 'asset', asset: a })}
+                            onOpenGenerate={mayWrite && phase !== 'running' ? () => { setRegenNote(''); setRegenDialog({ asset }) } : undefined}
+                            onRetry={mayWrite && phase !== 'running' ? () => { void triggerCostume(asset) } : undefined}
+                            onEditDescription={mayWrite ? editDescription : undefined}
+                            onDeprecate={mayWrite ? deprecateVersion : undefined}
+                          />
+                        )
+                      })
                     ))}
                   </section>
                 )
@@ -470,8 +607,9 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
           <Dialog open={regenDialog !== null} onOpenChange={open => { if (!open) setRegenDialog(null) }}>
             <DialogContent className="sm:max-w-md">
               <DialogHeader>
-                <DialogTitle>{t('assets.regenTitle')}</DialogTitle>
-                <DialogDescription>{t('assets.regenHint')}</DialogDescription>
+                {/* 没生成过的东西不能叫「重生成」：同一动作按有没有产物分两个名字。 */}
+                <DialogTitle>{regenDialog?.asset.versions.length ? t('assets.regenTitle') : t('assets.generateTitle')}</DialogTitle>
+                <DialogDescription>{regenDialog?.asset.versions.length ? t('assets.regenHint') : t('assets.generateHint')}</DialogDescription>
               </DialogHeader>
               <Field label={t('assets.regenNoteLabel')} htmlFor="regenNote">
                 <Textarea
@@ -490,14 +628,24 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                   action="episode:write"
                   size="sm"
                   disabled={busy !== null}
-                  onClick={() => { if (regenDialog) void regenerateAsset(regenDialog.asset, regenNote) }}
+                  onClick={() => { if (regenDialog) void triggerCostume(regenDialog.asset, regenNote) }}
                 >
                   {busy === `regen-${regenDialog?.asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
-                  {busy === `regen-${regenDialog?.asset.id}` ? t('assets.regenerating') : t('assets.regenerate')}
+                  {busy === `regen-${regenDialog?.asset.id}`
+                    ? t('assets.generating')
+                    : regenDialog?.asset.versions.length
+                      ? t('assets.regenerate')
+                      : t('assets.generateNow')}
                 </GuardedButton>
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          <PlanDialog
+            pending={pendingPlan ? { stage: 'ASSET', regenerate: false, assetIds: pendingPlan.assetIds, plan: pendingPlan.plan } : null}
+            onClose={() => setPendingPlan(null)}
+            onConfirm={() => void confirmCostumeBatch()}
+          />
 
           <AlertDialog open={deleteConfirm !== null} onOpenChange={open => !open && setDeleteConfirm(null)}>
             <AlertDialogContent>
@@ -535,13 +683,17 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
 interface AssetCardProps {
   asset: Asset
   busy: string | null
-  /** True while a regeneration batch for this asset is in flight. */
-  generating?: boolean
+  /** 定妆照任务此刻的段位：在途 / 上次失败 / 无事。由服务端 run + 提交空窗共同裁决。 */
+  phase: RunPhase
+  /** phase==='failed' 时的实际原因，来自任务快照。 */
+  runError: string | null
   onApprove(asset: Asset, version: AssetVersion): Promise<void>
   onRemoveVersion(asset: Asset, version: AssetVersion): void
   onRemove(asset: Asset): void
-  /** Present when the viewer may trigger generations: re-runs the AI for this asset alone. */
-  onRegenerate?(): void
+  /** 有权触发时给出：打开单条生成/重生成弹层（可写调整要求）。 */
+  onOpenGenerate?(): void
+  /** 上一条失败后的行内重试，不让人回区块头重跑整批。 */
+  onRetry?(): void
   /** AI 提取的描述会写错(性别/年龄),这是用户纠正档案的入口。 */
   onEditDescription?(asset: Asset, description: string): Promise<void>
   /** 废弃当前已通过版本:退回草稿,参考图解析不再选中它。 */
@@ -553,7 +705,7 @@ interface AssetCardProps {
  * 使用中版本、被几镜引用;定稿/废弃/编辑描述/重生成这些动作全部收进展开抽屉,
  * 因为一次评审通常只需要扫完十行、点开一两个。
  */
-function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemove, onRegenerate, onEditDescription, onDeprecate }: AssetCardProps) {
+function AssetCard({ asset, busy, phase, runError, onApprove, onRemoveVersion, onRemove, onOpenGenerate, onRetry, onEditDescription, onDeprecate }: AssetCardProps) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
@@ -585,13 +737,17 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
             <ArtifactMedia artifact={thumb} label={asset.name} className="h-10 w-10 rounded object-cover" />
           ) : (
             <span className="bg-muted flex size-10 items-center justify-center rounded">
-              <ImagesIcon className="text-muted-foreground size-4" />
+              {phase === 'running' ? (
+                <LoaderCircleIcon className="text-primary size-4 animate-spin" />
+              ) : (
+                <ImagesIcon className="text-muted-foreground size-4" />
+              )}
             </span>
           )}
         </span>
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{asset.name}</span>
         <StatusBadge status={toneFor(asset.status)} label={t(`status.${toneFor(asset.status)}`)} className="h-5 shrink-0 px-1.5 text-[11px]" />
-        {generating ? (
+        {phase === 'running' ? (
           <span className="text-primary flex shrink-0 items-center gap-1 text-xs font-medium">
             <LoaderCircleIcon className="size-3.5 animate-spin" />
             {t('assets.generating')}
@@ -599,7 +755,18 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
         ) : (
           <span className="text-muted-foreground hidden shrink-0 items-center gap-2 text-xs sm:flex">
             {effective && <span className="font-mono">{t('assets.inUse')} v{effective.version}</span>}
-            <span className="font-mono">{t('assets.versionsShort', { count: asset.versions.length })}</span>
+            {phase === 'failed' ? (
+              <Hint text={runError ?? t('assets.generateFailed')}>
+                <Badge variant="destructive" className="font-normal">{t('assets.generateFailed')}</Badge>
+              </Hint>
+            ) : asset.versions.length === 0 ? (
+              <Badge variant="outline" className="font-normal">{t('assets.neverGenerated')}</Badge>
+            ) : (
+              <>
+                <span className="font-mono">{t('assets.versionsShort', { count: asset.versions.length })}</span>
+                {pendingVersions > 0 && <Badge variant="secondary" className="font-normal">{t('assets.pendingVersions', { count: pendingVersions })}</Badge>}
+              </>
+            )}
             {(asset.usageCount ?? 0) > 0 && (
               <Hint text={t('assets.usageHint')}>{t('assets.usageCount', { count: asset.usageCount! })}</Hint>
             )}
@@ -608,7 +775,6 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                 {t('assets.libraryBadge')}
               </Badge>
             )}
-            {pendingVersions > 0 && <Badge variant="secondary" className="font-normal">{t('assets.pendingVersions', { count: pendingVersions })}</Badge>}
           </span>
         )}
       </button>
@@ -626,18 +792,22 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                 {t('assets.editDescription')}
               </Button>
             )}
-            {onRegenerate && (
+            {onOpenGenerate && (
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy === `regen-asset-${asset.id}`}
-                onClick={onRegenerate}
+                disabled={busy === `regen-${asset.id}`}
+                onClick={onOpenGenerate}
               >
-                {busy === `regen-asset-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
-                {busy === `regen-asset-${asset.id}` ? t('assets.regenerating') : t('assets.regenerate')}
+                {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
+                {busy === `regen-${asset.id}`
+                  ? t('assets.generating')
+                  : asset.versions.length > 0
+                    ? t('assets.regenerate')
+                    : t('assets.generateNow')}
               </Button>
             )}
-            {onRegenerate && asset.status !== 'APPROVED' && (
+            {onEditDescription && asset.status !== 'APPROVED' && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -651,6 +821,26 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
             )}
             <LineageBadge taskId={asset.generationTaskId} />
           </div>
+
+          {/* 落定段：失败回到行内，界面只说人话（真因 + 该往哪修），重试不让人回区块头重跑整批。
+              原始报文单独一行、标成「原始报错」，与镜头详情同形——那是证据栏，不是提示语。 */}
+          {phase === 'failed' && (
+            <div className="border-destructive/40 bg-destructive/10 text-destructive-ink space-y-1.5 rounded-lg border px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <TriangleAlertIcon className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{assetFailureCopy(t, runError)}</span>
+                {onRetry && (
+                  <Button variant="outline" size="sm" disabled={busy === `regen-${asset.id}`} onClick={onRetry}>
+                    {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <RefreshCwIcon />}
+                    {t('assets.retryOne')}
+                  </Button>
+                )}
+              </div>
+              {runError && (
+                <p className="text-faint-foreground break-words">{t('shotboard.rawError')}: {runError}</p>
+              )}
+            </div>
+          )}
           <p className="text-muted-foreground text-xs leading-relaxed">{asset.description}</p>
 
           {asset.versions.length > 0 && (
@@ -658,6 +848,8 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
               {asset.versions.map(version => {
                 const busyKey = `approve-asset-${asset.id}-${version.version}`
                 const inUse = version.id === effective?.id
+                // 在途时毛玻璃化的是"这一次尝试覆盖的那张"——已有定稿则遮定稿，否则遮最新版。
+                const blurThis = phase === 'running' && version.id === (effective ?? newest)?.id
                 return (
                   <div key={version.id} className="flex flex-wrap items-start gap-3 rounded-lg border bg-card p-3">
                     <div className="min-w-0 flex-1 space-y-1.5">
@@ -677,10 +869,10 @@ function AssetCard({ asset, busy, generating, onApprove, onRemoveVersion, onRemo
                           <ArtifactMedia
                             artifact={version.artifact}
                             label={`${asset.name} · v${version.version}`}
-                            className={generating ? 'blur-sm' : undefined}
+                            className={blurThis ? 'blur-sm' : undefined}
                           />
                           {/* 玻璃遮罩:重新生成期间旧图毛玻璃化,新图落位即清晰替换。 */}
-                          {generating && (
+                          {blurThis && (
                             <div className="bg-background/50 absolute inset-0 flex items-center justify-center rounded-lg backdrop-blur-sm">
                               <span className="text-primary inline-flex items-center gap-1.5 text-xs font-medium">
                                 <LoaderCircleIcon className="size-3.5 animate-spin" />

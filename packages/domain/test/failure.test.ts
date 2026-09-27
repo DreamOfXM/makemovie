@@ -9,6 +9,10 @@ const REAL = {
   param: '["dashscope/qwen3.8-max: InvalidParameter | url error, please check url！ For details, see: https://help.aliyun.com/zh/model-studio/error-code#error-url | request_id=26b1eea7"]',
   network: '["dashscope/qwen3-tts-flash: fetch failed"]',
   audit: 'visual-audit: threshold not met after 3 attempts',
+  // 2026-09-27 从「红色房产证」这条素材的候选链里原样抄回：同一条链上审查、额度、
+  // 参数三种因并存，界面上只能说一种，说错就把人推向充值页。
+  moderation:
+    '["dashscope/wan2.2-t2i-flash: DataInspectionFailed | Input data may contain inappropriate content. For details, see: https://help.aliyun.com/zh/model-studio/error-code#inappropriate-content | request_id=06df0643", "dashscope/qwen-image-3.0: AllocationQuota.FreeTierOnly | Free quota exhausted.", "dashscope/qwen-image-3.0-pro: DataInspectionFailed | Green net check rejected text (input)", "dashscope/qwen-image-edit: InvalidParameter | For image editing, the message must contain 1~3 image content items. Got 0 image items."]',
 } as const
 
 describe('classifyFailure', () => {
@@ -36,6 +40,11 @@ describe('classifyFailure', () => {
   it('候选链里只要出现过额度耗尽，就按额度说（终因优先于顺带的网络断）', () => {
     expect(classifyFailure('["a/m: fetch failed", "b/n: AllocationQuota.FreeTierOnly | Free quota exhausted"]')).toBe('quota')
   })
+
+  it('内容审查排在额度之前：链上有额度的那台模型也是被内容拦下的，充值解决不了这一条', () => {
+    expect(classifyFailure(REAL.moderation)).toBe('moderation')
+    expect(classifyFailure('["dashscope/qwen-image-3.0-pro: DataInspectionFailed | Green net check rejected text (input)"]')).toBe('moderation')
+  })
 })
 
 describe('isTerminalFailure', () => {
@@ -45,6 +54,9 @@ describe('isTerminalFailure', () => {
     expect(isTerminalFailure('param')).toBe(true)
     expect(isTerminalFailure('network')).toBe(false)
     expect(isTerminalFailure('audit')).toBe(false)
+    // 审查拒收不算终因：模型和账号都是好的，改完描述再抽就能过；
+    // 把它标成终因会让就绪度把一台当天成功过 5 次的模型红成不可用。
+    expect(isTerminalFailure('moderation')).toBe(false)
     expect(isTerminalFailure('unknown')).toBe(false)
   })
 })

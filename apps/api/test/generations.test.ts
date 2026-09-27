@@ -777,9 +777,13 @@ describe('asset generation trigger', () => {
       expect(task).toBeTruthy()
       expect(task!.stage).toBe('ASSET')
       const seed = assetSeeds[index]
-      // 定妆照提示词 = 素材描述 + 该类型的设定图规格（角色为角色板新标准）。
+      // 定妆照提示词 = 素材描述 + 该类型的设定图规格（角色为角色板新标准）+ 项目风格的视觉指令。
+      // 规格只管版式与一致性，质感交给风格：建项目就带默认风格（写实风），所以这句风格
+      // 指令是常驻的，而旧那句写死的「严禁照片级真人质感」必须让位，否则定妆照与逐镜
+      // 首帧画风分叉，每镜都在跟自己的参考图打架。
+      const projectStyle = OFFICIAL_STYLES.find(style => style.id === 'realistic')!
       const spec = seed.kind === 'character'
-        ? '角色设定板（Character Board）：单张竖版海报式排版，CG 游戏立绘风格、插画质感（严禁照片级真人质感）。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。'
+        ? '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。'
         : seed.kind === 'scene'
           ? '场景概念图：无人物空镜，构图与光线符合描述，细节清晰，无文字无水印。'
           : '道具设定图：单品居中，中性背景，细节清晰，无文字无水印。'
@@ -787,10 +791,11 @@ describe('asset generation trigger', () => {
       // reproducibility question is answered from (the worker test pins how it is derived).
       const snapshot = JSON.parse(task!.requestSnapshot ?? '')
       expect(snapshot).toEqual({
-        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}` },
+        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n视觉风格：${getStyleVisualDirective(projectStyle, 'IMAGE')}` },
         parameters: { seed: expect.any(Number) },
         assetId,
       })
+      expect(snapshot.input.prompt).not.toContain('严禁照片级真人质感')
       expect(Number.isInteger(snapshot.parameters.seed) && snapshot.parameters.seed >= 0 && snapshot.parameters.seed < 2_147_483_648).toBe(true)
     }
 

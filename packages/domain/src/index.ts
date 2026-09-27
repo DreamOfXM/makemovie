@@ -239,12 +239,13 @@ export function isRole(value: string): value is Role {
  * 视觉审计没过线该重抽，额度用尽抽一百次也不会变——两者都写成「没过线」，
  * 用户就会去改提示词，而真原因在账单上（2026-09-26 全站验收 B1）。
  */
-export const failureKinds = ['quota', 'access', 'param', 'network', 'audit', 'unknown'] as const
+export const failureKinds = ['moderation', 'quota', 'access', 'param', 'network', 'audit', 'unknown'] as const
 export type FailureKind = (typeof failureKinds)[number]
 
 /** 模式只收本机库里真出现过的报文（dashscope 错误码 + worker 自写文案），扩族要带样本。 */
 const FAILURE_PATTERNS: readonly [FailureKind, RegExp][] = [
   ['audit', /threshold not met|visual-audit:/i],
+  ['moderation', /DataInspectionFailed|Green net check rejected|inappropriate content/i],
   ['quota', /AllocationQuota|FreeTierOnly|free quota exhausted|insufficient balance|arrearage/i],
   ['access', /AccessDenied|NoPermission|Forbidden|Unauthorized|InvalidApiKey/i],
   ['param', /InvalidParameter|BadRequest|url error/i],

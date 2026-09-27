@@ -6,7 +6,7 @@ import { isContentLocale, planVideoModels } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
 import { buildFilmScriptPrompt, buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
 import { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE, type GuardCharacterInfo, type GuardFinding } from './guards.js'
-import { applyStyleToPrompt, getStyleById, type StylePreset } from './styles/index.js'
+import { applyStyleToPrompt, getStyleById, isVisualStyleStage, type StylePreset } from './styles/index.js'
 
 /**
  * Generation orchestration shared by the API (a human triggers a stage) and the
@@ -62,7 +62,7 @@ export {
   getAllStyles,
 } from './styles/index.js'
 export type { StylePreset } from './styles/index.js'
-export { applyStyleToPrompt, isStageAffectedByStyle } from './styles/index.js'
+export { applyStyleToPrompt, isStageAffectedByStyle, isVisualStyleStage } from './styles/index.js'
 
 // 官方风格幂等种子
 export { seedOfficialStyles } from './seed-official-styles.js'
@@ -851,18 +851,25 @@ export async function triggerStage(
   // 角色设定已从"白底三视图"升级为"角色板"（Character Board,2026 行业新标准）：
   // 一张竖版海报内集成身份信息+多角度脸部特写+全身三视图+服饰细节+表情集,
   // 信息密度远高于裸三视图,视频模型能读出更稳定的身份特征。
-  // 风格强制 CG 立绘感而非照片级真人——一是规避"真人图像"内容审查
-  // (Seedance 2.0 等已明确拒绝真人参考图),二是风格化本身提升跨镜头一致性。
+  // 规格只管版式与一致性，质感交给风格预设：参考图与首帧必须同一画风，
+  // 否则逐镜都在跟定妆照打架。没选预设时才由下面这句兜住插画质感。
   const ASSET_REFERENCE_SPECS: Record<string, string> = {
     character:
-      '角色设定板（Character Board）：单张竖版海报式排版，CG 游戏立绘风格、插画质感（严禁照片级真人质感）。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。',
+      '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。',
     scene: '场景概念图：无人物空镜，构图与光线符合描述，细节清晰，无文字无水印。',
     prop: '道具设定图：单品居中，中性背景，细节清晰，无文字无水印。',
   }
+  // 无预设时的质感基准沿用旧行为：规避"真人图像"内容审查（Seedance 2.0 等已明确拒绝
+  // 照片级真人参考图），风格化本身也提升跨镜头一致性。选了预设，这句必须让位。
+  const CHARACTER_MEDIUM_WITHOUT_STYLE = '渲染质感：CG 游戏立绘风格、插画质感（严禁照片级真人质感）'
   const targets: GenerationTarget[] = perAsset
     ? selectedAssets.map(asset => ({
         entityId: asset.id,
-        prompt: `${asset.kind} ${asset.name}: ${asset.description}${ASSET_REFERENCE_SPECS[asset.kind] ? `\n\n${ASSET_REFERENCE_SPECS[asset.kind]}` : ''}`,
+        prompt: [
+          `${asset.kind} ${asset.name}: ${asset.description}`,
+          ASSET_REFERENCE_SPECS[asset.kind],
+          asset.kind === 'character' && !style ? CHARACTER_MEDIUM_WITHOUT_STYLE : undefined,
+        ].filter(Boolean).join('\n\n'),
         assetId: asset.id,
       }))
     : perStoryboard
@@ -889,7 +896,8 @@ export async function triggerStage(
   const shotById = new Map(selected.map(storyboard => [storyboard.id, storyboard]))
   // 风格预设先于守卫链应用:style-anchor 认得出「视觉风格」标记就不叠加
   // 默认写实基准,显式选的风格永远赢;没有预设时守卫照旧兜底。
-  let promptedTargets: GenerationTarget[] = style && (stage === 'IMAGE' || stage === 'VIDEO')
+  // ASSET 也在内:定妆照是逐镜首帧的参考输入,它不吃风格的话全片画风从第一步就分叉。
+  let promptedTargets: GenerationTarget[] = style && isVisualStyleStage(stage)
     ? notedTargets.map(target => ({
         ...target,
         prompt: applyStyleToPrompt(stage, target.prompt, style),
@@ -911,7 +919,8 @@ export async function triggerStage(
           ...(result.blockedReason ? { blockedReason: result.blockedReason } : {}),
         }
       })
-    : notedTargets
+    // 没有守卫的阶段必须保留上一步的结果：回到 notedTargets 等于把风格又擦掉。
+    : promptedTargets
 
   // A frame is only looked up when a model was bound that can take it: resolving one for a
   // request that would have to drop it spends a query to produce a number nobody reads.
@@ -984,6 +993,9 @@ export async function triggerStage(
     // 绑定补齐后经重试路径复活，中途不烧任何额度。
     ...(target.blockedReason ? { status: 'BLOCKED' as const, errorSnapshot: target.blockedReason } : {}),
     ...(target.storyboardId ? { storyboardId: target.storyboardId } : {}),
+    // 定妆照任务把它服务的素材连上多对多:素材面板要按行显示"生成中/失败",
+    // 而 requestSnapshot 里的 assetId 是给供应商看的,不能当查询面。
+    ...(target.assetId ? { assets: { connect: [{ id: target.assetId }] } } : {}),
     // ProviderRequest payload; the model and the vendor's dialect keys belong to
     // whichever candidate ends up running, so the worker fills those in. A media
     // task's snapshot already carries the base seed above, because reproducibility

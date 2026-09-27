@@ -28,6 +28,7 @@ interface AssetDto {
   usageCount: number
   versions: AssetVersionDto[]
   generationTaskId: string | null
+  run: { status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'; error: string | null } | null
 }
 
 beforeAll(async () => {
@@ -120,10 +121,12 @@ describe('episode assets', () => {
     const created = await env.app.inject({ method: 'POST', url: assetsUrl, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(created.statusCode).toBe(201)
     const asset = created.json().asset as AssetDto
-    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'projectAssetId', 'status', 'usageCount', 'versions'])
+    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'projectAssetId', 'run', 'status', 'usageCount', 'versions'])
     // Authored by a human and bound to no shot yet.
     expect(asset.usageCount).toBe(0)
     expect(asset.generationTaskId).toBeNull()
+    // 刚创建的素材没有任何定妆照任务，实况字段就是 null。
+    expect(asset.run).toBeNull()
     expect(asset.kind).toBe('character')
     expect(asset.name).toBe('小雨')
     expect(asset.description).toBe('雨夜中撑伞的少女')

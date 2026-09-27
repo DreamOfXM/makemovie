@@ -59,6 +59,7 @@ function ok(message: string) {
 
 /** 探测记录只到「曾经通过」，真调用结果才回答「现在跑不跑得通」。 */
 const FAILURE_TEXT: Record<FailureKind, string> = {
+  moderation: '内容审查未通过',
   quota: '额度用尽',
   access: '无调用权限',
   param: '参数被模型拒收',

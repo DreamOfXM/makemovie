@@ -48,6 +48,8 @@ interface ProgressData {
   hasUnapprovedScript: boolean
   /** Referenced assets still in draft — the gate the first-frame stage refuses to run behind. */
   pendingReferencedAssets: number
+  /** Referenced assets with no reference image at all: the block is a generation, not a review. */
+  assetImagesMissing: number
   hasGeneratedMedia: boolean
   musicCompleted: boolean
   /** A MUSIC batch exists (even failed): a re-run needs `regenerate`, a plain trigger would no-op. */
@@ -75,7 +77,7 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
     const [sources, scripts, assets, generations, deliveries] = await Promise.all([
       api<{ versions: Array<{ status: string }> }>(`/episodes/${episodeId}/source-versions`),
       api<{ versions: Array<{ status: string }> }>(`/episodes/${episodeId}/script-versions`),
-      api<{ assets: Array<{ status: string; usageCount?: number }> }>(`/episodes/${episodeId}/assets`),
+      api<{ assets: Array<{ status: string; usageCount?: number; versions: Array<{ id: string }> }> }>(`/episodes/${episodeId}/assets`),
       api<{ batches: Array<{ stage: string; tasks: Array<{ status: string }> }>; composition: { status: string } | null }>(
         `/episodes/${episodeId}/generations`,
       ),
@@ -86,6 +88,7 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
       scriptApproved: scripts.versions.some(version => version.status === 'APPROVED'),
       hasUnapprovedScript: scripts.versions.length > 0 && !scripts.versions.some(version => version.status === 'APPROVED'),
       pendingReferencedAssets: assets.assets.filter(asset => (asset.usageCount ?? 0) > 0 && asset.status !== 'APPROVED').length,
+      assetImagesMissing: assets.assets.filter(asset => (asset.usageCount ?? 0) > 0 && asset.versions.length === 0).length,
       hasGeneratedMedia: generations.batches.some(
         batch => (batch.stage === 'IMAGE' || batch.stage === 'VIDEO') && batch.tasks.some(task => task.status === 'SUCCEEDED'),
       ),
@@ -167,7 +170,11 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
         ? { kind: 'review', anchor: 'script', labelKey: 'stepper.action.reviewScript' }
         : { kind: 'generate', stage: 'SCRIPT', labelKey: 'stepper.action.generateScript' }
     } else if (live.length === 0) nextAction = { kind: 'generate', stage: 'STORYBOARD', labelKey: 'stepper.action.generateStoryboard' }
-    else if (data.pendingReferencedAssets > 0) {
+    else if (data.assetImagesMissing > 0) {
+      // 缺图不是缺审批：连参考图都没有，审批无从下手，这一步的唯一出路是去素材区批量生成。
+      // 仍是跳转不是发令——每张图都花计费次数，钱的动作留在那块面板上，由人按下。
+      nextAction = { kind: 'review', anchor: 'assets', labelKey: 'stepper.action.generateAssetImages', count: data.assetImagesMissing }
+    } else if (data.pendingReferencedAssets > 0) {
       nextAction = { kind: 'review', anchor: 'assets', labelKey: 'stepper.action.reviewAssets', count: data.pendingReferencedAssets }
     } else if (frameFailed.length > 0) {
       // 坏掉的排在缺的前面：有画面但最新一次重生成失败的镜头，缺帧列表看不见它。
@@ -551,9 +558,16 @@ function TurnCard({
         <div className="flex flex-wrap items-center gap-2">
           {nextAction && (
             nextAction.kind === 'review' ? (
-              <Button size="sm" onClick={() => onRunAction(nextAction)}>
-                {actionLabel(nextAction)}
-              </Button>
+              <Tooltip>
+                {/* 实心 = 会推进/会花钱，跳转两样都不是。把它降成描边，否则整张卡唯一
+                    一颗实心钮点了却不产出任何东西，用户会以为流水线已经动了。 */}
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" onClick={() => onRunAction(nextAction)}>
+                    {actionLabel(nextAction)}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t('stepper.jumpHint')}</TooltipContent>
+              </Tooltip>
             ) : (
               <Tooltip>
                 {/* 按钮禁用时自身不响应 hover，提示要挂在外面这层 span 上才弹得出来；

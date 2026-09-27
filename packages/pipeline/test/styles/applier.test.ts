@@ -31,8 +31,13 @@ describe('StyleApplier', () => {
       expect(isStageAffectedByStyle('SCRIPT')).toBe(false)
     })
 
-    it('should return false for ASSET stage', () => {
-      expect(isStageAffectedByStyle('ASSET')).toBe(false)
+    /**
+     * 参考图吃风格是 2026-09-27 翻案的一条：旧断言把「ASSET 不受风格影响」当规格钉住,
+     * 于是选了「电影感」的剧组,定妆照仍是 CG 立绘,逐镜首帧却按电影质感画——参考图本来
+     * 是首帧的输入,两边画风分叉等于每镜都在跟参考图打架。
+     */
+    it('should return true for ASSET stage', () => {
+      expect(isStageAffectedByStyle('ASSET')).toBe(true)
     })
 
     it('should return false for AUDIO stage', () => {
@@ -93,6 +98,28 @@ describe('StyleApplier', () => {
       expect(result).toContain(originalPrompt)
       expect(result).toContain('视觉风格：')
       expect(result).toContain('sci-fi')
+    })
+
+    /**
+     * 参考图与首帧必须是同一句风格描述：两处若各写一份，改一处就会悄悄分叉，
+     * 而定妆照正是首帧的参考输入。这里用等值断言把"同一句"钉死。
+     */
+    it('should give the asset reference the exact same wording as the first frame', () => {
+      const cinematic = {
+        id: 'cinematic',
+        name: '电影感',
+        nameEn: 'Cinematic',
+        description: '电影级别',
+        isOfficial: true,
+        visualStyle: 'cinematic, film grain, dramatic lighting',
+        tone: '戏剧化、有张力',
+        colorPalette: 'rich contrast',
+      }
+      const assetPrompt = applyStyleToPrompt('ASSET', 'character 许知意: 30 岁女律师', cinematic)
+      expect(assetPrompt).toContain('视觉风格：cinematic, film grain, dramatic lighting, rich contrast')
+      expect(assetPrompt.replace('character 许知意: 30 岁女律师', 'SAME')).toBe(
+        applyStyleToPrompt('IMAGE', 'SAME', cinematic),
+      )
     })
 
     it('should not modify prompt for non-affected stages', () => {
@@ -159,6 +186,7 @@ describe('StyleApplier', () => {
     it('should apply style to multiple stages', () => {
       const prompts = {
         SCRIPT: '原始剧本 prompt',
+        ASSET: '原始参考图 prompt',
         STORYBOARD: '原始分镜 prompt',
         IMAGE: '原始图像 prompt',
         VIDEO: '原始视频 prompt',
@@ -177,6 +205,9 @@ describe('StyleApplier', () => {
 
       // SCRIPT 不受影响
       expect(result.SCRIPT).toBe('原始剧本 prompt')
+
+      // ASSET 与 IMAGE/VIDEO 同一份视觉风格
+      expect(result.ASSET).toContain('视觉风格：')
 
       // STORYBOARD 追加了风格
       expect(result.STORYBOARD).toContain('风格要求：')

@@ -1,5 +1,6 @@
 import { classifyFailure, isTerminalFailure, type FailureKind } from '@studio/domain'
 import type { GenerationArtifact, ShotAudioSource, ShotboardShot } from './api'
+import { FAILURE_CAUSE_KEY } from './failure-cause'
 import type { TranslateFn } from './i18n'
 
 /**
@@ -157,10 +158,11 @@ export function cardFailureCode(verdict: ShotVerdict): 'frame_failed' | 'video_f
 /**
  * 「最新一抽砸了、手上还有上一版」那句短话，按这一抽的真因分档。
  * 角标与徽章共用它，否则格子的角标会不分原因地写「没过线」——额度耗尽时那句话
- * 又把用户推回去改提示词。
+ * 又把用户推回去改提示词。内容审查同理：报文都没换，重抽只会再被拦一次。
  */
 export function retryWord(t: TranslateFn, failureKind: FailureKind, compact = false): string {
   if (isTerminalFailure(failureKind)) return compact ? t('shotboard.slot.noRetry') : t('shotboard.stage.noRetry')
+  if (failureKind === 'moderation') return compact ? t('shotboard.slot.rephrase') : t('shotboard.stage.rephrase')
   if (failureKind === 'network') return compact ? t('shotboard.slot.retryDropped') : t('shotboard.stage.retryDropped')
   return compact ? t('shotboard.slot.retry') : t('shotboard.stage.retry')
 }
@@ -217,16 +219,6 @@ export function retryWithOutputLeft(shot: ShotboardShot): boolean {
   const videoFailed = shot.attention.includes('video_failed')
   if (!frameFailed && !videoFailed) return false
   return (!frameFailed || Boolean(shot.firstFrame)) && (!videoFailed || Boolean(shot.video))
-}
-
-/** 终因分类 → 说那句原因的键；audit / unknown 没有键，沿用「没过线」原句。 */
-const FAILURE_CAUSE_KEY: Record<FailureKind, string | null> = {
-  quota: 'shotboard.failure.quota',
-  access: 'shotboard.failure.access',
-  param: 'shotboard.failure.param',
-  network: 'shotboard.failure.network',
-  audit: null,
-  unknown: null,
 }
 
 /**

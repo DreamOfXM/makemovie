@@ -33,7 +33,7 @@ import { HelpHint } from '@/components/ui/help-hint'
 import { Hint } from '@/components/ui/hint'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
-import { cn, formatDateTime, formatDuration } from '@/lib/utils'
+import { cn, formatDateTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -54,6 +54,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactLoadError, ArtifactMedia, useArtifactUrl } from '@/components/generations/artifact-media'
+import { PlanDialog } from '@/components/generations/plan-dialog'
 
 const POLL_INTERVAL_MS = 3000
 
@@ -565,63 +566,6 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
     </>
   )
 }
-
-/** 计划预审确认框:物理量(项数/时长/模型),没有任何钱相关的字段。 */
-function PlanDialog({ pending, onClose, onConfirm }: {
-  pending: { stage: GenerationStage; regenerate: boolean; plan: GenerationPlan } | null
-  onClose(): void
-  onConfirm(): void
-}) {
-  const { t } = useI18n()
-  const plan = pending?.plan
-  return (
-    <Dialog open={pending !== null} onOpenChange={open => !open && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        {pending && plan && (
-          <>
-            <DialogHeader>
-              <DialogTitle>{t('generations.planTitle', { stage: translateEnum(t, 'generations.stage', pending.stage) })}</DialogTitle>
-              <DialogDescription>
-                {pending.regenerate ? t('generations.planRegenerateNote') : t('generations.planNote')}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary">{t('generations.planNew', { count: plan.newCount })}</Badge>
-              {plan.retryCount > 0 && <Badge variant="warning">{t('generations.planRetry', { count: plan.retryCount })}</Badge>}
-              {plan.skippedCount > 0 && <Badge variant="muted">{t('generations.planSkipped', { count: plan.skippedCount })}</Badge>}
-              {plan.durationMs !== null && <Badge variant="outline">{t('generations.planDuration', { duration: formatDuration(plan.durationMs) })}</Badge>}
-            </div>
-            <p className="text-muted-foreground text-xs">
-              {t('generations.planModels')} <span className="text-foreground font-medium">{plan.models.join(' → ')}</span>
-            </p>
-            <ul className="max-h-60 space-y-1 overflow-y-auto text-xs">
-              {plan.items.map(item => (
-                <li key={item.id} className="flex items-center justify-between gap-2 border-b py-1 last:border-b-0">
-                  <span className={cn('min-w-0 truncate', item.disposition === 'skipped' && 'text-muted-foreground/60')}>{item.label}</span>
-                  <span
-                    className={cn(
-                      'shrink-0 font-medium',
-                      item.disposition === 'new' && 'text-primary',
-                      item.disposition === 'retry' && 'text-warning-ink',
-                      item.disposition === 'skipped' && 'text-muted-foreground',
-                    )}
-                  >
-                    {t(`generations.planItem.${item.disposition}`)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <DialogFooter>
-              <Button variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
-              <Button onClick={onConfirm}>{pending.regenerate ? t('generations.planConfirmRegenerate') : t('generations.planConfirm')}</Button>
-            </DialogFooter>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 
 /** A verb whose target stage is chosen from its own menu, so no shared dropdown decides what the button means. */
 function StageMenuButton({

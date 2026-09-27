@@ -320,7 +320,7 @@ function callBlockedNote(t: TranslateFn, block: SlotCallBlock): string {
   return t('models.readiness.callBlockedNote', {
     models: block.models.join(t('common.listJoin')),
     day: block.at.slice(0, 10),
-    reason: t(`shotboard.failure.${block.kind}`),
+    reason: t(`failure.cause.${block.kind}`),
   })
 }
 

@@ -951,9 +951,12 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           ? app.db.qualityCheck.findMany({ where: { storyboardId: { in: shotIds } }, orderBy: { id: 'asc' } })
           : Promise.resolve([]),
         app.db.asset.findMany({
-          where: { episodeId: episode.id, status: { not: 'APPROVED' }, versions: { some: {} } },
+          // 一张参考图都没有的素材同样在等人，只不过等的是「去生成」而不是「去审批」——
+          // 从前用 versions:{some:{}} 把它们整条藏掉，泳道因此永远看不见真正的阻塞。
+          where: { episodeId: episode.id, status: { not: 'APPROVED' } },
           select: {
             id: true, kind: true, name: true, status: true,
+            _count: { select: { versions: true } },
             // 待验收的素材等的是最新那一版，那一版落地即是计时起点。
             versions: { where: { artifactId: { not: null } }, orderBy: { version: 'desc' }, take: 1, select: { artifact: { select: { createdAt: true } } } },
           },
@@ -1134,13 +1137,19 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           referenceCount: referenceCountByAsset.get(asset.id) ?? 0,
           thumbnail: asset.versions[0]?.artifact ? toArtifactDto(asset.versions[0].artifact) : null,
         })),
-        assetsPending: assetsPending.map(asset => ({
-          id: asset.id,
-          kind: asset.kind,
-          name: asset.name,
-          status: asset.status,
-          waitingSince: asset.versions[0]?.artifact?.createdAt.toISOString() ?? null,
-        })),
+        assetsPending: assetsPending
+          // 泳道只收真的挡路的东西：一张图都没有、又没被任何活体镜头链接的素材缺的是下一集
+          // 的图，不是这一集的坑，占一行只会把「需要你处理」的计数灌水。
+          .filter(asset => asset._count.versions > 0 || (appearancesByAsset.get(asset.id)?.length ?? 0) > 0)
+          .map(asset => ({
+            id: asset.id,
+            kind: asset.kind,
+            name: asset.name,
+            status: asset.status,
+            // 缺图（要花钱生成）与待审批（只要点一下）是两种活，界面必须分得开。
+            hasVersions: asset._count.versions > 0,
+            waitingSince: asset.versions[0]?.artifact?.createdAt.toISOString() ?? null,
+          })),
       }
     },
   )

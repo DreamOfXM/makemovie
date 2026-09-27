@@ -4,6 +4,7 @@
  * 将风格预设应用到流水线中各环节的 prompt。
  * 风格影响以下环节：
  * - STORYBOARD: 追加氛围语气
+ * - ASSET: 追加视觉风格描述（参考图必须与成片同一画风，否则逐镜都在跟参考图打架）
  * - IMAGE: 追加视觉风格描述
  * - VIDEO: 追加视觉风格描述
  */
@@ -11,13 +12,21 @@
 import type { GenerationStage } from '../index.js'
 import { getStyleById, getStyleVisualDirective, getStyleToneDirective, type StylePreset } from './presets.js'
 
+/** 长相由提示词决定的阶段：参考图、首帧、视频吃同一份视觉风格；SCRIPT/AUDIO/MUSIC 不吃。 */
+const VISUAL_STAGES: readonly GenerationStage[] = ['ASSET', 'IMAGE', 'VIDEO']
+
 /**
  * 检查风格是否影响某个生成阶段
  * @param stage 生成阶段
  * @returns 是否影响
  */
 export function isStageAffectedByStyle(stage: GenerationStage): boolean {
-  return ['STORYBOARD', 'IMAGE', 'VIDEO'].includes(stage)
+  return ['STORYBOARD', ...VISUAL_STAGES].includes(stage)
+}
+
+/** 长相由视觉风格决定的阶段：流水线据此决定要不要把预设拼进 prompt。 */
+export function isVisualStyleStage(stage: GenerationStage): boolean {
+  return VISUAL_STAGES.includes(stage)
 }
 
 /**
@@ -44,15 +53,11 @@ export function applyStyleToPrompt(
       return `${originalPrompt}\n\n风格要求：${toneDirective}`
     }
 
-    case 'IMAGE': {
-      // 图像阶段：追加视觉风格描述
-      const visualDirective = getStyleVisualDirective(style, 'IMAGE')
-      return `${originalPrompt}\n\n视觉风格：${visualDirective}`
-    }
-
+    case 'ASSET':
+    case 'IMAGE':
     case 'VIDEO': {
-      // 视频阶段：追加视觉风格描述
-      const visualDirective = getStyleVisualDirective(style, 'VIDEO')
+      // 参考图/首帧/视频：追加视觉风格描述。三处必须同一句，否则定妆照与成片画风分裂。
+      const visualDirective = getStyleVisualDirective(style, 'IMAGE')
       return `${originalPrompt}\n\n视觉风格：${visualDirective}`
     }
 

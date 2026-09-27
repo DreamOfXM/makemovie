@@ -127,6 +127,19 @@ describe('generation style presets', () => {
     expect(prompt).toContain(cinematic.visualStyle)
   })
 
+  it('bakes the style into the character reference image, not just the first frame', async () => {
+    // 定妆照是逐镜首帧的参考输入：它不吃风格的话，全片画风从第一步就分叉。
+    // 这里刻意传 anime，而本项目默认已是 cinematic —— 显式选择必须一路带到 ASSET。
+    const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: env.authHeaders(ownerToken), payload: { stage: 'ASSET', styleId: 'anime' } })
+    expect(res.statusCode).toBe(201)
+    const prompt = await batchPrompt(res.json().batch.id)
+    expect(prompt).toContain('视觉风格：')
+    expect(prompt).toContain(anime.visualStyle)
+    expect(prompt).not.toContain(cinematic.visualStyle)
+    // 「严禁照片级真人质感」只属于没选风格的安装；选了动漫风，那句必须让位。
+    expect(prompt).not.toContain('严禁照片级真人质感')
+  })
+
   it('rejects an unknown styleId with 400 styles:notFound', async () => {
     const res = await triggerImage(ownerToken, episodeId, { storyboardIds: [shotIds[0]], styleId: `ghost-${randomUUID()}` })
     expect(res.statusCode).toBe(400)

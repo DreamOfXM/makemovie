@@ -660,7 +660,7 @@ export interface ShotboardResponse {
   status: string
   shots: ShotboardShot[]
   assets: ShotboardCastAsset[]
-  assetsPending: { id: string; kind: string; name: string; status: string; waitingSince: string | null }[]
+  assetsPending: { id: string; kind: string; name: string; status: string; hasVersions: boolean; waitingSince: string | null }[]
 }
 
 export interface GenerationTask {
@@ -806,6 +806,8 @@ export interface Asset {
   generationTaskId: string | null
   /** Live shots binding this asset — the reach of its approval (absent when listed outside an episode). */
   usageCount?: number
+  /** 最近一次定妆照任务的实况；null 表示没有待你看的任务（成功只体现为新版本）。 */
+  run?: { status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'; error: string | null } | null
   versions: AssetVersion[]
 }
 

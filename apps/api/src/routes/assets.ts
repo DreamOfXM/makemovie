@@ -30,7 +30,15 @@ interface AssetDto {
   projectAssetId: string | null
   /** How many live shots bind this asset — the reach its approval (or edit) has. */
   usageCount: number
+  /** 最近一次定妆照任务的实况：界面据此画"生成中/失败"，不靠点击之后的本地回声。 */
+  run: AssetRunDto | null
   versions: AssetVersionDto[]
+}
+
+/** 一个素材最新一次定妆照任务的实况。SUCCEEDED 不在这里出现——它留下的证据是版本本身。 */
+interface AssetRunDto {
+  status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'
+  error: string | null
 }
 
 type AssetVersionRow = AssetVersion & { artifact: MediaArtifact | null }
@@ -48,6 +56,41 @@ async function assetUsage(db: PrismaClient, episodeId: string): Promise<Map<stri
     _count: { _all: true },
   })
   return new Map(grouped.map(entry => [entry.assetId, entry._count._all]))
+}
+
+/**
+ * 定妆照任务的逐素材实况，按事件序裁决：后一次成功或重新排队会清掉前一次的失败，
+ * 与镜头那套（frameError/videoError）同一规则。素材与任务是多对一关系，只能从任务侧
+ * 反查——Asset 上没有反向字段。排序取 updatedAt：重排队复用同一行任务，createdAt 是旧的。
+ */
+async function assetRuns(db: PrismaClient, episodeId: string): Promise<Map<string, AssetRunDto>> {
+  const tasks = await db.generationTask.findMany({
+    where: { batch: { episodeId }, stage: 'ASSET' },
+    include: { assets: { select: { id: true } } },
+    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+  })
+  const runs = new Map<string, AssetRunDto>()
+  for (const task of tasks) {
+    if (task.status === 'SUCCEEDED') {
+      for (const asset of task.assets) runs.delete(asset.id)
+      continue
+    }
+    if (task.status !== 'QUEUED' && task.status !== 'RUNNING' && task.status !== 'FAILED' && task.status !== 'BLOCKED') continue
+    let error: string | null = null
+    // BLOCKED 的 errorSnapshot 存的是守卫点名的原因，同样要能回到界面上。
+    if ((task.status === 'FAILED' || task.status === 'BLOCKED') && task.errorSnapshot) {
+      try {
+        const parsed: unknown = JSON.parse(task.errorSnapshot)
+        error = (Array.isArray(parsed) ? parsed.map(String).join(' | ') : String(parsed)).slice(0, 400)
+      } catch {
+        error = task.errorSnapshot.slice(0, 400)
+      }
+    }
+    for (const asset of task.assets) {
+      runs.set(asset.id, { status: task.status as AssetRunDto['status'], error })
+    }
+  }
+  return runs
 }
 
 function parseVersion(value: string): number | null {
@@ -69,7 +112,7 @@ function toVersionDto(version: AssetVersionRow): AssetVersionDto {
   }
 }
 
-function toAssetDto(asset: AssetRow, usageCount = 0): AssetDto {
+function toAssetDto(asset: AssetRow, usageCount = 0, run: AssetRunDto | null = null): AssetDto {
   return {
     id: asset.id,
     kind: asset.kind,
@@ -79,6 +122,7 @@ function toAssetDto(asset: AssetRow, usageCount = 0): AssetDto {
     generationTaskId: asset.generationTaskId,
     projectAssetId: asset.projectAssetId,
     usageCount,
+    run,
     versions: asset.versions.map(toVersionDto),
   }
 }
@@ -139,7 +183,8 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
         orderBy: { id: 'desc' },
       })
       const usage = await assetUsage(app.db, episode.id)
-      return { assets: assets.map(asset => toAssetDto(asset, usage.get(asset.id) ?? 0)) }
+      const runs = await assetRuns(app.db, episode.id)
+      return { assets: assets.map(asset => toAssetDto(asset, usage.get(asset.id) ?? 0, runs.get(asset.id) ?? null)) }
     },
   )
 

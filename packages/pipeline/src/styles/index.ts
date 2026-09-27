@@ -34,6 +34,7 @@ export type { StylePreset } from './presets.js'
 
 export {
   isStageAffectedByStyle,
+  isVisualStyleStage,
   applyStyleToPrompt,
   applyStyleToPrompts,
   getStyleDisplayName,
