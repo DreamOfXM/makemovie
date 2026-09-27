@@ -11,7 +11,7 @@ import {
   PlayIcon,
   SettingsIcon,
 } from 'lucide-react'
-import type { Asset, ShotboardResponse, ShotboardShot, Storyboard } from '@/lib/api'
+import type { Asset, AssetsResponse, ShotboardResponse, ShotboardShot, Storyboard } from '@/lib/api'
 import { useI18n, type TranslateFn } from '@/lib/i18n'
 import { shotDemandText } from '@/lib/shot-verdict'
 import { useSession } from '@/lib/session'
@@ -28,6 +28,8 @@ import { GuardedButton, usePermission } from '@/components/permission'
 import { ShotStrip } from './shot-strip'
 import { ShotList } from './shot-list'
 import { AssetList } from './asset-list'
+import { AssetEditor } from './asset-editor'
+import { AssetInspector } from './asset-inspector'
 import { ShotEditor } from './shot-editor'
 import { PreviewPanel } from './preview-panel'
 import { PreScreenDialog } from './pre-screen'
@@ -51,8 +53,9 @@ interface WorkbenchViewProps {
 }
 
 /**
- * 制作台：board 的三区化形态——左列镜头/素材，中列单镜编辑，右列常驻预览。
- * 「看清单 → 改镜头 → 重跑 → 看结果 → 下一镜」的逐镜循环不出屏；
+ * 制作台：board 的三区化形态——左列清单（镜头/素材两个页签），中列编辑，
+ * 右列常驻检查。「看清单 → 改 → 重跑 → 看结果 → 下一条」的逐镜循环不出屏；
+ * 两个页签共用同一套心智：左选什么，中就编辑什么，右就检查什么。
  * 流程页继续承担推进与整集操作，这里只留一条快道（批次 chip）。
  */
 export function WorkbenchView({
@@ -76,14 +79,24 @@ export function WorkbenchView({
   const load = useCallback(() => api<ShotboardResponse>(`/episodes/${episodeId}/shotboard`), [api, episodeId])
   const board = useAsync<ShotboardResponse | null>(load, null)
 
-  useEffect(() => {
-    const timer = setInterval(board.reload, 10_000)
-    return () => clearInterval(timer)
-  }, [board.reload])
+  // 素材清单与镜头板同源同节奏：检查器的运行态/新版本靠它驱动，必须无条件轮询。
+  const assetsLoad = useCallback(() => api<AssetsResponse>(`/episodes/${episodeId}/assets`), [api, episodeId])
+  const assets = useAsync<AssetsResponse>(assetsLoad, { assets: [] })
 
   useEffect(() => {
-    if (refreshToken > 0) board.reload()
-    // refreshToken 是页面的“数据变了”信号，board.reload 身份稳定。
+    const timer = setInterval(() => {
+      board.reload()
+      assets.reload()
+    }, 10_000)
+    return () => clearInterval(timer)
+  }, [board.reload, assets.reload])
+
+  useEffect(() => {
+    if (refreshToken > 0) {
+      board.reload()
+      assets.reload()
+    }
+    // refreshToken 是页面的“数据变了”信号，reload 身份稳定。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken])
 
@@ -91,6 +104,7 @@ export function WorkbenchView({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [tab, setTab] = useState<'shots' | 'assets'>('shots')
   const [focusAssetId, setFocusAssetId] = useState<string | null>(null)
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)
   const [requestingStage, setRequestingStage] = useState<'FIRST_FRAME' | 'VIDEO' | 'AUDIO' | null>(null)
   const [preScreenOpen, setPreScreenOpen] = useState(false)
   const selectedRef = useRef<string | null>(null)
@@ -102,16 +116,42 @@ export function WorkbenchView({
     if (selected && selected.id !== selectedId) setSelectedId(selected.id)
   }, [selected, selectedId])
 
+  // 左列选谁，中/右列跟着说谁；从清单里被删掉的素材自然落空。
+  const selectedAsset = assets.data.assets.find(asset => asset.id === selectedAssetId) ?? null
+  useEffect(() => {
+    if (focusAssetId) {
+      setSelectedAssetId(focusAssetId)
+      setFocusAssetId(null)
+    }
+  }, [focusAssetId])
+
+  /** 素材档案编辑里「出现在」一行的数据：板上活绑定的镜头，按板序。 */
+  const assetShotLinks = useMemo(() => {
+    if (!selectedAsset) return []
+    const appearances = board.data?.assets.find(item => item.id === selectedAsset.id)?.appearances ?? []
+    return appearances
+      .map(shotId => shots.find(shot => shot.id === shotId))
+      .filter((shot): shot is ShotboardShot => Boolean(shot))
+      .map(shot => ({ id: shot.id, number: shot.number, title: shot.title }))
+  }, [selectedAsset, board.data, shots])
+
+  function reloadAssets() {
+    assets.reload()
+    board.reload()
+  }
+
   const index = selected ? shots.findIndex(shot => shot.id === selected.id) : -1
   const prevShot = index > 0 ? shots[index - 1] : null
   const nextShot = index >= 0 && index < shots.length - 1 ? shots[index + 1] : null
 
-  // ←/→ 切镜：输入控件聚焦时让给文本编辑。
+  // ←/→ 切镜：输入控件聚焦时让给文本编辑；素材页签与弹层/lightbox 打开时不抢键。
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
       const target = event.target
       if (target instanceof HTMLElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) return
+      if (tab !== 'shots') return
+      if (document.querySelector('[role="dialog"]')) return
       const current = shots.findIndex(shot => shot.id === selectedRef.current)
       if (current < 0) return
       const next = event.key === 'ArrowLeft' ? current - 1 : current + 1
@@ -122,7 +162,7 @@ export function WorkbenchView({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [shots])
+  }, [shots, tab])
 
   async function regenerate(stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string) {
     if (!selected) return
@@ -286,50 +326,76 @@ export function WorkbenchView({
           </div>
           {tab === 'shots' ? (
             <ShotList shots={shots} selectedId={selected?.id ?? null} onSelect={setSelectedId} onCreate={onCreateShot} canWrite={canWrite} />
+          ) : assets.error && assets.data.assets.length === 0 ? (
+            <div className="p-3">
+              <ErrorState message={assets.error} onRetry={assets.reload} />
+            </div>
           ) : (
             <AssetList
               episodeId={episodeId}
-              focusAssetId={focusAssetId}
-              onFocusHandled={() => setFocusAssetId(null)}
-              onChanged={board.reload}
+              assets={assets.data.assets}
+              loading={assets.loading}
+              selectedId={selectedAsset?.id ?? null}
+              onSelect={setSelectedAssetId}
+              onAdded={reloadAssets}
             />
           )}
         </div>
 
-        {/* 中列：编辑器 */}
+        {/* 中列：编辑器——镜头页签编辑镜头，素材页签编辑素材档案。 */}
         <div className="flex min-h-0 flex-col">
-          {selected ? (
-            <ShotEditor
-              key={selected.id}
-              shot={selected}
-              episodeAssets={episodeAssets}
-              canWrite={canWrite}
-              onBindAssets={onBindAssets}
-              onChangeStatus={onChangeStatus}
-              onOpenShot={onOpenShot}
-              onOpenAsset={assetId => { setTab('assets'); setFocusAssetId(assetId) }}
-              onSaved={board.reload}
+          {tab === 'shots' ? (
+            selected ? (
+              <ShotEditor
+                key={selected.id}
+                shot={selected}
+                episodeAssets={episodeAssets}
+                canWrite={canWrite}
+                onBindAssets={onBindAssets}
+                onChangeStatus={onChangeStatus}
+                onOpenShot={onOpenShot}
+                onOpenAsset={assetId => { setTab('assets'); setFocusAssetId(assetId) }}
+                onSaved={board.reload}
+              />
+            ) : (
+              <EmptyState icon={<FilmIcon />} title={t('workbench.pickShot')} description={t('workbench.pickShotHint')} />
+            )
+          ) : selectedAsset ? (
+            <AssetEditor
+              key={selectedAsset.id}
+              episodeId={episodeId}
+              asset={selectedAsset}
+              usages={assetShotLinks}
+              canWrite={can('episode:write')}
+              onOpenShot={shotId => { setTab('shots'); setSelectedId(shotId) }}
+              onSaved={reloadAssets}
             />
           ) : (
-            <EmptyState icon={<FilmIcon />} title={t('workbench.pickShot')} description={t('workbench.pickShotHint')} />
+            <EmptyState icon={<PackageIcon />} title={t('workbench.pickAsset')} description={t('workbench.pickAssetHint')} />
           )}
         </div>
 
-        {/* 右列：常驻预览 */}
+        {/* 右列：常驻检查——镜头页签看产物预览，素材页签看参考图大图。 */}
         <div className="bg-sidebar/40 flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
-          {selected && (
-            <PreviewPanel
-              shot={selected}
-              requestingStage={requestingStage}
-              onRegenerate={(stage, note) => void regenerate(stage, note)}
-              onChanged={board.reload}
-              onPrev={() => prevShot && setSelectedId(prevShot.id)}
-              onNext={() => nextShot && setSelectedId(nextShot.id)}
-              hasPrev={Boolean(prevShot)}
-              hasNext={Boolean(nextShot)}
-              prevNumber={prevShot?.number ?? null}
-              nextNumber={nextShot?.number ?? null}
-            />
+          {tab === 'shots' ? (
+            selected && (
+              <PreviewPanel
+                shot={selected}
+                requestingStage={requestingStage}
+                onRegenerate={(stage, note) => void regenerate(stage, note)}
+                onChanged={board.reload}
+                onPrev={() => prevShot && setSelectedId(prevShot.id)}
+                onNext={() => nextShot && setSelectedId(nextShot.id)}
+                hasPrev={Boolean(prevShot)}
+                hasNext={Boolean(nextShot)}
+                prevNumber={prevShot?.number ?? null}
+                nextNumber={nextShot?.number ?? null}
+              />
+            )
+          ) : selectedAsset ? (
+            <AssetInspector key={selectedAsset.id} episodeId={episodeId} asset={selectedAsset} onChanged={reloadAssets} />
+          ) : (
+            <EmptyState icon={<PackageIcon />} title={t('workbench.pickAsset')} description={t('workbench.pickAssetSideHint')} />
           )}
         </div>
       </div>

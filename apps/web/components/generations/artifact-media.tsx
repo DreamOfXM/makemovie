@@ -103,6 +103,8 @@ interface ArtifactMediaProps {
   className?: string
   /** False for previews that live inside a clickable card: no controls, no zoom, no pointer capture. */
   interactive?: boolean
+  /** Zoom-layer paging across sibling versions (image artifacts only). */
+  zoomNav?: { prev(): void; next(): void }
   /**
    * The clip's real length, read off the media element. Most artifacts landed without a
    * duration in the database, so the player is the only witness left — callers that show a
@@ -115,7 +117,7 @@ interface ArtifactMediaProps {
  * One renderer for every artifact the console can show: picture, clip, voice, or a
  * download link for anything a browser will not play inline (the cue sheet).
  */
-export function ArtifactMedia({ artifact, label, className, interactive = true, onDurationMs }: ArtifactMediaProps) {
+export function ArtifactMedia({ artifact, label, className, interactive = true, zoomNav, onDurationMs }: ArtifactMediaProps) {
   const { t } = useI18n()
   const { url: href, failed, reload } = useArtifactUrl(artifact.downloadUrl)
   const [zoomed, setZoomed] = useState(false)
@@ -159,7 +161,16 @@ export function ArtifactMedia({ artifact, label, className, interactive = true, 
           onClick={interactive ? () => setZoomed(true) : undefined}
           className={cn('max-h-24 rounded border object-cover', interactive ? 'cursor-zoom-in' : 'pointer-events-none', className)}
         />
-        {zoomed && <ArtifactLightbox src={href} alt={alt} onClose={() => setZoomed(false)} />}
+        {zoomed && (
+          <ArtifactLightbox
+            src={href}
+            alt={alt}
+            onClose={() => setZoomed(false)}
+            onPrev={zoomNav?.prev}
+            onNext={zoomNav?.next}
+            caption={zoomNav ? alt : undefined}
+          />
+        )}
       </>
     )
   }

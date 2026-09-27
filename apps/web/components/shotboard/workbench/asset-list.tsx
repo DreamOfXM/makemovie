@@ -1,14 +1,14 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
-import { AlertTriangleIcon, CheckCircle2Icon, ChevronDownIcon, ImageIcon, LoaderCircleIcon, PlusIcon } from 'lucide-react'
-import type { Asset, AssetsResponse, AssetVersion } from '@/lib/api'
+import { AlertTriangleIcon, CheckCircle2Icon, ImageIcon, LoaderCircleIcon, PlusIcon } from 'lucide-react'
+import type { Asset, AssetVersion } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
 import { cn } from '@/lib/utils'
 import { useSession } from '@/lib/session'
-import { useAsync } from '@/lib/use-async'
+import { usePermission } from '@/components/permission'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -18,84 +18,36 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { GuardedButton, usePermission } from '@/components/permission'
-import { ArtifactMedia, useArtifactUrl } from '@/components/generations/artifact-media'
+import { useArtifactUrl } from '@/components/generations/artifact-media'
 
 const KIND_ORDER = ['character', 'scene', 'prop'] as const
 
 /**
- * 制作台左列 · 素材页签：角色/场景/道具一行一档的紧凑读法。
- * 审批/重跑参考图就地完成；完整管理（描述勘误、版本废弃删除）仍在流程页素材区——
- * 这里只回答「这集有什么素材、定没定稿、卡没卡首帧」。
+ * 制作台左列 · 素材页签：纯清单。行=选择——中列跟着开档案编辑（描述勘误），
+ * 右列跟着开参考图检查（大图/版本/批准/重跑）。「一行一档」的档不再挤在
+ * 18.5rem 的展开条里；缩略图保持 pointer-events-none，点击整行去选中。
  */
 export function AssetList({
   episodeId,
-  focusAssetId,
-  onFocusHandled,
-  onChanged,
+  assets,
+  loading,
+  selectedId,
+  onSelect,
+  onAdded,
 }: {
   episodeId: string
-  /** 编辑器点绑定 chip 跳过来时展开这个素材。 */
-  focusAssetId: string | null
-  onFocusHandled(): void
-  onChanged(): void
+  assets: Asset[]
+  loading: boolean
+  selectedId: string | null
+  onSelect(assetId: string): void
+  /** 新建素材落地后让容器重读素材与镜头板（门禁/待办跟着变）。 */
+  onAdded(): void
 }) {
   const { t } = useI18n()
-  const { api } = useSession()
   const { can } = usePermission()
-  const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [noteDraft, setNoteDraft] = useState('')
   const [addOpen, setAddOpen] = useState(false)
 
-  const load = useCallback(() => api<AssetsResponse>(`/episodes/${episodeId}/assets`), [api, episodeId])
-  const assets = useAsync<AssetsResponse>(load, { assets: [] })
-
-  useEffect(() => {
-    if (focusAssetId) {
-      setExpandedId(focusAssetId)
-      onFocusHandled()
-    }
-  }, [focusAssetId, onFocusHandled])
-
-  async function approve(asset: Asset, version: AssetVersion) {
-    setBusy(`approve-${asset.id}-${version.version}`)
-    try {
-      await api(`/episodes/${episodeId}/assets/${asset.id}/versions/${version.version}/approve`, { method: 'POST' })
-      toast.success(t('assets.approved', { name: asset.name, version: version.version }))
-      assets.reload()
-      onChanged()
-    } catch (error) {
-      toast.error(apiErrorMessage(error, t))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  /** 与流程页素材区同一语义：0 版本=首次生成（不重烧），有版本=重跑加一版。 */
-  async function regenerate(asset: Asset, note?: string) {
-    setBusy(`regen-${asset.id}`)
-    try {
-      await api(`/episodes/${episodeId}/generations`, {
-        method: 'POST',
-        body: JSON.stringify({
-          stage: 'ASSET',
-          assetIds: [asset.id],
-          ...(asset.versions.length > 0 ? { regenerate: true } : {}),
-          promptNote: note?.trim() || undefined,
-        }),
-      })
-      toast.success(t(asset.versions.length > 0 ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
-      assets.reload()
-      onChanged()
-    } catch (error) {
-      toast.error(apiErrorMessage(error, t))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const byKind = KIND_ORDER.map(kind => ({ kind, items: assets.data.assets.filter(asset => asset.kind === kind) }))
+  const byKind = KIND_ORDER.map(kind => ({ kind, items: assets.filter(asset => asset.kind === kind) }))
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
@@ -108,120 +60,45 @@ export function AssetList({
             </span>
           </p>
           {items.map(asset => {
-            const latest = asset.versions[asset.versions.length - 1] ?? null
+            // 接口按版本号倒序返回，[0] 才是最新一版——行缩略图要跟着最新走。
+            const latest = asset.versions[0] ?? null
             const approved = asset.status === 'APPROVED'
-            const expanded = expandedId === asset.id
+            const selected = selectedId === asset.id
             return (
-              <div key={asset.id} className="mb-0.5">
-                <button
-                  type="button"
-                  aria-expanded={expanded}
-                  onClick={() => setExpandedId(expanded ? null : asset.id)}
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors',
-                    expanded ? 'border-primary/45 bg-primary/10' : 'border-transparent hover:bg-accent',
-                  )}
-                >
-                  <AssetThumb version={latest} />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5">
-                      <span className="truncate text-[13px] font-medium">{asset.name}</span>
-                      {approved ? (
-                        <Badge variant="success" className="h-4 px-1.5 text-[10.5px] font-normal">
-                          <CheckCircle2Icon className="size-3" />
-                          {t('screening.approved')}
-                        </Badge>
-                      ) : (
-                        <Badge variant="warning" className="h-4 px-1.5 text-[10.5px] font-normal">{t('screening.pending')}</Badge>
-                      )}
-                    </span>
-                    <span className="text-subtle-foreground mt-0.5 block truncate text-[11px]">
-                      {t('workbench.assetUsage', { count: asset.usageCount ?? 0, versions: asset.versions.length })}
-                      {asset.run && asset.run.status !== 'FAILED' && (
-                        <span className="text-primary"> · {t('workbench.assetRunning')}</span>
-                      )}
-                      {asset.run?.status === 'FAILED' && (
-                        <span className="text-destructive-ink"> · {t('workbench.assetFailed')}</span>
-                      )}
-                    </span>
-                  </span>
-                  <ChevronDownIcon className={cn('text-muted-foreground size-3.5 shrink-0 transition-transform', expanded && 'rotate-180')} />
-                </button>
-
-                {expanded && (
-                  <div className="border-border/60 mx-2 mb-1 mt-1 rounded-lg border bg-card px-2.5 py-2">
-                    {asset.versions.length === 0 && (
-                      <p className="text-muted-foreground text-[11.5px]">{t('workbench.assetNoVersions')}</p>
-                    )}
-                    {asset.versions.slice().reverse().map(version => (
-                        <div key={version.version} className="flex items-center gap-2.5 py-1.5">
-                          <div className="w-20 shrink-0">
-                            {version.artifact ? (
-                              <ArtifactMedia artifact={version.artifact} label={`v${version.version}`} interactive={false} className="h-12 w-full rounded" />
-                            ) : (
-                              <div className="border-border/60 flex h-12 w-full items-center justify-center rounded border border-dashed">
-                                <ImageIcon className="text-muted-foreground size-3.5" />
-                              </div>
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="flex items-center gap-1.5 text-xs font-medium">
-                              v{version.version}
-                              {version.status === 'APPROVED' ? (
-                                <Badge variant="success" className="h-4 px-1.5 text-[10px] font-normal">{t('screening.approved')}</Badge>
-                              ) : version.status === 'DEPRECATED' ? (
-                                <Badge variant="muted" className="h-4 px-1.5 text-[10px] font-normal">{t('workbench.assetDeprecated')}</Badge>
-                              ) : (
-                                <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">{t('storyboards.statusDraft')}</Badge>
-                              )}
-                            </p>
-                          </div>
-                          {can('episode:write') && version.status !== 'APPROVED' && version.status !== 'DEPRECATED' && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-6 px-2 text-[11px]"
-                              disabled={busy !== null}
-                              onClick={() => void approve(asset, version)}
-                            >
-                              {busy === `approve-${asset.id}-${version.version}` ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
-                              {t('assets.approve')}
-                            </Button>
-                          )}
-                        </div>
-                      ))}
-                    {asset.run?.status === 'FAILED' && asset.run.error && (
-                      <p className="text-destructive-ink mt-1.5 flex items-start gap-1.5 text-[11px] leading-relaxed">
-                        <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
-                        {asset.run.error}
-                      </p>
-                    )}
-                    {can('episode:write') && (
-                      <div className="mt-2 space-y-1.5">
-                        <input
-                          type="text"
-                          value={noteDraft}
-                          onChange={event => setNoteDraft(event.target.value)}
-                          placeholder={t('workbench.notePlaceholder')}
-                          aria-label={t('workbench.noteLabel')}
-                          className="border-input bg-background placeholder:text-muted-foreground focus-visible:ring-ring w-full rounded-md border px-2 py-1.5 text-xs"
-                        />
-                        {asset.versions.length > 0 ? (
-                          <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null} onClick={() => void regenerate(asset, noteDraft)}>
-                            {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <ImageIcon />}
-                            {t('workbench.rerunReference')}
-                          </GuardedButton>
-                        ) : (
-                          <GuardedButton action="episode:write" variant="outline" size="sm" disabled={busy !== null} onClick={() => void regenerate(asset, noteDraft)}>
-                            {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <ImageIcon />}
-                            {t('workbench.generateReference')}
-                          </GuardedButton>
-                        )}
-                      </div>
-                    )}
-                  </div>
+              <button
+                key={asset.id}
+                type="button"
+                aria-current={selected ? 'true' : undefined}
+                onClick={() => onSelect(asset.id)}
+                className={cn(
+                  'mb-0.5 flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors',
+                  selected ? 'border-primary/45 bg-primary/10' : 'border-transparent hover:bg-accent',
                 )}
-              </div>
+              >
+                <AssetThumb version={latest} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-[13px] font-medium">{asset.name}</span>
+                    {approved ? (
+                      <Badge variant="success" className="h-4 px-1.5 text-[10.5px] font-normal">
+                        <CheckCircle2Icon className="size-3" />
+                        {t('screening.approved')}
+                      </Badge>
+                    ) : (
+                      <Badge variant="warning" className="h-4 px-1.5 text-[10.5px] font-normal">{t('screening.pending')}</Badge>
+                    )}
+                  </span>
+                  <span className="text-subtle-foreground mt-0.5 block truncate text-[11px]">
+                    {t('workbench.assetUsage', { count: asset.usageCount ?? 0, versions: asset.versions.length })}
+                    {asset.run && asset.run.status !== 'FAILED' && (
+                      <span className="text-primary"> · {t('workbench.assetRunning')}</span>
+                    )}
+                    {asset.run?.status === 'FAILED' && (
+                      <span className="text-destructive-ink"> · {t('workbench.assetFailed')}</span>
+                    )}
+                  </span>
+                </span>
+              </button>
             )
           })}
           {items.length === 0 && (
@@ -230,7 +107,7 @@ export function AssetList({
         </div>
       ))}
 
-      {assets.loading && assets.data.assets.length === 0 && (
+      {loading && assets.length === 0 && (
         <div className="space-y-2 p-2">
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-10 w-full" />
@@ -250,10 +127,7 @@ export function AssetList({
         open={addOpen}
         onOpenChange={setAddOpen}
         episodeId={episodeId}
-        onDone={() => {
-          assets.reload()
-          onChanged()
-        }}
+        onDone={onAdded}
       />
     </div>
   )

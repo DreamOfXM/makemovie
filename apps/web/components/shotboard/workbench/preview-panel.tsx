@@ -89,7 +89,8 @@ export function PreviewPanel({
             <ArtifactMedia artifact={shot.video} label={`#${shot.number} ${shot.title}`} className="h-full max-h-none w-full" />
           ) : shot.firstFrame ? (
             <>
-              <ArtifactMedia artifact={shot.firstFrame} label={t('storyboards.firstFrame')} interactive={false} className="h-full max-h-none w-full object-cover" />
+              {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。 */}
+              <ArtifactMedia artifact={shot.firstFrame} label={t('storyboards.firstFrame')} className="h-full max-h-none w-full object-cover" />
               <span className="bg-background/75 text-muted-foreground absolute inset-x-0 bottom-0 truncate px-1.5 py-0.5 text-[10px] backdrop-blur-sm">
                 {t('shotboard.ph.videoOnlyFrame')}
               </span>
