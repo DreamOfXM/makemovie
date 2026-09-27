@@ -23,9 +23,9 @@ interface AssetEditorProps {
 }
 
 /**
- * 制作台中列 · 素材档案编辑。后端契约只有描述可改——名字与种类是身份与唯一键，
- * 改它们等于换一个素材；而 AI 提取的描述出过错（性别、年龄写反），这里就是
- * 用户纠正档案的入口，改完重跑参考图即生效。
+ * 制作台右列 · 素材档案编辑（勘误低频，窄列够用）。后端契约只有描述可改——
+ * 名字与种类是身份与唯一键，改它们等于换一个素材；而 AI 提取的描述出过错
+ * （性别、年龄写反），这里就是用户纠正档案的入口，改完重跑参考图即生效。
  */
 export function AssetEditor({ episodeId, asset, usages, canWrite, onOpenShot, onSaved }: AssetEditorProps) {
   const { t } = useI18n()

@@ -14,9 +14,9 @@ import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
 
 /**
- * 制作台右列 · 素材检查器：左列选中谁，放大的就是谁的参考图。
- * 大图点击进 lightbox，←/→ 在版本间翻——审图要的是对比，不是开开关关；
- * 批准/重跑/调整要求从左列展开条搬家到此，18.5rem 里挤不下的动线在 23rem 里铺开。
+ * 制作台中列 · 素材检查器：审图是素材页签的主任务，宽列给图——左列选中谁，
+ * 这里放大的就是谁的参考图。大图点击进 lightbox，←/→ 在版本间翻（审图要的是
+ * 对比，不是开开关关）；批准/重跑/调整要求跟着图走。档案勘误住右列（低频，窄列够用）。
  */
 export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: string; asset: Asset; onChanged(): void }) {
   const { t } = useI18n()
@@ -93,8 +93,9 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 常驻大图：这一版定没定、脸对不对，在这里看，不在 36px 缩略图里猜。 */}
-        <div className="bg-muted/30 flex h-56 shrink-0 items-center justify-center overflow-hidden rounded-lg border">
+        {/* 常驻大图：这一版定没定、脸对不对，在这里看，不在 36px 缩略图里猜。
+            宽列里按高度取尺寸——竖版角色板受高约束、横版场景受宽约束，contain 都不吃亏。 */}
+        <div className="bg-muted/30 flex h-72 shrink-0 items-center justify-center overflow-hidden rounded-lg border lg:h-80">
           {current?.artifact ? (
             <ArtifactMedia
               artifact={current.artifact}

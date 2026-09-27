@@ -53,9 +53,9 @@ interface WorkbenchViewProps {
 }
 
 /**
- * 制作台：board 的三区化形态——左列清单（镜头/素材两个页签），中列编辑，
- * 右列常驻检查。「看清单 → 改 → 重跑 → 看结果 → 下一条」的逐镜循环不出屏；
- * 两个页签共用同一套心智：左选什么，中就编辑什么，右就检查什么。
+ * 制作台：board 的三区化形态——左列清单（镜头/素材两个页签），中列放这一页签的
+ * 主任务（镜头=改脚本，素材=审参考图——两者都要宽），右列是配套面板（产物预览/档案勘误）。
+ * 「看清单 → 改/审 → 重跑 → 看结果 → 下一条」的循环不出屏；
  * 流程页继续承担推进与整集操作，这里只留一条快道（批次 chip）。
  */
 export function WorkbenchView({
@@ -342,7 +342,7 @@ export function WorkbenchView({
           )}
         </div>
 
-        {/* 中列：编辑器——镜头页签编辑镜头，素材页签编辑素材档案。 */}
+        {/* 中列：这一页签的主任务——镜头=改脚本（表单要宽）；素材=审参考图（图要宽）。 */}
         <div className="flex min-h-0 flex-col">
           {tab === 'shots' ? (
             selected ? (
@@ -361,21 +361,13 @@ export function WorkbenchView({
               <EmptyState icon={<FilmIcon />} title={t('workbench.pickShot')} description={t('workbench.pickShotHint')} />
             )
           ) : selectedAsset ? (
-            <AssetEditor
-              key={selectedAsset.id}
-              episodeId={episodeId}
-              asset={selectedAsset}
-              usages={assetShotLinks}
-              canWrite={can('episode:write')}
-              onOpenShot={shotId => { setTab('shots'); setSelectedId(shotId) }}
-              onSaved={reloadAssets}
-            />
+            <AssetInspector key={selectedAsset.id} episodeId={episodeId} asset={selectedAsset} onChanged={reloadAssets} />
           ) : (
             <EmptyState icon={<PackageIcon />} title={t('workbench.pickAsset')} description={t('workbench.pickAssetHint')} />
           )}
         </div>
 
-        {/* 右列：常驻检查——镜头页签看产物预览，素材页签看参考图大图。 */}
+        {/* 右列：配套面板——镜头=产物预览；素材=档案勘误（低频，窄列够用）。 */}
         <div className="bg-sidebar/40 flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
           {tab === 'shots' ? (
             selected && (
@@ -393,7 +385,15 @@ export function WorkbenchView({
               />
             )
           ) : selectedAsset ? (
-            <AssetInspector key={selectedAsset.id} episodeId={episodeId} asset={selectedAsset} onChanged={reloadAssets} />
+            <AssetEditor
+              key={selectedAsset.id}
+              episodeId={episodeId}
+              asset={selectedAsset}
+              usages={assetShotLinks}
+              canWrite={can('episode:write')}
+              onOpenShot={shotId => { setTab('shots'); setSelectedId(shotId) }}
+              onSaved={reloadAssets}
+            />
           ) : (
             <EmptyState icon={<PackageIcon />} title={t('workbench.pickAsset')} description={t('workbench.pickAssetSideHint')} />
           )}
