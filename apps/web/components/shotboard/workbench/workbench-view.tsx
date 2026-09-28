@@ -50,7 +50,7 @@ interface WorkbenchViewProps {
   onCreateShot(): void
   onChangeStatus(shot: Pick<Storyboard, 'id' | 'number' | 'title' | 'status'>): void
   onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
-  onRegenerate(storyboardId: string, stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string): Promise<void>
+  onRegenerate(storyboardId: string, stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string, regenerate?: boolean): Promise<void>
   /** 外部变化（弹窗保存/绑定/推进）后让制作台立即重读，不等轮询。 */
   refreshToken: number
 }
@@ -168,11 +168,14 @@ export function WorkbenchView({
     return () => window.removeEventListener('keydown', onKey)
   }, [shots, tab])
 
-  async function regenerate(stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string) {
+  /** 重跑=覆盖重来（regenerate:true，出新一版候选）；生成=只补缺。动词说重跑就
+   *  必须真重跑——旧版只发补缺请求，已有产物的镜排零任务，按钮亮成功却什么都没
+   *  发生（2026-09-28 用户实测「没有任何加载」的根因）。 */
+  async function regenerateStage(stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string, regenerate = false) {
     if (!selected) return
     setRequestingStage(stage)
     try {
-      await onRegenerate(selected.id, stage, note)
+      await onRegenerate(selected.id, stage, note, regenerate)
     } finally {
       setRequestingStage(null)
       board.reload()
@@ -359,7 +362,7 @@ export function WorkbenchView({
               <PreviewPanel
                 shot={selected}
                 requestingStage={requestingStage}
-                onRegenerate={(stage, note) => void regenerate(stage, note)}
+                onRegenerate={(stage, note, regenerate) => void regenerateStage(stage, note, regenerate)}
                 onChanged={board.reload}
                 onPrev={() => prevShot && setSelectedId(prevShot.id)}
                 onNext={() => nextShot && setSelectedId(nextShot.id)}

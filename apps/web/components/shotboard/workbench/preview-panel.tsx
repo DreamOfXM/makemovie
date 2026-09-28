@@ -25,7 +25,7 @@ interface PreviewPanelProps {
   shot: ShotboardShot
   /** 请求段 busy（容器在 POST 期间置位，键=stage）。 */
   requestingStage: RegenStage | null
-  onRegenerate(stage: RegenStage, note?: string): void
+  onRegenerate(stage: RegenStage, note?: string, regenerate?: boolean): void
   onChanged(): void
   onPrev(): void
   onNext(): void
@@ -178,7 +178,7 @@ export function PreviewPanel({
               media={shot.firstFrame}
               verb={shot.firstFrame ? t('workbench.rerunStage', { stage: t('storyboards.firstFrame') }) : t('workbench.generateStage', { stage: t('storyboards.firstFrame') })}
               disabled={stageBusy('FIRST_FRAME')}
-              onClick={() => onRegenerate('FIRST_FRAME', note)}
+              onClick={() => onRegenerate('FIRST_FRAME', note, Boolean(shot.firstFrame))}
             />
             <ArtifactActionRow
               icon={<ClapperboardIcon className="size-3.5" />}
@@ -194,7 +194,7 @@ export function PreviewPanel({
                   setVideoGate(true)
                   return
                 }
-                onRegenerate('VIDEO', note)
+                onRegenerate('VIDEO', note, Boolean(shot.video))
               }}
             />
             {owesVoice && (
@@ -205,7 +205,7 @@ export function PreviewPanel({
                 meta={voiceTrack ? t('workbench.hasOutput') : t('workbench.notGenerated')}
                 verb={voiceTrack ? t('workbench.rerunStage', { stage: t('generations.stage.AUDIO') }) : t('workbench.generateStage', { stage: t('generations.stage.AUDIO') })}
                 disabled={stageBusy('AUDIO')}
-                onClick={() => onRegenerate('AUDIO', note)}
+                onClick={() => onRegenerate('AUDIO', note, Boolean(voiceTrack))}
               />
             )}
           </div>
