@@ -1,3 +1,5 @@
+const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。'
+
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { rmSync, writeFileSync } from 'node:fs'
@@ -1652,7 +1654,7 @@ describe('first-frame conditioning', () => {
     // The guard chain has already run by now: the bare prompt gains the style anchor,
     // and promptGuards records what was touched.
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       parameters: { seed: generationSeed(task.idempotencyKey!) },
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
@@ -1677,7 +1679,7 @@ describe('first-frame conditioning', () => {
     // referenceArtifacts, and the guard trail is appended last so every pre-guard key keeps
     // its place — growing either end has to be decided twice.
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       parameters: { seed: generationSeed(task.idempotencyKey!) },
       referenceArtifacts: [{ type: 'first_frame', artifactId: frame.artifactId }],
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
@@ -1836,7 +1838,7 @@ describe('first-frame conditioning', () => {
     const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
 
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       parameters: { seed: generationSeed(task.idempotencyKey!) },
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
@@ -1951,7 +1953,7 @@ describe('first-frame conditioning', () => {
     // Absent, not empty: a `media` key a text-to-video adapter forwarded as-is is what
     // several vendors answer 200 to, and the shot then costs full price with no conditioning.
     // The prompt is the guarded one the snapshot carries — the worker forwards input verbatim.
-    expect(submitted.mock.calls[0]![1].input).toEqual({ prompt: `Shot 1: a rainy night market\n\n${VISUAL_STYLE_DIRECTIVE}` })
+    expect(submitted.mock.calls[0]![1].input).toEqual({ prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` })
 
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(succeeded.status).toBe('SUCCEEDED')
