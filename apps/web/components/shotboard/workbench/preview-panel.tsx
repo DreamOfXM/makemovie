@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
 import type { GenerationArtifact, ShotboardShot, ShotVideoCandidate } from '@/lib/api'
 import { shotDemandText, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
@@ -63,13 +63,24 @@ export function PreviewPanel({
         : shot.inflight.includes('AUDIO')
   const stageBusy = (stage: RegenStage) => requestingStage === stage || stageInflight(stage)
 
+  /** 版本胶片条的选中态：null=跟随当前生效版；换镜复位。 */
+  const [activeVersion, setActiveVersion] = useState<number | null>(null)
+  const [choosing, setChoosing] = useState(false)
+  useEffect(() => { setActiveVersion(null) }, [shot.id])
+  const candidates = [...shot.videoCandidates].sort((a, b) => a.version - b.version)
+  const activeCandidate = candidates.find(candidate => candidate.version === (activeVersion ?? shot.video?.version)) ?? candidates[candidates.length - 1] ?? null
+  const activeArtifact = activeCandidate ? candidateToArtifact(activeCandidate) : shot.video
+
   async function choose(artifactId: string | null) {
+    setChoosing(true)
     try {
       await api(`/storyboards/${shot.id}/video-selection`, { method: 'POST', body: JSON.stringify({ artifactId }) })
       toast.success(artifactId ? t('shotboard.chosenToast') : t('shotboard.autoToast'))
       onChanged()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
+    } finally {
+      setChoosing(false)
     }
   }
 
@@ -89,10 +100,11 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 常驻预览：成片优先，缺片退回首帧，全缺给这一镜该听到的那句为什么。 */}
+        {/* 常驻预览：成片优先，缺片退回首帧，全缺给这一镜该听到的那句为什么。
+            有候选时播放器跟随胶片条选中的那一版（默认=当前生效版）。 */}
         <div className="bg-muted/30 relative aspect-video overflow-hidden rounded-lg border">
-          {shot.video ? (
-            <ArtifactMedia artifact={shot.video} label={`#${shot.number} ${shot.title}`} className="h-full max-h-none w-full" />
+          {activeArtifact ? (
+            <ArtifactMedia artifact={activeArtifact} label={`#${shot.number} ${shot.title} v${activeArtifact.version}`} className="h-full max-h-none w-full" />
           ) : shot.firstFrame ? (
             <>
               {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。 */}
@@ -133,23 +145,61 @@ export function PreviewPanel({
           )}
         </div>
 
-        {/* 候选与钦定：≥2 版才出现，同一镜的裁决只有一处。 */}
-        {shot.videoCandidates.length >= 2 && (
+        {/* 版本胶片条（r03·A 用户拍板）：横向常驻——一版也在，重跑中追加灰格脉冲。
+            格底亮线=已钦定入片，点格换预览+元数据，裁决在条下完成。 */}
+        {(candidates.length > 0 || stageBusy('VIDEO')) && (
           <div className="space-y-1.5">
-            <p className="text-muted-foreground text-xs">{t('shotboard.candidates', { count: shot.videoCandidates.length })}</p>
-            {shot.videoCandidates.map(candidate => (
-              <VideoCandidateRow
-                key={candidate.artifactId}
-                candidate={candidate}
-                shotNumber={shot.number}
-                onChoose={() => void choose(candidate.artifactId)}
-                onZoom={() => setReview({ version: candidate.version })}
-              />
-            ))}
-            {shot.selectedVideoArtifactId && can('storyboard:write') && (
-              <Button variant="ghost" size="sm" className="h-6 text-[11px]" onClick={() => void choose(null)}>
-                {t('shotboard.autoLatest')}
-              </Button>
+            <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(candidates.length + (stageBusy('VIDEO') ? 1 : 0), 4)}, minmax(0, 1fr))` }}>
+              {candidates.map(candidate => (
+                <button
+                  key={candidate.artifactId}
+                  type="button"
+                  onClick={() => setActiveVersion(candidate.version)}
+                  aria-pressed={candidate.version === activeVersion}
+                  title={`v${candidate.version}${candidate.qc?.score != null ? ` · ${t('workbench.qcScore', { score: candidate.qc.score })}` : ''}`}
+                  className={cn(
+                    'group relative overflow-hidden rounded-md border transition-colors',
+                    candidate.version === activeVersion ? 'border-primary' : 'border-border/60 hover:border-control-line',
+                  )}
+                >
+                  <ArtifactMedia
+                    artifact={candidateToArtifact(candidate)}
+                    label={`#${shot.number} v${candidate.version}`}
+                    interactive={false}
+                    className="aspect-video h-auto w-full border-0"
+                  />
+                  <span className="bg-background/75 absolute inset-x-0 bottom-0 flex items-center justify-between px-1 py-0.5 text-[9.5px] font-medium backdrop-blur-sm">
+                    v{candidate.version}
+                    {candidate.selected && <span className="text-success-ink">{t('shotboard.candidateChosen')}</span>}
+                  </span>
+                  {candidate.selected && <span className="bg-primary absolute inset-x-0 bottom-0 h-0.5" />}
+                </button>
+              ))}
+              {stageBusy('VIDEO') && (
+                <span className="border-primary/40 text-primary relative grid place-items-center overflow-hidden rounded-md border text-[10px]">
+                  <span className="flex items-center gap-1 py-2"><LoaderCircleIcon className="size-3 animate-spin" />{t('generations.cellGenerating')}</span>
+                </span>
+              )}
+            </div>
+            {activeCandidate && (
+              <div className="flex items-center gap-2">
+                <p className="text-subtle-foreground min-w-0 flex-1 truncate text-[11px] tabular-nums">
+                  v{activeCandidate.version}
+                  {activeCandidate.qc?.score != null && ` · ${t('workbench.qcScore', { score: activeCandidate.qc.score })}`}
+                  {` · ${formatDateTime(activeCandidate.createdAt, locale)}`}
+                </p>
+                {can('storyboard:write') && (
+                  activeCandidate.selected ? (
+                    <Button variant="ghost" size="sm" className="h-6 shrink-0 px-1.5 text-[11px]" onClick={() => void choose(null)}>
+                      {t('shotboard.autoLatest')}
+                    </Button>
+                  ) : (
+                    <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void choose(activeCandidate.artifactId)}>
+                      {t('shotboard.choose')}
+                    </Button>
+                  )
+                )}
+              </div>
             )}
           </div>
         )}
@@ -336,14 +386,9 @@ function ArtifactActionRow({
   )
 }
 
-function VideoCandidateRow({
-  candidate,
-  shotNumber,
-  onChoose,
-  onZoom,
-}: { candidate: ShotVideoCandidate; shotNumber: number; onChoose(): void; onZoom(): void }) {
-  const { t, locale } = useI18n()
-  const artifact: GenerationArtifact = {
+/** 候选 DTO → ArtifactMedia 认的形状（内容走 /artifacts/:id/content，与旧候选行同一取数路径）。 */
+function candidateToArtifact(candidate: ShotVideoCandidate): GenerationArtifact {
+  return {
     id: candidate.artifactId,
     mimeType: candidate.mimeType,
     objectKey: '',
@@ -353,45 +398,4 @@ function VideoCandidateRow({
     durationMs: candidate.durationMs,
     downloadUrl: `/artifacts/${candidate.artifactId}/content`,
   }
-  return (
-    <div className={cn('flex items-center gap-2.5 rounded-md border p-1.5', candidate.selected && 'border-success/40 bg-success/5')}>
-      {/* 缩略图＝放大态第二入口（从这一版看起）；行内的「选它」保持原位。 */}
-      <button
-        type="button"
-        onClick={onZoom}
-        aria-label={t('workbench.zoom')}
-        className="group relative w-20 shrink-0 cursor-zoom-in"
-      >
-        <ArtifactMedia artifact={artifact} label={`#${shotNumber} v${candidate.version}`} interactive={false} className="h-12 w-full rounded" />
-        <span className="bg-background/75 text-muted-foreground group-hover:text-foreground absolute right-1 bottom-1 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-          <Maximize2Icon className="size-3" />
-        </span>
-      </button>
-      <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-1.5 text-xs font-medium">
-          v{candidate.version}
-          {candidate.selected && (
-            <Badge variant="success" className="h-4 px-1.5 text-[10px] font-normal">
-              <CheckCircle2Icon className="size-3" />
-              {t('shotboard.chosen')}
-            </Badge>
-          )}
-        </p>
-        <p className="text-subtle-foreground text-[11px] tabular-nums">
-          {formatDateTime(candidate.createdAt, locale)}
-          {candidate.durationMs !== null && ` · ${formatDuration(candidate.durationMs)}`}
-        </p>
-        {candidate.qc && (
-          <p className="text-subtle-foreground text-[11px] tabular-nums">
-            QC {candidate.qc.kind} {candidate.qc.score !== null ? Math.round(candidate.qc.score * 100) : '—'}
-          </p>
-        )}
-      </div>
-      {!candidate.selected && (
-        <GuardedButton action="storyboard:write" variant="outline" size="sm" className="h-6 shrink-0 text-[11px]" onClick={onChoose}>
-          {t('shotboard.choose')}
-        </GuardedButton>
-      )}
-    </div>
-  )
 }
