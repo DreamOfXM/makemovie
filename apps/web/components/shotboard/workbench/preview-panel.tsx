@@ -149,6 +149,7 @@ export function PreviewPanel({
             格底亮线=已钦定入片，点格换预览+元数据，裁决在条下完成。 */}
         {(candidates.length > 0 || stageBusy('VIDEO')) && (
           <div className="space-y-1.5">
+            <p className="text-muted-foreground text-[11px] font-medium">{t('shotboard.candidates', { count: candidates.length + (stageBusy('VIDEO') ? 1 : 0) })}</p>
             <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(candidates.length + (stageBusy('VIDEO') ? 1 : 0), 4)}, minmax(0, 1fr))` }}>
               {candidates.map(candidate => (
                 <button

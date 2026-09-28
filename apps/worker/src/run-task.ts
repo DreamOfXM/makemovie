@@ -40,19 +40,30 @@ const MOCK_DURATION_MS = 1_000
 // match the modality before synthesizeMockMedia can tell us the real mime type.
 const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 'mp4', r2v: 'mp4', tts: 'wav', music: 'wav' }
 
-/** 重排队任务复用同一 id，attempt 会回到 1——产物 (objectKey, version) 唯一键就撞上
- *  上一轮留下的行，任务从此每次重试都死在同一堵墙上（2026-09-28 用户真实数据咬人：
- *  反复失败的参考图任务即此）。版本号改按「本任务已落产物最大版 +1」分配：
- *  重跑/QC 返工天然错开，历史产物全部保留可审计。 */
-async function nextArtifactVersion(db: PipelineDeps['db'], taskId: string): Promise<number> {
-  const last = await db.mediaArtifact.findFirst({ where: { taskId }, orderBy: { version: 'desc' }, select: { version: true } })
-  return (last?.version ?? 0) + 1
+/** 产物版本号按「同一实体同一阶段已落产物最大版 +1」分配——版本是给用户看的
+ *  "这一镜/这个素材的第 N 版"，必须跨任务连续：重跑会开新任务，旧逻辑按本任务
+ *  计数就从 v1 重新起跳，同一镜出现两个 v1（2026-09-28 用户在版本胶片条上实测）。
+ *  作用域阶梯：镜头任务按镜头×阶段；素材任务按任务↔素材多对多；其余按剧集。
+ *  重排队（同任务重试）天然兼容：全集的 max ≥ 本任务的 max，(objectKey, version)
+ *  唯一键照旧错开。 */
+async function nextArtifactVersion(
+  db: PipelineDeps['db'],
+  task: { stage: TaskRow['stage']; storyboardId: string | null; batch: { episodeId: string }; assets?: { id: string }[] },
+): Promise<number> {
+  const scope = task.storyboardId
+    ? { task: { storyboardId: task.storyboardId } }
+    : task.assets && task.assets.length > 0
+      ? { task: { assets: { some: { id: { in: task.assets.map(asset => asset.id) } } } } }
+      : { task: { batch: { episodeId: task.batch.episodeId } } }
+  const last = await db.mediaArtifact.aggregate({ _max: { version: true }, where: { stage: task.stage, ...scope } })
+  return (last._max.version ?? 0) + 1
 }
 
 export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Promise<void> {
   const task = await deps.db.generationTask.findUnique({
     where: { id: payload.taskId },
-    include: { batch: { include: { episode: { include: { project: true } } } } },
+    // assets：素材任务的版本作用域要按「任务↔素材」多对多圈全集（见 nextArtifactVersion）。
+    include: { batch: { include: { episode: { include: { project: true } } } }, assets: { select: { id: true } } },
   })
   if (!task) throw new Error(`generation task ${payload.taskId} not found`)
   if (task.status === 'CANCELLED') return
@@ -195,7 +206,7 @@ async function runCandidate(
   const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
   try {
     const material = await materialize(result, capability.modality, workdir)
-    const artifactVersion = await nextArtifactVersion(deps.db, task.id)
+    const artifactVersion = await nextArtifactVersion(deps.db, task)
     const objectKey = buildObjectKey({
       tenantId: task.organizationId,
       projectId: task.batch.episode.project.id,
@@ -395,7 +406,7 @@ async function runSegmentedStoryboard(
     try {
       const material = await materialize(result, capability.modality, workdir)
       // 段产物共用任务行：max+1 对各段也天然错开（同段历史行 version 最大的那条 +1）。
-      const artifactVersion = await nextArtifactVersion(deps.db, task.id)
+      const artifactVersion = await nextArtifactVersion(deps.db, task)
       const objectKey = buildObjectKey({
         tenantId: task.organizationId,
         projectId: task.batch.episode.project.id,

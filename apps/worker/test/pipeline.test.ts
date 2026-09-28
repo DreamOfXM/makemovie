@@ -194,6 +194,34 @@ describe('asset versions', () => {
     expect(versions[1]).toMatchObject({ version: 2, status: 'DRAFT' })
   })
 
+  it('continues the artifact version across tasks for the same shot — a rerun mints v2, not a second v1', async () => {
+    // 2026-09-28 事故回放：重跑开新任务，版本号曾按本任务计数从 v1 重新起跳，
+    // 同一镜的版本胶片条上出现两个 v1。版本是给用户看的「第 N 版」，跨任务连续。
+    const seed = await env.seed({ model: 'mock-image', modality: 'image', stage: 'FIRST_FRAME' })
+    const shotId = seed.storyboardIds![0]!
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { storyboardId: shotId } })
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const first = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: seed.taskId } })
+    expect(first.version).toBe(1)
+
+    const base = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    const rerun = await env.db.generationTask.create({
+      data: {
+        organizationId: base.organizationId,
+        batchId: base.batchId,
+        stage: base.stage,
+        idempotencyKey: `${base.idempotencyKey}:rerun`,
+        storyboardId: shotId,
+        requestSnapshot: base.requestSnapshot,
+        status: 'QUEUED',
+      },
+    })
+    await runTask({ ...env.runPayload(seed), taskId: rerun.id }, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const second = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: rerun.id } })
+    expect(second.version).toBe(2)
+  })
+
   it('records nothing for a non-ASSET task', async () => {
     const seed = await env.seed({ model: 'mock-image', modality: 'image', stage: 'FIRST_FRAME' })
     await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
