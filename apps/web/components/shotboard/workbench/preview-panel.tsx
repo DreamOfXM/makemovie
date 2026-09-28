@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, MicIcon, RotateCcwIcon } from 'lucide-react'
+import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
 import type { GenerationArtifact, ShotboardShot, ShotVideoCandidate } from '@/lib/api'
 import { shotDemandText, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
@@ -15,6 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
 import { AudioSourceRow } from './audio-source-row'
+import { VideoReviewLightbox } from './video-review-lightbox'
 
 /** 右栏一枚产物行的重跑动词：缺产物=「生成」（只补缺），有产物=「重跑」（覆盖）。 */
 type RegenStage = 'FIRST_FRAME' | 'VIDEO' | 'AUDIO'
@@ -50,6 +51,8 @@ export function PreviewPanel({
   const { can } = usePermission()
   const canTrigger = can('generation:trigger')
   const [note, setNote] = useState('')
+  // 放大态：null=关；version=null 落在已钦定/最新版，数字=点开的那一版。
+  const [review, setReview] = useState<{ version: number | null } | null>(null)
 
   const stageInflight = (stage: RegenStage) =>
     stage === 'FIRST_FRAME' ? shot.inflight.includes('FIRST_FRAME')
@@ -114,6 +117,17 @@ export function PreviewPanel({
               {t('workbench.staleRetry')}
             </span>
           )}
+          {/* 放大入口常驻右上角：视频本体的点击留给原生播放/暂停，看大片走这里。 */}
+          {(shot.video || shot.videoCandidates.length > 0) && (
+            <button
+              type="button"
+              onClick={() => setReview({ version: null })}
+              className="bg-background/75 text-muted-foreground hover:text-foreground absolute top-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-[11px] font-medium backdrop-blur-sm"
+            >
+              <Maximize2Icon className="size-3" />
+              {t('workbench.zoom')}
+            </button>
+          )}
         </div>
 
         {/* 候选与钦定：≥2 版才出现，同一镜的裁决只有一处。 */}
@@ -126,6 +140,7 @@ export function PreviewPanel({
                 candidate={candidate}
                 shotNumber={shot.number}
                 onChoose={() => void choose(candidate.artifactId)}
+                onZoom={() => setReview({ version: candidate.version })}
               />
             ))}
             {shot.selectedVideoArtifactId && can('storyboard:write') && (
@@ -225,6 +240,15 @@ export function PreviewPanel({
           {t('workbench.kbdHint')}
         </span>
       </div>
+
+      {review && (
+        <VideoReviewLightbox
+          shot={shot}
+          initialVersion={review.version}
+          onClose={() => setReview(null)}
+          onChanged={onChanged}
+        />
+      )}
     </div>
   )
 }
@@ -277,7 +301,12 @@ function ArtifactActionRow({
   )
 }
 
-function VideoCandidateRow({ candidate, shotNumber, onChoose }: { candidate: ShotVideoCandidate; shotNumber: number; onChoose(): void }) {
+function VideoCandidateRow({
+  candidate,
+  shotNumber,
+  onChoose,
+  onZoom,
+}: { candidate: ShotVideoCandidate; shotNumber: number; onChoose(): void; onZoom(): void }) {
   const { t, locale } = useI18n()
   const artifact: GenerationArtifact = {
     id: candidate.artifactId,
@@ -291,7 +320,18 @@ function VideoCandidateRow({ candidate, shotNumber, onChoose }: { candidate: Sho
   }
   return (
     <div className={cn('flex items-center gap-2.5 rounded-md border p-1.5', candidate.selected && 'border-success/40 bg-success/5')}>
-      <ArtifactMedia artifact={artifact} label={`#${shotNumber} v${candidate.version}`} interactive={false} className="h-12 w-20 shrink-0" />
+      {/* 缩略图＝放大态第二入口（从这一版看起）；行内的「选它」保持原位。 */}
+      <button
+        type="button"
+        onClick={onZoom}
+        aria-label={t('workbench.zoom')}
+        className="group relative w-20 shrink-0 cursor-zoom-in"
+      >
+        <ArtifactMedia artifact={artifact} label={`#${shotNumber} v${candidate.version}`} interactive={false} className="h-12 w-full rounded" />
+        <span className="bg-background/75 text-muted-foreground group-hover:text-foreground absolute right-1 bottom-1 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <Maximize2Icon className="size-3" />
+        </span>
+      </button>
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-1.5 text-xs font-medium">
           v{candidate.version}
