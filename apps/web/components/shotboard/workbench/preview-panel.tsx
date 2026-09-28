@@ -154,8 +154,10 @@ export function PreviewPanel({
           </div>
         )}
 
-        {/* 三个产物各带自己的动作；实心主钮全屏只此一枚：重跑「视频」。
-            调整要求一次填写，任一动词携带提交并计入请求快照——禁止无方向盲抽。 */}
+        {/* 三个产物同级同形：首帧/视频/配音是同一镜的三件平行产物，行内动作一律
+            描边（2026-09-28 用户：一个紫色两个透明"很容易让人不理解"）。实心只留给
+            区级推进动作，不给平行产物行里的任何一件。调整要求一次填写，任一动词
+            携带提交并计入请求快照——禁止无方向盲抽。 */}
         {canTrigger && (
           <div className="space-y-1.5">
             <div>
@@ -173,7 +175,6 @@ export function PreviewPanel({
               label={t('storyboards.firstFrame')}
               state={stageBusy('FIRST_FRAME') ? 'busy' : shot.firstFrame ? 'done' : 'idle'}
               meta={shot.firstFrame ? t('workbench.hasOutput') : shot.firstFrameError ? t('workbench.lastFailed') : t('workbench.notGenerated')}
-              solid={false}
               verb={shot.firstFrame ? t('workbench.rerunStage', { stage: t('storyboards.firstFrame') }) : t('workbench.generateStage', { stage: t('storyboards.firstFrame') })}
               disabled={stageBusy('FIRST_FRAME')}
               onClick={() => onRegenerate('FIRST_FRAME', note)}
@@ -185,7 +186,6 @@ export function PreviewPanel({
               meta={shot.video
                 ? `${t('workbench.hasOutput')}${shot.videoError ? ` · ${t('workbench.lastFailed')}` : ''}`
                 : shot.videoError ? t('workbench.lastFailed') : t('workbench.notGenerated')}
-              solid
               verb={shot.video ? t('workbench.rerunStage', { stage: t('storyboards.video') }) : t('workbench.generateStage', { stage: t('storyboards.video') })}
               disabled={stageBusy('VIDEO')}
               onClick={() => {
@@ -202,7 +202,6 @@ export function PreviewPanel({
                 label={t('generations.stage.AUDIO')}
                 state={stageBusy('AUDIO') ? 'busy' : voiceTrack ? 'done' : 'idle'}
                 meta={voiceTrack ? t('workbench.hasOutput') : t('workbench.notGenerated')}
-                solid={false}
                 verb={voiceTrack ? t('workbench.rerunStage', { stage: t('generations.stage.AUDIO') }) : t('workbench.generateStage', { stage: t('generations.stage.AUDIO') })}
                 disabled={stageBusy('AUDIO')}
                 onClick={() => onRegenerate('AUDIO', note)}
@@ -283,7 +282,6 @@ function ArtifactActionRow({
   state,
   meta,
   verb,
-  solid,
   disabled,
   onClick,
 }: {
@@ -292,12 +290,11 @@ function ArtifactActionRow({
   state: 'done' | 'busy' | 'idle'
   meta: string
   verb: string
-  solid?: boolean
   disabled: boolean
   onClick(): void
 }) {
   return (
-    <div className={cn('border-border/60 flex items-center gap-2.5 rounded-lg border px-2.5 py-2', solid && 'border-primary/35')}>
+    <div className="border-border/60 flex items-center gap-2.5 rounded-lg border px-2.5 py-2">
       <span className={cn(
         'flex size-7 shrink-0 items-center justify-center rounded-md',
         state === 'done' && 'bg-success/10 text-success-ink',
@@ -312,7 +309,7 @@ function ArtifactActionRow({
       </div>
       <GuardedButton
         action="generation:trigger"
-        variant={solid ? 'default' : 'outline'}
+        variant="outline"
         size="sm"
         className="h-7 text-[11px]"
         disabled={disabled}
