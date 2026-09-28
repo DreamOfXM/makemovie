@@ -226,7 +226,7 @@ describe('generation trigger', () => {
     // 标记即让路,快照里只有预设注入、没有守卫改写。
     const realistic = OFFICIAL_STYLES.find(style => style.id === 'realistic')!
     expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
-      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
+      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。\n\n运动规则（与画面文字规则同级）：人物动作必须严格遵循上文描述——描述写明静止、一动不动时，人物不得书写、翻页、起身或移动物件，只允许呼吸起伏、眨眼和光线的缓慢变化；镜头只允许固定机位或极缓慢推近。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
       parameters: { seed: generationSeed(stored.idempotencyKey!) },
     })
 

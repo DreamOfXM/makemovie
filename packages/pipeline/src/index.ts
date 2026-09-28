@@ -892,8 +892,17 @@ export async function triggerStage(
     ? '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
     : 'Text rendered inside the image (titles, labels, signage) must be in English; long-form document body text may be rendered blurred, but no other language may appear.'
   const isVisualKind = stage === 'ASSET' || stage === 'IMAGE' || stage === 'VIDEO'
+  // 运动忠实条款只进 VIDEO：视频模型一定会让画面动起来，不钉死就会自己发明动作
+  // （2026-09-28 实测：「坐在长桌边一动不动，笔尖按在签字栏」被 wanx2.1-i2v-plus
+  // 演成了 0.5 秒起笔、持续五秒的书写——描述为静时，"动什么"必须由描述说了算）。
+  const MOTION_RULE = stage === 'VIDEO'
+    ? '运动规则（与画面文字规则同级）：人物动作必须严格遵循上文描述——描述写明静止、一动不动时，人物不得书写、翻页、起身或移动物件，只允许呼吸起伏、眨眼和光线的缓慢变化；镜头只允许固定机位或极缓慢推近。'
+    : null
   const tailTargets = isVisualKind
-    ? targets.map(target => ({ ...target, prompt: `${target.prompt}\n\n${TEXT_LANGUAGE_RULE}` }))
+    ? targets.map(target => ({
+        ...target,
+        prompt: [target.prompt, TEXT_LANGUAGE_RULE, MOTION_RULE].filter(Boolean).join('\n\n'),
+      }))
     : targets
   // 调整要求是人在这次重试里给的方向，压轴放在最后一条——盖过风格与规则，
   // 快照同时记录基础提示词与本次方向，审计能对回每一次为什么这么抽。
