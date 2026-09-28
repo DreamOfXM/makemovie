@@ -160,6 +160,9 @@ describe('parseVerdict', () => {
   it('reads JSON wrapped in prose or a code fence', () => {
     expect(parseVerdict('Sure! {"score":0.4,"reasons":["blurry"]} Hope that helps.')).toEqual({ score: 0.4, reasons: ['blurry'] })
     expect(parseVerdict('```json\n{"score":0.9,"reasons":[]}\n```')).toEqual({ score: 0.9, reasons: [] })
+    // qwen3 思考模式：答案前带 <think> 推理段（2026-09-28 场景图审计全灭即此）
+    expect(parseVerdict('<think>画面整体清晰，{score 大概 0.8} 但我需要再核对一下人物……</think>\n{"score":0.85,"reasons":[]}')).toEqual({ score: 0.85, reasons: [] })
+    expect(parseVerdict('<think>先看构图再看肤色</think>{"score":0.6,"reasons":["肢体扭曲"]}')).toEqual({ score: 0.6, reasons: ['肢体扭曲'] })
   })
 
   it('treats missing or mixed reasons as the strings that are there', () => {
@@ -360,7 +363,7 @@ describe('ModelQualityChecker against a bound auditor', () => {
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict'],
+      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict: the two images clearly show the same person'],
     })
 
     // An unusable score is still not a pass, however confident the prose around it reads.
@@ -368,7 +371,7 @@ describe('ModelQualityChecker against a bound auditor', () => {
     expect(await auditor().check(conditioned)).toEqual({
       kind: 'visual-audit',
       decision: 'unjudged',
-      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict'],
+      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict: {"score": 4, "reasons": ["the subject drifted"]}'],
     })
   })
 

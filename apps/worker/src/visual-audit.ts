@@ -99,7 +99,9 @@ export class ModelQualityChecker implements QualityChecker {
     }
 
     const verdict = parseVerdict(result.text ?? '')
-    if (!verdict) return unjudged(`${candidate.provider}/${candidate.model} returned no parseable verdict`)
+    // 原文尾巴跟进错误：qwen3 系默认思考模式，下次再解析失败就能直接看到它回了什么
+    // （2026-09-28 场景图任务即死在这里，response 里一个字都没留下）。
+    if (!verdict) return unjudged(`${candidate.provider}/${candidate.model} returned no parseable verdict: ${(result.text ?? '').replace(/\s+/g, ' ').slice(0, 160)}`)
 
     if (verdict.score >= QC_THRESHOLD) return { kind: 'visual-audit', decision: 'pass', score: verdict.score }
     return {
@@ -172,7 +174,7 @@ export function buildAuditPrompt(subject: QcSubject, plan: Exclude<AuditPlan, 'n
  * rather than clamped, because a clamped guess would still look like a judgment.
  */
 export function parseVerdict(text: string): AuditVerdict | null {
-  for (const candidate of jsonCandidates(text)) {
+  for (const candidate of jsonCandidates(stripThinking(text))) {
     let parsed: unknown
     try {
       parsed = JSON.parse(candidate)
@@ -187,6 +189,14 @@ export function parseVerdict(text: string): AuditVerdict | null {
     return { score, reasons }
   }
   return null
+}
+
+/** qwen3 系默认开思考模式：答案前面常带一段 <think>…</think> 推理。思考段里的花括号
+ *  会让「最外层花括号对」跨进垃圾区，整段 JSON 就解析不出来（2026-09-28 实测：场景图
+ *  审计全部 unjudged 即此）。先剥思考段再找 JSON；未闭合的思考尾巴无药可救，原样交给
+ *  上层报「解析不出」并带上原文。 */
+function stripThinking(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, '')
 }
 
 /** The whole answer first, then the outermost brace pair — whichever parses wins. */
