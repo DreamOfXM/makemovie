@@ -24,7 +24,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { EmptyState } from '@/components/ui/empty-state'
-import { Skeleton, TableSkeleton } from '@/components/ui/skeleton'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ShotStrip } from './shot-strip'
@@ -183,21 +183,6 @@ export function WorkbenchView({
   /** 待办队列：影响面 → 严重度 → 等待时长，与旧总览同一裁决，只是住进了弹层。 */
   const todo = useMemo(() => buildTodo(t, board.data), [board.data, t])
 
-  // 产物进度行：与旧镜头区进度同一口径（失败先于产物、欠人声的镜作分母）。
-  const progress = useMemo(() => {
-    const failed = {
-      frame: shots.filter(shot => Boolean(shot.firstFrameError)).length,
-      clip: shots.filter(shot => !shot.firstFrameError && Boolean(shot.videoError)).length,
-    }
-    return {
-      frames: shots.filter(shot => shot.firstFrame && !shot.firstFrameError).length,
-      clips: shots.filter(shot => shot.video && !shot.videoError).length,
-      failed,
-      running: shots.filter(shot => shot.inflight.length > 0).length,
-      total: shots.length,
-    }
-  }, [shots])
-
   if (board.error && !board.data) return <ErrorState message={board.error} onRetry={board.reload} />
 
   if (board.loading && !board.data) {
@@ -231,22 +216,10 @@ export function WorkbenchView({
 
   return (
     <div className="flex min-h-0 flex-col gap-3">
-      {/* 工具行：产物进度 + 快道入口 */}
+      {/* 工具行：快道入口。产物进度不在这里重复报数——正下方的放映条就是它的
+          图形版且更全（绿=齐、斜纹=欠画面、红=失败、蓝脉冲=在产、底线=钦定），
+          数字行与条上下紧贴被用户判为重复（2026-09-28）。 */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground tabular-nums">
-        <span>
-          {t('storyboards.firstFrame')} <b className="text-foreground font-medium">{progress.frames}/{progress.total}</b>
-          {progress.failed.frame > 0 && <span className="text-destructive font-medium"> · {t('generations.status.FAILED')} {progress.failed.frame}</span>}
-        </span>
-        <span>
-          {t('storyboards.video')} <b className="text-foreground font-medium">{progress.clips}/{progress.total}</b>
-          {progress.failed.clip > 0 && <span className="text-destructive font-medium"> · {t('generations.status.FAILED')} {progress.failed.clip}</span>}
-        </span>
-        {progress.running > 0 && (
-          <span className="text-primary flex items-center gap-1 font-medium">
-            <Skeleton className="bg-primary/60 size-2 animate-pulse rounded-full" />
-            {t('workbench.runningCount', { count: progress.running })}
-          </span>
-        )}
         <div className="ml-auto flex items-center gap-1.5">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
