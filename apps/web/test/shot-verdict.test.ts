@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerationArtifact, ShotboardShot } from '@/lib/api'
 import { dictionaries, type Locale } from '@/lib/i18n'
-import { cardFailureCode, cardStage, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord } from '@/lib/shot-verdict'
+import { cardFailureCode, cardStage, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
 
 /**
  * 真文案，不是替身：断言直接读字典，所以键写错、少一门语言、或把「重抽无效」
@@ -144,5 +144,35 @@ describe('失败归因', () => {
     const idle = shot({})
     expect(shotFailureKind(idle)).toBe('unknown')
     expect(cardStage(idle, shotVerdict(idle))).toBe('idle')
+  })
+})
+
+/**
+ * 2026-09-28 事故回放：用户点了一次配音生成，12 镜台词全部合成成功，斜纹却全灭——
+ * 旧判定把「任何一件产物落地」当成「这一格不空」，配音让每镜 done≥1，放映条
+ * 整条变纯色，读不出画面欠账。斜纹的语义是「画面一件都没有」，与声音无关。
+ */
+describe('放映条斜纹', () => {
+  it('只有配音、画面一件没有的镜仍画斜纹（事故形态：done=1 → start）', () => {
+    const voiceOnly = shot({ dialogue: '我妈第二次开口，要我的房子。', voice: anArtifact })
+    const stage = cardStage(voiceOnly, shotVerdict(voiceOnly))
+    expect(stage).toBe('start')
+    expect(stripIsEmpty(voiceOnly, stage)).toBe(true)
+  })
+
+  it('首帧或视频在手的镜不画斜纹', () => {
+    const framed = shot({ firstFrame: anArtifact })
+    expect(stripIsEmpty(framed, cardStage(framed, shotVerdict(framed)))).toBe(false)
+  })
+
+  it('无台词无产物的镜照旧画斜纹；在产或等你审的镜不画', () => {
+    const silent = shot({})
+    expect(stripIsEmpty(silent, cardStage(silent, shotVerdict(silent)))).toBe(true)
+
+    const running = shot({ inflight: ['FIRST_FRAME'] as ShotboardShot['inflight'] })
+    expect(stripIsEmpty(running, cardStage(running, shotVerdict(running)))).toBe(false)
+
+    const reviewing = shot({ status: 'NEEDS_REVIEW' })
+    expect(stripIsEmpty(reviewing, cardStage(reviewing, shotVerdict(reviewing)))).toBe(false)
   })
 })

@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import type { ShotboardShot } from '@/lib/api'
-import { cardStage, shotFailureKind, shotVerdict, stageTone, stageWord } from '@/lib/shot-verdict'
+import { cardStage, shotFailureKind, shotVerdict, stageTone, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
 import { cn, formatDuration } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -24,7 +24,7 @@ export function ShotStrip({ shots, onOpen }: { shots: ShotboardShot[]; onOpen(sh
       tone: stageTone(stage),
       chosen: shot.slot === 'chosen',
       word: stageWord(t, verdict, stage, true, shotFailureKind(shot)),
-      empty: stage === 'idle' && !shot.firstFrame && !shot.video,
+      empty: stripIsEmpty(shot, stage),
     }
   })
 

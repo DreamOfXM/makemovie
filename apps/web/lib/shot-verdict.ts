@@ -195,6 +195,16 @@ export function stageWord(t: TranslateFn, verdict: ShotVerdict, stage: CardStage
   }
 }
 
+/**
+ * 放映条那一格什么时候画斜纹：画面（首帧/视频）一件都没有。配音落地不算数——
+ * 放映条是画面时间轴，声音齐了画面还没起色的镜在时间轴上仍然是空格。此前斜纹
+ * 挂在 verdict 的「一件产物都没有」上，一整集配完音斜纹就全部消失，进度条读不
+ * 出画面欠账（2026-09-28 用户实测：只跑了一批配音，12 格斜纹全灭）。
+ */
+export function stripIsEmpty(shot: ShotboardShot, stage: CardStage): boolean {
+  return (stage === 'idle' || stage === 'start') && !shot.firstFrame && !shot.video
+}
+
 /** 放映条格子的底色：绿=手上有可用画面、红=要你决定、琥珀=等你审、蓝=在产、灰=还没产。 */
 export function stageTone(stage: CardStage): 'ready' | 'danger' | 'warning' | 'running' | 'idle' {
   if (stage === 'complete' || stage === 'approved') return 'ready'
