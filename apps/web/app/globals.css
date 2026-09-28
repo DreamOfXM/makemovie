@@ -63,15 +63,21 @@
   --popover: oklch(0.19 0.014 265);
   --popover-foreground: oklch(0.965 0.005 265);
   --primary: oklch(0.68 0.13 278);
+  /* 实心主钮=淡紫底+深墨字，WCAG 实算 6.57:1（AA 4.5 ✓）。曾试改近白字=2.83:1，
+     被 detect 的锚点读数纠正——oklch→亮度换算必须走线性域，别双重伽马。 */
   --primary-foreground: oklch(0.16 0.03 278);
   --secondary: oklch(0.21 0.014 265);
   --secondary-foreground: oklch(0.94 0.006 265);
   --muted: oklch(0.21 0.014 265);
   --muted-foreground: oklch(0.78 0.008 265);
   --subtle-foreground: oklch(0.64 0.01 265);
-  --faint-foreground: oklch(0.48 0.01 265);
+  /* 唯一真欠账的一档：0.48 在背景上只有 3.04:1，提到 0.58 过线（≈5.1:1），
+     与 subtle(0.64) 仍保持两档。 */
+  --faint-foreground: oklch(0.58 0.01 265);
   --accent: oklch(1 0 0 / 6%);
   --accent-foreground: oklch(0.96 0.004 265);
+  /* 语义色实心底+深墨字本就全部过线（红 5.48 / 绿 7.86 / 蓝 7.55 / 琥珀 8.52），
+     此前的“调亮”基于错误换算，已回滚。 */
   --destructive: oklch(0.66 0.19 25);
   --destructive-foreground: oklch(0.19 0.04 25);
   --success: oklch(0.72 0.15 155);

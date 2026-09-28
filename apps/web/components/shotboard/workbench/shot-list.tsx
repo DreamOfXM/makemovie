@@ -99,7 +99,7 @@ export function ShotList({
             onClick={() => setFilter(item.id)}
             className={cn(
               'rounded-full px-2.5 py-1 text-[11.5px] font-medium whitespace-nowrap transition-colors',
-              filter === item.id ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+              filter === item.id ? 'bg-primary/15 text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
             )}
           >
             {item.label}
