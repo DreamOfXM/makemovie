@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createPipelineQueue, type ComposeEpisodePayload, type RunTaskPayload } from '@studio/jobs'
-import { generationSeed, getStyleVisualDirective, OFFICIAL_STYLES, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
+import { generationSeed, getStyleVisualDirective,
+  getStyleAssetDirective, OFFICIAL_STYLES, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
 import { startTestEnv, type TestEnv } from './env.js'
 
 // The api suite shares the Redis instance with the worker suite; a private
@@ -791,7 +792,7 @@ describe('asset generation trigger', () => {
       // reproducibility question is answered from (the worker test pins how it is derived).
       const snapshot = JSON.parse(task!.requestSnapshot ?? '')
       expect(snapshot).toEqual({
-        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n视觉风格：${getStyleVisualDirective(projectStyle, 'IMAGE')}` },
+        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${getStyleAssetDirective(projectStyle)}` },
         parameters: { seed: expect.any(Number) },
         assetId,
       })

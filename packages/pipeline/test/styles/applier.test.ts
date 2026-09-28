@@ -116,10 +116,13 @@ describe('StyleApplier', () => {
         colorPalette: 'rich contrast',
       }
       const assetPrompt = applyStyleToPrompt('ASSET', 'character 许知意: 30 岁女律师', cinematic)
-      expect(assetPrompt).toContain('视觉风格：cinematic, film grain, dramatic lighting, rich contrast')
-      expect(assetPrompt.replace('character 许知意: 30 岁女律师', 'SAME')).toBe(
-        applyStyleToPrompt('IMAGE', 'SAME', cinematic),
-      )
+      // 2026-09-28 改版：参考图不再与首帧逐字同句——完整剧照 directive 会压过设定板
+      // 版式（模型顺着 cinematic 词出单张场景剧照）。同一画风改由「质感同源」保证：
+      // ASSET 取 visualStyle+colorPalette（色彩基因与首帧一致），并显式声明版式优先。
+      expect(assetPrompt).toContain('视觉风格（只约束色彩与质感')
+      expect(assetPrompt).toContain('禁止输出单张剧照或场景背景')
+      expect(assetPrompt).toContain('cinematic, film grain, dramatic lighting, rich contrast')
+      expect(assetPrompt).not.toContain('视觉风格：cinematic')
     })
 
     it('should not modify prompt for non-affected stages', () => {
@@ -206,8 +209,10 @@ describe('StyleApplier', () => {
       // SCRIPT 不受影响
       expect(result.SCRIPT).toBe('原始剧本 prompt')
 
-      // ASSET 与 IMAGE/VIDEO 同一份视觉风格
-      expect(result.ASSET).toContain('视觉风格：')
+      // ASSET 取质感层（带版式优先声明），IMAGE/VIDEO 用完整 directive
+      expect(result.ASSET).toContain('视觉风格（只约束色彩与质感')
+      expect(result.IMAGE).toContain('视觉风格：')
+      expect(result.VIDEO).toContain('视觉风格：')
 
       // STORYBOARD 追加了风格
       expect(result.STORYBOARD).toContain('风格要求：')

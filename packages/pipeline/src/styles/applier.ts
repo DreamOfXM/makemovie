@@ -10,7 +10,7 @@
  */
 
 import type { GenerationStage } from '../index.js'
-import { getStyleById, getStyleVisualDirective, getStyleToneDirective, type StylePreset } from './presets.js'
+import { getStyleById, getStyleVisualDirective, getStyleToneDirective, getStyleAssetDirective, type StylePreset } from './presets.js'
 
 /** 长相由提示词决定的阶段：参考图、首帧、视频吃同一份视觉风格；SCRIPT/AUDIO/MUSIC 不吃。 */
 const VISUAL_STAGES: readonly GenerationStage[] = ['ASSET', 'IMAGE', 'VIDEO']
@@ -53,10 +53,17 @@ export function applyStyleToPrompt(
       return `${originalPrompt}\n\n风格要求：${toneDirective}`
     }
 
-    case 'ASSET':
+    case 'ASSET': {
+      // 参考图是身份档案，不是风格源：完整剧照 directive（含镜头语言/海报质感）会压过
+      // 设定板版式。ASSET 只取质感与色彩层并显式声明版式优先——同一画风靠色彩质感
+      // 延续，而不是靠把剧照语言拍在设定板上。IMAGE/VIDEO 仍用完整 directive。
+      const texture = getStyleAssetDirective(style)
+      return `${originalPrompt}\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${texture}`
+    }
+
     case 'IMAGE':
     case 'VIDEO': {
-      // 参考图/首帧/视频：追加视觉风格描述。三处必须同一句，否则定妆照与成片画风分裂。
+      // 首帧/视频：追加完整视觉风格描述。与参考图的质感层同一色彩基因，成片不分裂。
       const visualDirective = getStyleVisualDirective(style, 'IMAGE')
       return `${originalPrompt}\n\n视觉风格：${visualDirective}`
     }

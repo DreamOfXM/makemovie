@@ -133,7 +133,9 @@ describe('generation style presets', () => {
     const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: env.authHeaders(ownerToken), payload: { stage: 'ASSET', styleId: 'anime' } })
     expect(res.statusCode).toBe(201)
     const prompt = await batchPrompt(res.json().batch.id)
-    expect(prompt).toContain('视觉风格：')
+    // ASSET 取质感层并显式声明版式优先（2026-09-28：完整剧照 directive 会把设定板打回单张照片）
+    expect(prompt).toContain('视觉风格（只约束色彩与质感')
+    expect(prompt).toContain('禁止输出单张剧照或场景背景')
     expect(prompt).toContain(anime.visualStyle)
     expect(prompt).not.toContain(cinematic.visualStyle)
     // 「严禁照片级真人质感」只属于没选风格的安装；选了动漫风，那句必须让位。

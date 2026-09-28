@@ -23,6 +23,7 @@ export {
   getStyleById,
   isValidStyleId,
   getStyleVisualDirective,
+  getStyleAssetDirective,
   getStyleToneDirective,
   registerCustomStyle,
   unregisterCustomStyle,

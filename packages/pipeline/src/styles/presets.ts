@@ -197,6 +197,15 @@ export function getStyleVisualDirective(style: StylePreset, stage: 'IMAGE' | 'VI
 }
 
 /**
+ * 参考图专用的质感层：只取画风与色彩两段，剔除镜头语言与海报词——那些是剧照的
+ * 词汇，拼在「米白纯色背景、多分区设定板」上只会把版式打回单张照片
+ * （2026-09-28 实测：cinematic 全句拼上后模型直接出了场景剧照）。
+ */
+export function getStyleAssetDirective(style: StylePreset): string {
+  return [style.visualStyle, style.colorPalette].filter(Boolean).join(', ')
+}
+
+/**
  * 获取风格预设的氛围语气文本
  * 用于追加到分镜/剧本 prompt
  *
