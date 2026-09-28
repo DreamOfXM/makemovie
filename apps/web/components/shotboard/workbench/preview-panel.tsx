@@ -175,6 +175,7 @@ export function PreviewPanel({
               label={t('storyboards.firstFrame')}
               state={stageBusy('FIRST_FRAME') ? 'busy' : shot.firstFrame ? 'done' : 'idle'}
               meta={shot.firstFrame ? t('workbench.hasOutput') : shot.firstFrameError ? t('workbench.lastFailed') : t('workbench.notGenerated')}
+              media={shot.firstFrame}
               verb={shot.firstFrame ? t('workbench.rerunStage', { stage: t('storyboards.firstFrame') }) : t('workbench.generateStage', { stage: t('storyboards.firstFrame') })}
               disabled={stageBusy('FIRST_FRAME')}
               onClick={() => onRegenerate('FIRST_FRAME', note)}
@@ -282,6 +283,7 @@ function ArtifactActionRow({
   state,
   meta,
   verb,
+  media,
   disabled,
   onClick,
 }: {
@@ -290,18 +292,26 @@ function ArtifactActionRow({
   state: 'done' | 'busy' | 'idle'
   meta: string
   verb: string
+  /** 产物本体（如首帧）——有就当行首缩略图，点击放大；图片产物在视频在场时
+   *  没有任何展示位，曾导致「生成的首帧没法看」（2026-09-28 用户实测）。 */
+  media?: GenerationArtifact | null
   disabled: boolean
   onClick(): void
 }) {
   return (
     <div className="border-border/60 flex items-center gap-2.5 rounded-lg border px-2.5 py-2">
       <span className={cn(
-        'flex size-7 shrink-0 items-center justify-center rounded-md',
-        state === 'done' && 'bg-success/10 text-success-ink',
-        state === 'busy' && 'bg-primary/10 text-primary',
-        state === 'idle' && 'bg-muted/50 text-muted-foreground',
+        'relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md',
+        !media && state === 'done' && 'bg-success/10 text-success-ink',
+        !media && state === 'busy' && 'bg-primary/10 text-primary',
+        !media && state === 'idle' && 'bg-muted/50 text-muted-foreground',
+        media && state === 'done' && 'ring-1 ring-success/60',
+        media && state === 'busy' && 'ring-1 ring-primary/70',
       )}>
-        {state === 'busy' ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : icon}
+        {state === 'busy' && !media ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : media
+          ? <ArtifactMedia artifact={media} label={label} className="h-full w-full max-h-none border-0 object-cover" />
+          : icon}
+        {state === 'busy' && media && <LoaderCircleIcon className="text-primary absolute size-3 animate-spin" />}
       </span>
       <div className="min-w-0 flex-1">
         <p className="text-xs font-medium">{label}</p>
