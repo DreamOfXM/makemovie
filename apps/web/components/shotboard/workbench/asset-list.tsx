@@ -93,7 +93,7 @@ export function AssetList({
                     {asset.run && asset.run.status !== 'FAILED' && (
                       <span className="text-primary"> · {t('workbench.assetRunning')}</span>
                     )}
-                    {asset.run?.status === 'FAILED' && (
+                    {asset.run?.status === 'FAILED' && asset.status !== 'APPROVED' && (
                       <span className="text-destructive-ink"> · {t('workbench.assetFailed')}</span>
                     )}
                   </span>

@@ -124,7 +124,8 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
             {t('workbench.assetRunning')}
           </p>
         )}
-        {asset.run?.status === 'FAILED' && asset.run.error && (
+        {/* 已定稿＝人已裁决，旧任务的失败信号退场——定稿版本才是现在的事实。 */}
+        {asset.run?.status === 'FAILED' && asset.status !== 'APPROVED' && asset.run.error && (
           <div className="border-destructive/30 bg-destructive/5 rounded-md border px-3 py-2 text-xs">
             {/* 人话行说因去哪修（内容审查→改描述、额度→账上）；原文缩成小字留给排查。 */}
             <p className="text-destructive-ink flex items-start gap-1.5 leading-relaxed">

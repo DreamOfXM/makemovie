@@ -1,4 +1,4 @@
-const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。'
+const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
 
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'

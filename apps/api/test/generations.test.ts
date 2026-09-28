@@ -226,7 +226,7 @@ describe('generation trigger', () => {
     // 标记即让路,快照里只有预设注入、没有守卫改写。
     const realistic = OFFICIAL_STYLES.find(style => style.id === 'realistic')!
     expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
-      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
+      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
       parameters: { seed: generationSeed(stored.idempotencyKey!) },
     })
 
@@ -786,13 +786,13 @@ describe('asset generation trigger', () => {
       const spec = seed.kind === 'character'
         ? '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。'
         : seed.kind === 'scene'
-          ? '场景概念图：无人物空镜，构图与光线符合描述，细节清晰，无文字无水印。'
-          : '道具设定图：单品居中，中性背景，细节清晰，无文字无水印。'
+          ? '场景概念图：无人物空镜，构图与光线符合描述，细节清晰；招牌与标识上的短文字用简体中文，其余避免出现文字；无水印。'
+          : '道具设定图：单品居中，中性背景，细节清晰，无水印。文书/书刊/证书/招牌类道具：标题按描述用简体中文呈现，正文文字一律虚化模糊（不可辨认具体字符），版式与材质贴近真实观感。'
       // An ASSET task is a paid image request, so its snapshot carries the base seed the
       // reproducibility question is answered from (the worker test pins how it is derived).
       const snapshot = JSON.parse(task!.requestSnapshot ?? '')
       expect(snapshot).toEqual({
-        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${getStyleAssetDirective(projectStyle)}` },
+        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${getStyleAssetDirective(projectStyle)}` },
         parameters: { seed: expect.any(Number) },
         assetId,
       })

@@ -857,8 +857,8 @@ export async function triggerStage(
   const ASSET_REFERENCE_SPECS: Record<string, string> = {
     character:
       '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。',
-    scene: '场景概念图：无人物空镜，构图与光线符合描述，细节清晰，无文字无水印。',
-    prop: '道具设定图：单品居中，中性背景，细节清晰，无文字无水印。',
+    scene: '场景概念图：无人物空镜，构图与光线符合描述，细节清晰；招牌与标识上的短文字用简体中文，其余避免出现文字；无水印。',
+    prop: '道具设定图：单品居中，中性背景，细节清晰，无水印。文书/书刊/证书/招牌类道具：标题按描述用简体中文呈现，正文文字一律虚化模糊（不可辨认具体字符），版式与材质贴近真实观感。',
   }
   // 无预设时的质感基准沿用旧行为：规避"真人图像"内容审查（Seedance 2.0 等已明确拒绝
   // 照片级真人参考图），风格化本身也提升跨镜头一致性。选了预设，这句必须让位。
@@ -889,8 +889,8 @@ export async function triggerStage(
   // 的房屋转让协议被画成 "AGREEMENT HOUSE TRANSFER"）。
   // 画面里允许出现文字的只有视觉阶段；文案阶段（剧本/分镜）不掺这条。
   const TEXT_LANGUAGE_RULE = locale === 'zh'
-    ? '画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。'
-    : 'Text rendered inside the image (titles, labels, signage, documents) must be in English.'
+    ? '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
+    : 'Text rendered inside the image (titles, labels, signage) must be in English; long-form document body text may be rendered blurred, but no other language may appear.'
   const isVisualKind = stage === 'ASSET' || stage === 'IMAGE' || stage === 'VIDEO'
   const tailTargets = isVisualKind
     ? targets.map(target => ({ ...target, prompt: `${target.prompt}\n\n${TEXT_LANGUAGE_RULE}` }))
