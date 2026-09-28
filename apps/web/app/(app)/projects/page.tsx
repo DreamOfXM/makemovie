@@ -350,16 +350,16 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        <Button asChild variant="ghost" size="sm">
+        <Button asChild variant="destructive" size="sm">
           <Link href={`/projects/${project.id}`}>
             {t('projects.open')}
             <ArrowRightIcon />
           </Link>
         </Button>
-        <Button variant="ghost" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={event => { event.stopPropagation(); onRename() }}>
+        <Button variant="destructive" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={event => { event.stopPropagation(); onRename() }}>
           <PencilIcon />
         </Button>
-        <Button variant="ghost" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={event => { event.stopPropagation(); onDelete() }}>
+        <Button variant="destructive" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={event => { event.stopPropagation(); onDelete() }}>
           <Trash2Icon className="text-muted-foreground group-hover/project:text-destructive" />
         </Button>
       </div>

@@ -227,10 +227,10 @@ export function StoryboardCard({
         </button>
         {!superseded && (
           <div className="flex shrink-0 items-center gap-1 pr-2">
-            <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.editTitle')} disabled={!canWrite} onClick={onEdit}>
+            <Button variant="outline" size="icon-sm" aria-label={t('storyboards.editTitle')} disabled={!canWrite} onClick={onEdit}>
               <PencilIcon />
             </Button>
-            <Button variant="ghost" size="icon-sm" aria-label={t('storyboards.changeStatus')} onClick={onChangeStatus}>
+            <Button variant="outline" size="icon-sm" aria-label={t('storyboards.changeStatus')} onClick={onChangeStatus}>
               <WorkflowIcon />
             </Button>
           </div>

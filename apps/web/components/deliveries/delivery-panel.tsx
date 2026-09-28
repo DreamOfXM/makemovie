@@ -415,7 +415,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           </Tooltip>
                           <GuardedButton
                             action="episode:write"
-                            variant="ghost"
+                            variant="outline"
                             size="sm"
                             disabled={accepted || acceptingId === delivery.id}
                             onClick={() => void accept(delivery)}
@@ -425,7 +425,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           </GuardedButton>
                           <GuardedButton
                             action="episode:write"
-                            variant="ghost"
+                            variant="destructive"
                             size="sm"
                             className="text-destructive hover:text-destructive"
                             disabled={accepted}
@@ -758,7 +758,7 @@ function RejectDialog({ delivery, onOpenChange, onDone }: RejectDialogProps) {
             />
           </Field>
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            <Button type="button" variant="destructive" onClick={() => onOpenChange(false)} disabled={busy}>
               {t('common.cancel')}
             </Button>
             <Button type="submit" variant="destructive" disabled={busy || !reason.trim()}>

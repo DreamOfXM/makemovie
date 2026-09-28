@@ -809,7 +809,7 @@ function AssetCard({ asset, busy, phase, runError, onApprove, onRemoveVersion, o
             )}
             {onEditDescription && asset.status !== 'APPROVED' && (
               <Button
-                variant="ghost"
+                variant="destructive"
                 size="sm"
                 className="text-destructive hover:text-destructive ml-auto"
                 disabled={busy === `del-asset-${asset.id}`}
@@ -897,7 +897,7 @@ function AssetCard({ asset, busy, phase, runError, onApprove, onRemoveVersion, o
                         <HelpHint text={t('assets.approveHint')} />
                         <Hint text={t('sources.delete')}>
                           <Button
-                            variant="ghost"
+                            variant="destructive"
                             size="sm"
                             className="text-destructive hover:text-destructive"
                             aria-label={t('sources.delete')}
