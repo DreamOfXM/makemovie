@@ -10,11 +10,14 @@ const buttonVariants = cva(
       variant: {
         default: 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90',
         destructive: 'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90',
-        // 描边与幽灵的静息态都必须「看得见是个按钮」：描边用 --control-line（两套主题
-        // 都校准过对比度），幽灵加淡填充降一档——透明纯文字会被当成文案（用户三次打回）。
-        outline: 'border border-control-line bg-card shadow-sm hover:bg-accent hover:text-accent-foreground',
+        // 描边=空心：静息态只有边框没有底色（底色表达权重，行内次操作与页签不该有，
+        // 2026-09-28 用户圈出「重跑」行钮与视图页签的灰底打回）。深色主题的可见性
+        // 由 --control-line 保证（24% 白），不靠填充。
+        outline: 'border border-control-line hover:bg-accent hover:text-accent-foreground',
         secondary: 'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/70',
-        ghost: 'border border-control-line/70 bg-muted/40 hover:bg-accent hover:text-accent-foreground',
+        // ghost 回到无框静息：它只用于页签、图标钮等安静 chrome——成组出现、
+        // 不承担关键动作（规格：标签不是按钮）。曾加的边框+淡底让页签变成一排盒子。
+        ghost: 'hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {
