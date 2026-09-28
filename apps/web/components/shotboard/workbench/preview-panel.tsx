@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
 import type { GenerationArtifact, ShotboardShot, ShotVideoCandidate } from '@/lib/api'
 import { shotDemandText, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
@@ -63,18 +63,37 @@ export function PreviewPanel({
         : shot.inflight.includes('AUDIO')
   const stageBusy = (stage: RegenStage) => requestingStage === stage || stageInflight(stage)
 
-  /** 版本胶片条的选中态：null=跟随当前生效版；换镜复位。 */
+  /** S3（r05 拍板）：一次只展开一件产物，expandAll 打破此限。正看的产物上大预览。 */
+  type ProductKey = 'frame' | 'video' | 'audio'
+  const [activeProduct, setActiveProduct] = useState<ProductKey>('video')
+  const [expandAll, setExpandAll] = useState(false)
   const [activeVersion, setActiveVersion] = useState<number | null>(null)
   const [choosing, setChoosing] = useState(false)
-  useEffect(() => { setActiveVersion(null) }, [shot.id])
-  const candidates = [...shot.videoCandidates].sort((a, b) => a.version - b.version)
-  const activeCandidate = candidates.find(candidate => candidate.version === (activeVersion ?? shot.video?.version)) ?? candidates[candidates.length - 1] ?? null
-  const activeArtifact = activeCandidate ? candidateToArtifact(activeCandidate) : shot.video
+  useEffect(() => {
+    setActiveProduct('video')
+    setActiveVersion(null)
+    setExpandAll(false)
+  }, [shot.id])
 
-  async function choose(artifactId: string | null) {
+  const videoCands = [...shot.videoCandidates].sort((a, b) => a.version - b.version)
+  const frameCands = [...shot.frameCandidates].sort((a, b) => a.version - b.version)
+  const voiceCands = [...shot.voiceCandidates].sort((a, b) => a.version - b.version)
+  const activeCandidate = videoCands.find(candidate => candidate.version === (activeProduct === 'video' ? activeVersion ?? shot.video?.version : shot.video?.version)) ?? videoCands[videoCands.length - 1] ?? null
+  /** 大预览跟随正看的产物；版本点击换大预览。首帧/配音的生效版=钦定优先（API 已同口径）。 */
+  const playerArtifact =
+    activeProduct === 'frame'
+      ? (frameCands.find(c => c.version === activeVersion) ? candidateToArtifact(frameCands.find(c => c.version === activeVersion)!) : shot.firstFrame)
+      : activeProduct === 'audio'
+        ? (voiceCands.find(c => c.version === activeVersion) ? candidateToArtifact(voiceCands.find(c => c.version === activeVersion)!) : shot.voice)
+        : (activeCandidate ? candidateToArtifact(activeCandidate) : shot.video)
+  const isPlayerVideo = activeProduct === 'video'
+
+  /** 三件产物共用一套钦定端点；清空即回自动取最新。 */
+  async function chooseArtifact(kind: 'video' | 'frame' | 'voice', artifactId: string | null) {
     setChoosing(true)
     try {
-      await api(`/storyboards/${shot.id}/video-selection`, { method: 'POST', body: JSON.stringify({ artifactId }) })
+      const route = kind === 'video' ? 'video-selection' : kind === 'frame' ? 'frame-selection' : 'voice-selection'
+      await api(`/storyboards/${shot.id}/${route}`, { method: 'POST', body: JSON.stringify({ artifactId }) })
       toast.success(artifactId ? t('shotboard.chosenToast') : t('shotboard.autoToast'))
       onChanged()
     } catch (error) {
@@ -100,11 +119,19 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 常驻预览：成片优先，缺片退回首帧，全缺给这一镜该听到的那句为什么。
-            有候选时播放器跟随胶片条选中的那一版（默认=当前生效版）。 */}
+        {/* 大预览跟随正看的产物（S3）：视频=原生播放；首帧=可点击放大；配音=音频条。 */}
         <div className="bg-muted/30 relative aspect-video overflow-hidden rounded-lg border">
-          {activeArtifact ? (
-            <ArtifactMedia artifact={activeArtifact} label={`#${shot.number} ${shot.title} v${activeArtifact.version}`} className="h-full max-h-none w-full" />
+          {isPlayerVideo && playerArtifact ? (
+            <ArtifactMedia artifact={playerArtifact} label={`#${shot.number} ${shot.title} v${playerArtifact.version}`} className="h-full max-h-none w-full" />
+          ) : !isPlayerVideo && playerArtifact ? (
+            activeProduct === 'frame' ? (
+              <ArtifactMedia artifact={playerArtifact} label={`${t('storyboards.firstFrame')} v${playerArtifact.version}`} className="h-full max-h-none w-full cursor-zoom-in object-cover" />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6">
+                <p className="text-muted-foreground line-clamp-2 text-center text-xs">{shot.dialogue}</p>
+                <ArtifactMedia artifact={playerArtifact} label={`${t('generations.stage.AUDIO')} v${playerArtifact.version}`} className="w-full max-w-xs" />
+              </div>
+            )
           ) : shot.firstFrame ? (
             <>
               {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。 */}
@@ -145,120 +172,204 @@ export function PreviewPanel({
           )}
         </div>
 
-        {/* 版本胶片条（r03·A 用户拍板）：横向常驻——一版也在，重跑中追加灰格脉冲。
-            格底亮线=已钦定入片，点格换预览+元数据，裁决在条下完成。 */}
-        {(candidates.length > 0 || stageBusy('VIDEO')) && (
-          <div className="space-y-1.5">
-            <p className="text-muted-foreground text-[11px] font-medium">{t('shotboard.candidates', { count: candidates.length + (stageBusy('VIDEO') ? 1 : 0) })}</p>
-            <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${Math.min(candidates.length + (stageBusy('VIDEO') ? 1 : 0), 4)}, minmax(0, 1fr))` }}>
-              {candidates.map(candidate => (
-                <button
-                  key={candidate.artifactId}
-                  type="button"
-                  onClick={() => setActiveVersion(candidate.version)}
-                  aria-pressed={candidate.version === activeVersion}
-                  title={`v${candidate.version}${candidate.qc?.score != null ? ` · ${t('workbench.qcScore', { score: candidate.qc.score })}` : ''}`}
-                  className={cn(
-                    'group relative overflow-hidden rounded-md border transition-colors',
-                    candidate.version === activeVersion ? 'border-primary' : 'border-border/60 hover:border-control-line',
-                  )}
-                >
-                  <ArtifactMedia
-                    artifact={candidateToArtifact(candidate)}
-                    label={`#${shot.number} v${candidate.version}`}
-                    interactive={false}
-                    className="aspect-video h-auto w-full border-0"
-                  />
-                  <span className="bg-background/75 absolute inset-x-0 bottom-0 flex items-center justify-between px-1 py-0.5 text-[9.5px] font-medium backdrop-blur-sm">
-                    v{candidate.version}
-                    {candidate.selected && <span className="text-success-ink">{t('shotboard.candidateChosen')}</span>}
-                  </span>
-                  {candidate.selected && <span className="bg-primary absolute inset-x-0 bottom-0 h-0.5" />}
-                </button>
-              ))}
-              {stageBusy('VIDEO') && (
-                <span className="border-primary/40 text-primary relative grid place-items-center overflow-hidden rounded-md border text-[10px]">
-                  <span className="flex items-center gap-1 py-2"><LoaderCircleIcon className="size-3 animate-spin" />{t('generations.cellGenerating')}</span>
-                </span>
-              )}
-            </div>
-            {activeCandidate && (
-              <div className="flex items-center gap-2">
-                <p className="text-subtle-foreground min-w-0 flex-1 truncate text-[11px] tabular-nums">
-                  v{activeCandidate.version}
-                  {activeCandidate.qc?.score != null && ` · ${t('workbench.qcScore', { score: activeCandidate.qc.score })}`}
-                  {` · ${formatDateTime(activeCandidate.createdAt, locale)}`}
-                </p>
-                {can('storyboard:write') && (
-                  activeCandidate.selected ? (
-                    <Button variant="ghost" size="sm" className="h-6 shrink-0 px-1.5 text-[11px]" onClick={() => void choose(null)}>
-                      {t('shotboard.autoLatest')}
-                    </Button>
-                  ) : (
-                    <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void choose(activeCandidate.artifactId)}>
-                      {t('shotboard.choose')}
-                    </Button>
-                  )
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 三个产物同级同形：首帧/视频/配音是同一镜的三件平行产物，行内动作一律
-            描边（2026-09-28 用户：一个紫色两个透明"很容易让人不理解"）。实心只留给
-            区级推进动作，不给平行产物行里的任何一件。调整要求一次填写，任一动词
-            携带提交并计入请求快照——禁止无方向盲抽。 */}
+        {/* S3 产物区（r05 拍板）：去框清单——一次只展开正看的那件；全部展开可破例。
+            展开钮=文字+方向箭头（用户：只有文字识别不到）。调整要求全局一次，随动词提交。 */}
         {canTrigger && (
-          <div className="space-y-1.5">
-            <div>
-              <input
-                type="text"
-                value={note}
-                onChange={event => setNote(event.target.value)}
-                placeholder={t('workbench.notePlaceholder')}
-                aria-label={t('workbench.noteLabel')}
-                className="border-input bg-background placeholder:text-muted-foreground focus-visible:ring-ring w-full rounded-md border px-2.5 py-1.5 text-xs"
-              />
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={note}
+              onChange={event => setNote(event.target.value)}
+              placeholder={t('workbench.notePlaceholder')}
+              aria-label={t('workbench.noteLabel')}
+              className="border-input bg-background placeholder:text-muted-foreground focus-visible:ring-ring w-full rounded-md border px-2.5 py-1.5 text-xs"
+            />
+            <div className="flex items-center justify-between">
+              <p className="text-muted-foreground text-[11px] font-medium">
+                {t('workbench.viewing', { name: activeProduct === 'frame' ? t('storyboards.firstFrame') : activeProduct === 'audio' ? t('generations.stage.AUDIO') : t('storyboards.video') })}
+              </p>
+              <button
+                type="button"
+                onClick={() => setExpandAll(value => !value)}
+                className="text-primary inline-flex items-center gap-0.5 text-[11px] font-medium"
+              >
+                <ChevronDownIcon className={cn('size-3 transition-transform', expandAll && 'rotate-180')} />
+                {expandAll ? t('workbench.collapseAll') : t('workbench.expandAll')}
+              </button>
             </div>
-            <ArtifactActionRow
-              icon={<ImageIcon className="size-3.5" />}
-              label={t('storyboards.firstFrame')}
-              state={stageBusy('FIRST_FRAME') ? 'busy' : shot.firstFrame ? 'done' : 'idle'}
-              meta={shot.firstFrame ? t('workbench.hasOutput') : shot.firstFrameError ? t('workbench.lastFailed') : t('workbench.notGenerated')}
-              media={shot.firstFrame}
-              verb={shot.firstFrame ? t('workbench.rerunStage', { stage: t('storyboards.firstFrame') }) : t('workbench.generateStage', { stage: t('storyboards.firstFrame') })}
-              disabled={stageBusy('FIRST_FRAME')}
-              onClick={() => onRegenerate('FIRST_FRAME', note, Boolean(shot.firstFrame))}
-            />
-            <ArtifactActionRow
-              icon={<ClapperboardIcon className="size-3.5" />}
-              label={t('storyboards.video')}
-              state={stageBusy('VIDEO') ? 'busy' : shot.video ? 'done' : 'idle'}
-              meta={shot.video
-                ? `${t('workbench.hasOutput')}${shot.videoError ? ` · ${t('workbench.lastFailed')}` : ''}`
-                : shot.videoError ? t('workbench.lastFailed') : t('workbench.notGenerated')}
-              verb={shot.video ? t('workbench.rerunStage', { stage: t('storyboards.video') }) : t('workbench.generateStage', { stage: t('storyboards.video') })}
-              disabled={stageBusy('VIDEO')}
-              onClick={() => {
-                if (!shot.firstFrame) {
-                  setVideoGate(true)
-                  return
-                }
-                onRegenerate('VIDEO', note, Boolean(shot.video))
-              }}
-            />
-            {owesVoice && (
-              <ArtifactActionRow
-                icon={<MicIcon className="size-3.5" />}
-                label={t('generations.stage.AUDIO')}
-                state={stageBusy('AUDIO') ? 'busy' : voiceTrack ? 'done' : 'idle'}
-                meta={voiceTrack ? t('workbench.hasOutput') : t('workbench.notGenerated')}
-                verb={voiceTrack ? t('workbench.rerunStage', { stage: t('generations.stage.AUDIO') }) : t('workbench.generateStage', { stage: t('generations.stage.AUDIO') })}
-                disabled={stageBusy('AUDIO')}
-                onClick={() => onRegenerate('AUDIO', note, Boolean(voiceTrack))}
-              />
-            )}
+
+            {([
+              {
+                key: 'frame' as const,
+                label: t('storyboards.firstFrame'),
+                candidates: frameCands,
+                pinnedId: shot.selectedFrameArtifactId,
+                busy: stageBusy('FIRST_FRAME'),
+                hasOutput: Boolean(shot.firstFrame),
+                errorText: shot.firstFrameError ? t('workbench.lastFailed') : t('workbench.notGenerated'),
+                pickLabel: t('workbench.pickFrame'),
+                pinnedLabel: t('workbench.framePinned'),
+                rerunLabel: shot.firstFrame ? t('workbench.rerunStage', { stage: t('storyboards.firstFrame') }) : t('workbench.generateStage', { stage: t('storyboards.firstFrame') }),
+                onRerun: () => onRegenerate('FIRST_FRAME', note, Boolean(shot.firstFrame)),
+                kind: 'image' as const,
+              },
+              {
+                key: 'video' as const,
+                label: t('storyboards.video'),
+                candidates: videoCands,
+                pinnedId: shot.selectedVideoArtifactId,
+                busy: stageBusy('VIDEO'),
+                hasOutput: Boolean(shot.video),
+                errorText: shot.videoError ? t('workbench.lastFailed') : t('workbench.notGenerated'),
+                pickLabel: t('workbench.pickVideo'),
+                pinnedLabel: t('shotboard.candidateChosen'),
+                rerunLabel: shot.video ? t('workbench.rerunStage', { stage: t('storyboards.video') }) : t('workbench.generateStage', { stage: t('storyboards.video') }),
+                onRerun: () => {
+                  if (!shot.firstFrame) {
+                    setVideoGate(true)
+                    return
+                  }
+                  onRegenerate('VIDEO', note, Boolean(shot.video))
+                },
+                kind: 'image' as const,
+              },
+              {
+                key: 'audio' as const,
+                label: t('generations.stage.AUDIO'),
+                candidates: voiceCands,
+                pinnedId: shot.selectedVoiceArtifactId,
+                busy: stageBusy('AUDIO'),
+                hasOutput: Boolean(voiceTrack),
+                errorText: t('workbench.notGenerated'),
+                pickLabel: t('workbench.pickVoice'),
+                pinnedLabel: t('workbench.voicePinned'),
+                rerunLabel: voiceTrack ? t('workbench.rerunStage', { stage: t('generations.stage.AUDIO') }) : t('workbench.generateStage', { stage: t('generations.stage.AUDIO') }),
+                onRerun: () => onRegenerate('AUDIO', note, Boolean(voiceTrack)),
+                kind: 'audio' as const,
+              },
+            ]).filter(section => section.key !== 'audio' || owesVoice).map(section => {
+              const expanded = expandAll || activeProduct === section.key
+              const count = section.candidates.length + (section.busy ? 1 : 0)
+              const thumb = section.key === 'frame' ? shot.firstFrame : section.key === 'video' ? shot.video : null
+              return (
+                <div key={section.key} className={cn('pt-2', expanded && 'border-primary/35 border-t')}>
+                  {!expanded && <div className="border-line/60" />}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveProduct(section.key)
+                      setActiveVersion(null)
+                      setExpandAll(false)
+                    }}
+                    aria-expanded={expanded}
+                    className="flex w-full items-center gap-2.5 pt-2 text-left"
+                  >
+                    {section.key === 'frame' && thumb
+                      ? <ArtifactMedia artifact={thumb} label={section.label} interactive={false} className="h-9 w-9 shrink-0 border-0" />
+                      : <span className="text-muted-foreground grid size-9 shrink-0 place-items-center">
+                          {section.key === 'video' ? <ClapperboardIcon className="size-4" /> : <MicIcon className="size-4" />}
+                        </span>}
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs font-semibold">{section.label}</span>
+                      <span className="text-subtle-foreground block truncate text-[11px]">
+                        {section.hasOutput ? (section.candidates.find(c => c.artifactId === section.pinnedId) ? `✓ ${section.pinnedLabel}` : t('workbench.autoPinned')) : section.errorText}
+                      </span>
+                    </span>
+                    {count > 0 && (
+                      <span className="text-primary inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium">
+                        {t('workbench.versions', { count })}
+                        <ChevronDownIcon className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} />
+                      </span>
+                    )}
+                  </button>
+                  {expanded && (
+                    <div className="mt-2.5">
+                      {section.candidates.length === 0 && !section.busy ? (
+                        <p className="text-subtle-foreground px-1 text-[11px]">{section.hasOutput ? '' : section.errorText}</p>
+                      ) : section.kind === 'audio' ? (
+                        <div className="space-y-1">
+                          {section.candidates.map(candidate => (
+                            <div key={candidate.artifactId} className={cn('flex items-center gap-2 rounded-md px-1 py-1.5', candidate.version === (activeProduct === 'audio' ? activeVersion : null) && 'bg-accent')}>
+                              <button type="button" onClick={() => { setActiveProduct('audio'); setActiveVersion(candidate.version) }} className="text-primary size-5 shrink-0" aria-label={`v${candidate.version}`}>▶</button>
+                              <span className="min-w-0 flex-1 truncate text-[11px] tabular-nums">
+                                v{candidate.version}
+                                {candidate.durationMs !== null && ` · ${formatDuration(candidate.durationMs)}`}
+                                {` · ${formatDateTime(candidate.createdAt, locale)}`}
+                              </span>
+                              {candidate.artifactId === section.pinnedId
+                                ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span>
+                                : can('storyboard:write') && (
+                                  <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact('voice', candidate.artifactId)}>
+                                    {section.pickLabel}
+                                  </Button>
+                                )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          {section.candidates.map(candidate => (
+                            <button
+                              key={candidate.artifactId}
+                              type="button"
+                              onClick={() => { setActiveProduct(section.key); setActiveVersion(candidate.version) }}
+                              aria-pressed={activeProduct === section.key && candidate.version === activeVersion}
+                              className={cn(
+                                'relative overflow-hidden rounded-md',
+                                activeProduct === section.key && candidate.version === activeVersion ? 'outline-primary outline-2 outline-offset-[-2px]' : '',
+                                candidate.artifactId === section.pinnedId ? 'border-primary border-b-2' : '',
+                              )}
+                            >
+                              <ArtifactMedia artifact={candidateToArtifact(candidate)} label={`${section.label} v${candidate.version}`} interactive={false} className="aspect-video h-auto w-full" />
+                              <span className="bg-background/75 absolute inset-x-0 bottom-0 flex items-center justify-between px-1 py-0.5 text-[10px] font-medium backdrop-blur-sm">
+                                v{candidate.version}
+                                {candidate.qc?.score != null && <span className="text-subtle-foreground">{Math.round(candidate.qc.score * 100)}</span>}
+                                {candidate.artifactId === section.pinnedId && <span className="text-success-ink">✓ {section.pinnedLabel}</span>}
+                              </span>
+                            </button>
+                          ))}
+                          {section.busy && (
+                            <span className="border-primary/40 text-primary grid aspect-video place-items-center rounded-md border border-dashed text-[10px]">
+                              <span className="flex items-center gap-1"><LoaderCircleIcon className="size-3 animate-spin" />{t('generations.cellGenerating')}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                        {(() => {
+                          // 正看的那一版还没钦定时，「选这版」就是裁决动作本尊（S3：动词分产物——
+                          // 视频=入片、首帧=定视频起点）。配音的选这版在版本行内（要试听后选）。
+                          const active = activeProduct === section.key && activeVersion !== null
+                            ? section.candidates.find(candidate => candidate.version === activeVersion)
+                            : undefined
+                          const pickable = section.kind === 'image' && can('storyboard:write') && active && active.artifactId !== section.pinnedId
+                          return pickable ? (
+                            <Button variant="default" size="sm" className="h-7 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact(section.key === 'frame' ? 'frame' : 'video', active.artifactId)}>
+                              {section.pickLabel}
+                            </Button>
+                          ) : null
+                        })()}
+                        <Button variant="outline" size="sm" className="h-7 text-[11px]" disabled={section.busy} onClick={section.onRerun}>
+                          <RotateCcwIcon className="size-3" />
+                          {section.rerunLabel}
+                        </Button>
+                        {section.key === 'video' && (shot.video || shot.videoCandidates.length > 0) && (
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => setReview({ version: null })}>
+                            <Maximize2Icon className="size-3" />
+                            {t('workbench.zoom')}
+                          </Button>
+                        )}
+                        {section.key !== 'audio' && can('storyboard:write') && (section.candidates.find(c => c.artifactId === section.pinnedId) || null) && (
+                          <Button variant="ghost" size="sm" className="h-7 px-1.5 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact(section.key === 'frame' ? 'frame' : 'video', null)}>
+                            {t('shotboard.autoLatest')}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
 

@@ -487,6 +487,16 @@ export async function usableFirstFrames(
     const shotId = artifact.task?.storyboardId
     if (shotId && !newest.has(shotId)) newest.set(shotId, artifact.id)
   }
+  // 钦定优先：人挑过的那一帧是"这一镜的画面基准"，胜过机器猜的"最新"。指针悬空
+  // （版本被删/跨镜/未过审回炉）即回退最新成功版——选择不是死锁。
+  const chosen = await db.storyboard.findMany({
+    where: { id: { in: storyboardIds }, selectedFrameArtifactId: { not: null } },
+    select: { id: true, selectedFrameArtifactId: true },
+  })
+  for (const shot of chosen) {
+    const artifactId = shot.selectedFrameArtifactId!
+    if (artifacts.some(artifact => artifact.id === artifactId)) newest.set(shot.id, artifactId)
+  }
   return newest
 }
 

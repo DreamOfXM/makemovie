@@ -627,10 +627,15 @@ export interface ShotboardShot {
   inflight: string[]
   qc: { kind: string; status: string; score: number | null }[]
   selectedVideoArtifactId: string | null
+  /** 首帧/配音的钦定版：null = 自动取最新成功版。 */
+  selectedFrameArtifactId: string | null
+  selectedVoiceArtifactId: string | null
   audioSource: ShotAudioSource | null
   importedVoice: GenerationArtifact | null
   importedAmbience: GenerationArtifact | null
   videoCandidates: ShotVideoCandidate[]
+  frameCandidates: ShotVideoCandidate[]
+  voiceCandidates: ShotVideoCandidate[]
   usage: { inputUnits: number; outputUnits: number; models: string[]; calls: number } | null
   /** 放映条与预映共用的占位裁决:钦定成片 > 成功片段 > 在产 > 仅分镜图 > 空。 */
   slot: 'chosen' | 'video' | 'running' | 'frame' | 'empty'

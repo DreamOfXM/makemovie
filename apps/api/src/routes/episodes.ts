@@ -280,6 +280,46 @@ async function findStoryboardInOrg(db: PrismaClient, storyboardId: string, organ
   return db.storyboard.findFirst({ where: { id: storyboardId, episode: { project: { organizationId } } } })
 }
 
+/** 三件产物的钦定端点共用一个身体：校验「同镜同阶段的成功任务产物」后写指针，
+ *  清空即回自动规则。audit 动作名由调用方给出，账本里三种选择可分辨。 */
+async function selectStageArtifact(
+  app: FastifyInstance,
+  request: FastifyRequest<{ Params: { storyboardId: string }; Body: { artifactId?: string | null } }>,
+  reply: FastifyReply,
+  stage: 'FIRST_FRAME' | 'AUDIO',
+  column: 'selectedFrameArtifactId' | 'selectedVoiceArtifactId',
+  action: string,
+) {
+  const auth = request.auth!
+  if (request.body?.artifactId === undefined) return reply.code(400).send({ error: 'artifactId is required, null clears the selection' })
+  const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+  if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+  if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+  const { artifactId } = request.body
+  if (artifactId !== null) {
+    const artifact = await app.db.mediaArtifact.findFirst({
+      where: { id: artifactId, organizationId: auth.organizationId, stage, task: { status: 'SUCCEEDED', stage, storyboardId: storyboard.id } },
+      select: { id: true },
+    })
+    if (!artifact) return reply.code(400).send({ error: `artifact is not a succeeded ${stage.toLowerCase()} artifact of this shot` })
+  }
+  const updated = await app.db.storyboard.update({
+    where: { id: storyboard.id },
+    data: { [column]: artifactId },
+    select: { id: true, [column]: true },
+  })
+  await recordAudit(app.db, {
+    organizationId: auth.organizationId,
+    userId: auth.userId,
+    action,
+    entityType: 'Storyboard',
+    entityId: storyboard.id,
+    payload: { artifactId },
+  })
+  return updated
+}
+
+
 // 导入音频的上限按音频本身定，不跟整本书那条 4 MB 文字天花板走：一段一分钟的
 // 配音 WAV 就超了，而全局 multipart 上限一动等于放宽每一个上传端点。
 const VOICE_IMPORT_MAX_BYTES = 32 * 1024 * 1024
@@ -603,6 +643,21 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // 首帧/配音钦定：与视频选优同一语义族。首帧指针=视频生成的条件帧，配音指针=合成
+  // 音轨；清空即回到自动取最新成功版。校验口径与 video-selection 一致（同镜同阶段
+  // 的成功任务产物才可钦定）。
+  app.post<{ Params: { storyboardId: string }; Body: { artifactId?: string | null } }>(
+    '/storyboards/:storyboardId/frame-selection',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => selectStageArtifact(app, request, reply, 'FIRST_FRAME', 'selectedFrameArtifactId', 'storyboard.select-frame'),
+  )
+
+  app.post<{ Params: { storyboardId: string }; Body: { artifactId?: string | null } }>(
+    '/storyboards/:storyboardId/voice-selection',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => selectStageArtifact(app, request, reply, 'AUDIO', 'selectedVoiceArtifactId', 'storyboard.select-voice'),
+  )
+
   // 每镜声音来源：配音 / 原声 / 两者叠加 / 导入。清空即回到镜型默认（有台词=只用
   // 配音，无台词=只用原声）——默认规则留在代码里，翻默认不必回填历史行。
   app.post<{ Params: { storyboardId: string }; Body: { audioSource?: AudioSource | null } }>(
@@ -910,27 +965,30 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       const media = await storyboardMedia(app.db, episode.id)
       const shotIds = storyboards.map(s => s.id)
 
-      // 选优门数据:每一镜全部成功视频版本(新→旧)与各自的质检结论。
+      // 选优门数据:每一镜全部成功版本(新→旧)与各自的质检结论——三件产物同一口径。
       // 「最新」只是机器的猜测,人要在多个版本之间挑,就得先看见全部候选。
-      const videoArtifacts = shotIds.length
+      const stageArtifacts = shotIds.length
         ? await app.db.mediaArtifact.findMany({
-            where: { stage: 'VIDEO', task: { status: 'SUCCEEDED', stage: 'VIDEO', storyboardId: { in: shotIds } } },
+            where: { stage: { in: ['VIDEO', 'FIRST_FRAME', 'AUDIO'] }, task: { status: 'SUCCEEDED', storyboardId: { in: shotIds } } },
             include: { task: { select: { id: true, storyboardId: true, createdAt: true } } },
           })
         : []
-      const videoQcRows = videoArtifacts.length
-        ? await app.db.qualityCheck.findMany({ where: { artifactId: { in: videoArtifacts.map(a => a.id) } }, orderBy: { id: 'asc' } })
+      const videoArtifacts = stageArtifacts.filter(artifact => artifact.stage === 'VIDEO')
+      const stageQcRows = stageArtifacts.length
+        ? await app.db.qualityCheck.findMany({ where: { artifactId: { in: stageArtifacts.map(a => a.id) } }, orderBy: { id: 'asc' } })
         : []
       const latestQcByArtifact = new Map<string, { kind: string; status: string; score: number | null }>()
-      for (const qc of videoQcRows) {
+      for (const qc of stageQcRows) {
         if (qc.artifactId) latestQcByArtifact.set(qc.artifactId, { kind: qc.kind, status: qc.status, score: qc.score })
       }
-      const artifactsById = new Map(videoArtifacts.map(artifact => [artifact.id, artifact]))
-      const candidatesByShot = new Map<string, Omit<VideoCandidateDto, 'selected'>[]>()
-      for (const artifact of videoArtifacts) {
+      const artifactsById = new Map(stageArtifacts.map(artifact => [artifact.id, artifact]))
+      const candidatesByStage = new Map<'VIDEO' | 'FIRST_FRAME' | 'AUDIO', Map<string, Omit<VideoCandidateDto, 'selected'>[]>>()
+      for (const artifact of stageArtifacts) {
         const shotId = artifact.task?.storyboardId
         if (!shotId || !artifact.task) continue
-        const list = candidatesByShot.get(shotId) ?? []
+        if (artifact.stage !== 'VIDEO' && artifact.stage !== 'FIRST_FRAME' && artifact.stage !== 'AUDIO') continue
+        const byShot = candidatesByStage.get(artifact.stage) ?? new Map<string, Omit<VideoCandidateDto, 'selected'>[]>()
+        const list = byShot.get(shotId) ?? []
         list.push({
           artifactId: artifact.id,
           taskId: artifact.task.id,
@@ -940,10 +998,13 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           createdAt: artifact.task.createdAt.toISOString(),
           qc: latestQcByArtifact.get(artifact.id) ?? null,
         })
-        candidatesByShot.set(shotId, list)
+        byShot.set(shotId, list)
+        candidatesByStage.set(artifact.stage, byShot)
       }
-      for (const list of candidatesByShot.values()) {
-        list.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.version - a.version)
+      for (const byShot of candidatesByStage.values()) {
+        for (const list of byShot.values()) {
+          list.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.version - a.version)
+        }
       }
 
       const [qcRows, assetsPending, episodeAssets, statusEvents] = await Promise.all([
@@ -1046,10 +1107,14 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         }
         const frameError = media.frameError.get(storyboard.id) ?? null
         const videoError = media.videoError.get(storyboard.id) ?? null
-        const candidates: VideoCandidateDto[] = (candidatesByShot.get(storyboard.id) ?? []).map(candidate => ({
-          ...candidate,
-          selected: candidate.artifactId === storyboard.selectedVideoArtifactId,
-        }))
+        const withSelected = (stage: 'VIDEO' | 'FIRST_FRAME' | 'AUDIO', pointer: string | null): VideoCandidateDto[] =>
+          (candidatesByStage.get(stage)?.get(storyboard.id) ?? []).map(candidate => ({
+            ...candidate,
+            selected: candidate.artifactId === pointer,
+          }))
+        const candidates = withSelected('VIDEO', storyboard.selectedVideoArtifactId)
+        const frameCandidates = withSelected('FIRST_FRAME', storyboard.selectedFrameArtifactId)
+        const voiceCandidates = withSelected('AUDIO', storyboard.selectedVoiceArtifactId)
         const attention: string[] = []
         if (storyboard.status === 'BLOCKED') attention.push('shot_blocked')
         if (frameError) attention.push('frame_failed')
@@ -1102,9 +1167,15 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           continuityOut: storyboard.continuityOut,
           status: storyboard.status,
           assets: linkedAssets,
-          firstFrame: media.firstFrame.get(storyboard.id) ?? null,
+          // 首帧/配音的生效版与视频同规则：钦定优先，无钦定取最新成功——界面上
+          // 听见/看见的必须和下游（条件帧、合成音轨）取的是同一份。
+          firstFrame: storyboard.selectedFrameArtifactId && artifactsById.has(storyboard.selectedFrameArtifactId)
+            ? toArtifactDto(artifactsById.get(storyboard.selectedFrameArtifactId)!)
+            : media.firstFrame.get(storyboard.id) ?? null,
           video: selectedArtifact ? toArtifactDto(selectedArtifact) : media.video.get(storyboard.id) ?? null,
-          voice: media.voice.get(storyboard.id) ?? null,
+          voice: storyboard.selectedVoiceArtifactId && artifactsById.has(storyboard.selectedVoiceArtifactId)
+            ? toArtifactDto(artifactsById.get(storyboard.selectedVoiceArtifactId)!)
+            : media.voice.get(storyboard.id) ?? null,
           importedVoice: media.importedVoice.get(storyboard.id) ?? null,
           importedAmbience: media.importedAmbience.get(storyboard.id) ?? null,
           audioSource: storyboard.audioSource,
@@ -1113,7 +1184,11 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           inflight: inflightStages,
           qc: qcEntries,
           selectedVideoArtifactId: storyboard.selectedVideoArtifactId,
+          selectedFrameArtifactId: storyboard.selectedFrameArtifactId,
+          selectedVoiceArtifactId: storyboard.selectedVoiceArtifactId,
           videoCandidates: candidates,
+          frameCandidates,
+          voiceCandidates,
           usage: usage ? { inputUnits: usage.inputUnits, outputUnits: usage.outputUnits, models: [...usage.models], calls: usage.calls } : null,
           slot,
           attention,

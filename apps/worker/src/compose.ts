@@ -38,7 +38,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
         where: { id: storyboardId },
         select: {
           // 环境音与声音来源正交：它决定配音底下垫什么，不决定人声从哪来。
-          dialogue: true, subtitleText: true, audioSource: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true,
+          dialogue: true, subtitleText: true, audioSource: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true, selectedVoiceArtifactId: true,
         },
       })
       const chosen = await chosenVideoArtifact(deps.db, storyboardId)
@@ -237,7 +237,7 @@ async function resolveShotAudio(
   storyboardId: string,
   workdir: string,
   index: number,
-  shot: { dialogue: string; audioSource: AudioSource | null; importedVoiceArtifactId: string | null } | null,
+  shot: { dialogue: string; audioSource: AudioSource | null; importedVoiceArtifactId: string | null; selectedVoiceArtifactId: string | null } | null,
 ): Promise<ShotAudio> {
   const dialogue = shot?.dialogue ?? ''
   const stored = shot?.audioSource ?? null
@@ -245,12 +245,16 @@ async function resolveShotAudio(
   let voiceFile: string | null = null
   let voiceArtifactId: string | null = null
   if (needsVoice) {
-    // 人声从哪来：钦定「导入音频」就只认那个文件；其余档先找本镜的 TTS 产物，
-    // 没有才退到导入件——无台词镜永远不排 TTS，它的「配音」只能来自导入。
+    // 人声从哪来：钦定「导入音频」就只认那个文件；其余档先看配音版本的人选
+    // （selectedVoiceArtifactId），没选才找本镜最新的 TTS 产物、再退到导入件——
+    // 无台词镜永远不排 TTS，它的「配音」只能来自导入。
     const imported = shot?.importedVoiceArtifactId
       ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.importedVoiceArtifactId, stage: 'AUDIO' } })
       : null
-    const artifact = stored === 'IMPORTED' ? imported : ((await latestVoiceArtifact(deps.db, storyboardId)) ?? imported)
+    const chosen = shot?.selectedVoiceArtifactId
+      ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVoiceArtifactId, stage: 'AUDIO', task: { status: 'SUCCEEDED', storyboardId } } })
+      : null
+    const artifact = stored === 'IMPORTED' ? imported : (chosen ?? (await latestVoiceArtifact(deps.db, storyboardId)) ?? imported)
     if (artifact) {
       voiceArtifactId = artifact.id
       voiceFile = path.join(workdir, `voice-${index}${path.extname(artifact.objectKey) || '.wav'}`)
