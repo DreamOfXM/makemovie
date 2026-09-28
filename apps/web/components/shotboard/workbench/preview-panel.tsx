@@ -255,7 +255,7 @@ export function PreviewPanel({
               const isActive = activeProduct === section.key
               const count = section.candidates.length + (section.busy ? 1 : 0)
               return (
-                <div key={section.key} className="border-line/60 border-t pt-1">
+                <div key={section.key} className={cn('space-y-1 rounded-lg p-1.5', isActive ? 'bg-primary/10' : 'bg-muted/25')}>
                   <button
                     type="button"
                     onClick={() => {
@@ -270,10 +270,7 @@ export function PreviewPanel({
                     }}
                     aria-expanded={expanded}
                     aria-current={isActive ? 'true' : undefined}
-                    className={cn(
-                      'flex w-full items-center gap-2.5 rounded-md px-1.5 py-2 text-left transition-colors',
-                      isActive ? 'bg-accent' : 'hover:bg-accent/50',
-                    )}
+                    className="hover:bg-accent/50 flex w-full items-center gap-2.5 rounded-md px-1.5 py-2 text-left transition-colors"
                   >
                     <span className={cn('grid size-9 shrink-0 place-items-center', isActive ? 'text-primary' : 'text-muted-foreground')}>
                       {section.key === 'frame' ? <ImageIcon className="size-4" /> : section.key === 'video' ? <ClapperboardIcon className="size-4" /> : <MicIcon className="size-4" />}
