@@ -210,7 +210,6 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
               action="generation:trigger"
               variant="default"
               size="sm"
-              className="w-full"
               disabled={busy !== null}
               onClick={() => void regenerate()}
             >
