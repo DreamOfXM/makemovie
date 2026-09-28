@@ -75,3 +75,22 @@ describe('原因表', () => {
     }
   })
 })
+
+/** 2026-09-28 事故集回放：断言用真实事故里抄来的报文原文，档位必须可分辨。
+ *  新增失败形态先到这里补一条——红条上的每档人话都对应一种用户动作。 */
+describe('事故回放：四档可分辨', () => {
+  it('内容审查（红色房产证原文）→ 改词档', () => {
+    const raw = 'dashscope/wan2.2-t2i-flash: DataInspectionFailed | Input data may contain inappropriate content. For details: see: https://help.aliyun.com'
+    expect(assetFailureCopy(zh, raw)).toBe(dictionaries.zh['failure.cause.moderation'])
+  })
+
+  it('审计失声（楼道 no parseable verdict 原文）→ 重跑档', () => {
+    expect(assetFailureCopy(zh, 'visual-audit: dashscope/qwen3-vl-flash returned no parseable verdict'))
+      .toBe(dictionaries.zh['assets.failure.auditorSilent'])
+  })
+
+  it('没过线（房屋转让协议原文）→ 改描述档并带次数', () => {
+    expect(assetFailureCopy(zh, 'visual-audit: threshold not met after 3 attempts'))
+      .toBe(dictionaries.zh['assets.failure.audit'].replace('{count}', '3'))
+  })
+})

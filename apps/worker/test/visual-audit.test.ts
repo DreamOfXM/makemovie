@@ -342,6 +342,24 @@ describe('ModelQualityChecker against a bound auditor', () => {
     })
   })
 
+  // 2026-09-28 事故集：qwen3 思考模式端到端——真实事故里审计回了 <think>…</think>+JSON，
+  // 解析失败→任务被拦。现在全链路（含 checker 层）必须把它当正常裁决读出来。
+  it('reads a qwen3 thinking-mode verdict end-to-end instead of going unjudged', async () => {
+    fetchMock.mockResolvedValue(answeredWith(
+      '<think>先核对人物身份与人数，再看服装细节。画面与指令一致，质量尚可。</think>\n{"score":0.86,"reasons":[]}',
+    ))
+    const verdict = await auditor().check(subject({}))
+    expect(verdict).toEqual({ kind: 'visual-audit', decision: 'pass', score: 0.86 })
+  })
+
+  it('reads a thinking-mode rework verdict with reasons', async () => {
+    fetchMock.mockResolvedValue(answeredWith(
+      '<think>文书正文出现了可辨认的英文单词，按最高优先级规则要扣分。{score 应该 0.55}</think>{"score":0.55,"reasons":["正文出现可读英文"]}',
+    ))
+    const verdict = await auditor().check(subject({}))
+    expect(verdict).toEqual({ kind: 'visual-audit', decision: 'rework', score: 0.55, reasons: ['正文出现可读英文'] })
+  })
+
   it('stays unjudged for a conditioned subject however the call goes wrong', async () => {
     const conditioned = subject({ referenceDataUrl: REFERENCE_DATA_URL })
 
