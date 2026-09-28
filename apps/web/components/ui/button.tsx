@@ -10,9 +10,11 @@ const buttonVariants = cva(
       variant: {
         default: 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90',
         destructive: 'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90',
-        outline: 'border bg-card shadow-sm hover:bg-accent hover:text-accent-foreground',
+        // 描边与幽灵的静息态都必须「看得见是个按钮」：描边用 --control-line（两套主题
+        // 都校准过对比度），幽灵加淡填充降一档——透明纯文字会被当成文案（用户三次打回）。
+        outline: 'border border-control-line bg-card shadow-sm hover:bg-accent hover:text-accent-foreground',
         secondary: 'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/70',
-        ghost: 'hover:bg-accent hover:text-accent-foreground',
+        ghost: 'border border-control-line/70 bg-muted/40 hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {
