@@ -40,6 +40,15 @@ const MOCK_DURATION_MS = 1_000
 // match the modality before synthesizeMockMedia can tell us the real mime type.
 const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 'mp4', r2v: 'mp4', tts: 'wav', music: 'wav' }
 
+/** 重排队任务复用同一 id，attempt 会回到 1——产物 (objectKey, version) 唯一键就撞上
+ *  上一轮留下的行，任务从此每次重试都死在同一堵墙上（2026-09-28 用户真实数据咬人：
+ *  反复失败的参考图任务即此）。版本号改按「本任务已落产物最大版 +1」分配：
+ *  重跑/QC 返工天然错开，历史产物全部保留可审计。 */
+async function nextArtifactVersion(db: PipelineDeps['db'], taskId: string): Promise<number> {
+  const last = await db.mediaArtifact.findFirst({ where: { taskId }, orderBy: { version: 'desc' }, select: { version: true } })
+  return (last?.version ?? 0) + 1
+}
+
 export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Promise<void> {
   const task = await deps.db.generationTask.findUnique({
     where: { id: payload.taskId },
@@ -186,13 +195,14 @@ async function runCandidate(
   const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
   try {
     const material = await materialize(result, capability.modality, workdir)
+    const artifactVersion = await nextArtifactVersion(deps.db, task.id)
     const objectKey = buildObjectKey({
       tenantId: task.organizationId,
       projectId: task.batch.episode.project.id,
       episodeId: task.batch.episode.id,
       stage: task.stage,
       entityId: task.id,
-      version: payload.attempt,
+      version: artifactVersion,
       extension: extensionFor(material.mimeType),
     })
     const stored = await deps.storage.put(objectKey, material.bytes, material.mimeType)
@@ -204,7 +214,7 @@ async function runCandidate(
         objectKey: stored.key,
         checksum: stored.checksum,
         mimeType: stored.mimeType,
-        version: payload.attempt,
+        version: artifactVersion,
         width: material.width,
         height: material.height,
         durationMs: material.durationMs,
@@ -384,6 +394,8 @@ async function runSegmentedStoryboard(
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
     try {
       const material = await materialize(result, capability.modality, workdir)
+      // 段产物共用任务行：max+1 对各段也天然错开（同段历史行 version 最大的那条 +1）。
+      const artifactVersion = await nextArtifactVersion(deps.db, task.id)
       const objectKey = buildObjectKey({
         tenantId: task.organizationId,
         projectId: task.batch.episode.project.id,
@@ -391,7 +403,7 @@ async function runSegmentedStoryboard(
         stage: task.stage,
         // 段号进 objectKey:同一任务同一次尝试的各段产物互不覆盖,审计能对回每一次调用。
         entityId: `${task.id}-seg${index + 1}`,
-        version: payload.attempt,
+        version: artifactVersion,
         extension: extensionFor(material.mimeType),
       })
       const stored = await deps.storage.put(objectKey, material.bytes, material.mimeType)
@@ -403,7 +415,7 @@ async function runSegmentedStoryboard(
           objectKey: stored.key,
           checksum: stored.checksum,
           mimeType: stored.mimeType,
-          version: payload.attempt,
+          version: artifactVersion,
           metadata: JSON.stringify(result),
         },
       })

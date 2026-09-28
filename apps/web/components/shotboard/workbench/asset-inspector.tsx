@@ -6,6 +6,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, ImageIcon, LoaderCircleIcon } from
 import type { Asset, AssetVersion } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
+import { assetFailureCopy } from '@/lib/failure-cause'
 import { useSession } from '@/lib/session'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -125,9 +126,13 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
         )}
         {asset.run?.status === 'FAILED' && asset.run.error && (
           <div className="border-destructive/30 bg-destructive/5 rounded-md border px-3 py-2 text-xs">
+            {/* 人话行说因去哪修（内容审查→改描述、额度→账上）；原文缩成小字留给排查。 */}
             <p className="text-destructive-ink flex items-start gap-1.5 leading-relaxed">
               <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
-              {asset.run.error}
+              {assetFailureCopy(t, asset.run.error)}
+            </p>
+            <p className="text-faint-foreground mt-1.5 break-words">
+              {t('shotboard.rawError')}: {asset.run.error}
             </p>
           </div>
         )}

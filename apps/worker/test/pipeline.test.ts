@@ -409,7 +409,7 @@ describe('asset-approval gate', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected the IMAGE stage to be refused')
     expect(result.error).toBe('generations:assetsNotApproved')
-    expect(result.reasons).toEqual(['character · 关师傅'])
+    expect(result.reasons).toEqual(['关师傅'])
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
 
     // 定稿后同一触发放行:审批不是额外步骤,它就是首帧的前置条件。
@@ -445,7 +445,7 @@ describe('asset-approval gate', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('expected the advance to stop on the asset gate')
     expect(result.error).toBe('generations:assetsNotApproved')
-    expect(result.reasons).toEqual(['character · 小满'])
+    expect(result.reasons).toEqual(['小满'])
     // seed() 自带一个 VIDEO 批次;断言的是推进没有绕过 IMAGE 去新建任何首帧批次。
     expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
