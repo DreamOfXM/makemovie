@@ -32,9 +32,14 @@ export function auditAttempts(raw: string | null | undefined): number | null {
  * 素材行红条那句人话。审计没过线要说清抽了几次（改描述重抽是唯一出路），
  * 终因要说清去哪修；原始报文由行首失败徽章的 Tooltip 兜着，排查不丢。
  */
+/** 审计失声的特征：法官没给结论（解析不出/调不动/拒答），不是内容被判不合格。
+ *  与「审了 N 次没过线」分开说——前者重跑通常就过，后者要改描述。 */
+const AUDITOR_SILENT_RE = /no parseable verdict|could not judge|call failed|reported failure/i
+
 export function assetFailureCopy(t: TranslateFn, raw: string | null): string {
   const kind = classifyFailure(raw)
   if (kind === 'audit') {
+    if (raw && AUDITOR_SILENT_RE.test(raw)) return t('assets.failure.auditorSilent')
     const count = auditAttempts(raw)
     return count === null ? t('assets.generateFailedHint') : t('assets.failure.audit', { count })
   }
