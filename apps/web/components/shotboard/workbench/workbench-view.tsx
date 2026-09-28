@@ -282,18 +282,18 @@ export function WorkbenchView({
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="ghost" size="sm" className="h-7 text-xs text-primary" onClick={onOpenFlow}>
+          <Button variant="outline" size="sm" className="h-7 text-xs text-primary" onClick={onOpenFlow}>
             {t('workbench.batches')}
             <ArrowRightIcon className="size-3" />
           </Button>
-          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setPreScreenOpen(true)}>
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setPreScreenOpen(true)}>
             <PlayIcon className="size-3.5" />
             {t('screening.preScreen')}
           </Button>
           {styleName && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <GuardedButton action="project:update" variant="ghost" size="sm" className="text-muted-foreground h-7 text-xs" onClick={onOpenSettings}>
+                <GuardedButton action="project:update" variant="outline" size="sm" className="text-muted-foreground h-7 text-xs" onClick={onOpenSettings}>
                   <PaletteIcon className="size-3.5" />
                   {styleName}
                 </GuardedButton>

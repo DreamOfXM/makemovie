@@ -12,7 +12,9 @@ const buttonVariants = cva(
         destructive: 'bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90',
         outline: 'border bg-card shadow-sm hover:bg-accent hover:text-accent-foreground',
         secondary: 'bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/70',
-        ghost: 'hover:bg-accent hover:text-accent-foreground',
+        // ghost 仍是三档里最弱的一档，但不再隐身：细边框是可见性地板
+        // （2026-09-28 用户实测：透明钮容易看不到）。
+        ghost: 'border border-border/60 hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {
