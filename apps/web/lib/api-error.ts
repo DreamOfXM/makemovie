@@ -22,9 +22,19 @@ function nameReason(reason: string, t: TranslateFn): string | null {
   return t(reason) === reason ? null : t(reason)
 }
 
+/** `no verified candidates for slot image_gen` 这类报文带变量，逐字字典收不全——
+ *  用正则接住，槽位名经 slots.* 字典转成人话；转不动就保留原文，不吞真话。 */
+const NO_CANDIDATES_RE = /^no verified candidates for slot ([a-z_]+)$/
+
 export function apiErrorMessage(error: unknown, t: TranslateFn): string {
   if (!(error instanceof ApiError)) {
     return error instanceof Error && error.message ? error.message : t('error.generic')
+  }
+  const slotMatch = NO_CANDIDATES_RE.exec(error.message)
+  if (slotMatch) {
+    const slot = slotMatch[1]
+    const label = t(`slots.${slot}`) === `slots.${slot}` ? slot : t(`slots.${slot}`)
+    return t('apiError.noCandidates', { slot: label })
   }
   if (t(error.message) === error.message) {
     if (!CODE_RE.test(error.message)) return error.message

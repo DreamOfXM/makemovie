@@ -109,7 +109,15 @@ function EpisodeWorkspace() {
   // The project's style is set on the project page; the media panel shows it so
   // what a run will look like is visible where the run is triggered.
   const [stylePresetId, setStylePresetId] = useState<string | null>(null)
+  const [styleName, setStyleName] = useState<string | null>(null)
   const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
+  // 风格是项目级事实：徽章只读展示名字，变更仍走配置弹窗。
+  useEffect(() => {
+    void api<{ styles: { id: string; name: string }[] }>('/styles?limit=200')
+      .then(list => setStyleName(list.styles.find(item => item.id === stylePresetId)?.name ?? null))
+      .catch(() => setStyleName(null))
+  }, [stylePresetId])
+
   const loadProjectStyle = useCallback(() => {
     api<Project[]>('/projects')
       .then(list => setStylePresetId(list.find(item => item.id === projectId)?.stylePresetId ?? null))
@@ -391,6 +399,7 @@ function EpisodeWorkspace() {
           }}
           onOpenFlow={() => setView('flow')}
           onOpenSettings={() => setStyleSettingsOpen(true)}
+          styleName={styleName}
           onCreateShot={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
           onChangeStatus={shot => {
             // StatusDialog 只读 id/status/number/title 四个字段，映射即可，不必回表拉全量。

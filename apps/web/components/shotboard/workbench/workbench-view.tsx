@@ -8,6 +8,7 @@ import {
   ClapperboardIcon,
   FilmIcon,
   PackageIcon,
+  PaletteIcon,
   PlayIcon,
   SettingsIcon,
 } from 'lucide-react'
@@ -21,6 +22,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Skeleton, TableSkeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/error-state'
@@ -44,6 +46,8 @@ interface WorkbenchViewProps {
   onOpenFlow(): void
   /** 页面持有的弹窗与动作。 */
   onOpenSettings(): void
+  /** 项目级风格名（外化只读徽章；空=没选或加载失败，不渲染）。 */
+  styleName: string | null
   onCreateShot(): void
   onChangeStatus(shot: Pick<Storyboard, 'id' | 'number' | 'title' | 'status'>): void
   onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
@@ -65,6 +69,7 @@ export function WorkbenchView({
   onReviewAssets,
   onOpenFlow,
   onOpenSettings,
+  styleName,
   onCreateShot,
   onChangeStatus,
   onBindAssets,
@@ -285,6 +290,17 @@ export function WorkbenchView({
             <PlayIcon className="size-3.5" />
             {t('screening.preScreen')}
           </Button>
+          {styleName && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <GuardedButton action="project:update" variant="ghost" size="sm" className="text-muted-foreground h-7 text-xs" onClick={onOpenSettings}>
+                  <PaletteIcon className="size-3.5" />
+                  {styleName}
+                </GuardedButton>
+              </TooltipTrigger>
+              <TooltipContent>{t('workbench.styleChipHint')}</TooltipContent>
+            </Tooltip>
+          )}
           <GuardedButton action="project:update" variant="outline" size="sm" className="h-7 text-xs" onClick={onOpenSettings}>
             <SettingsIcon className="size-3.5" />
             {t('workbench.config')}
