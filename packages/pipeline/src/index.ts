@@ -884,12 +884,23 @@ export async function triggerStage(
         }))
       : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
-  // A regeneration note is the human steering the retry — append it so the request
-  // snapshot records both the base prompt and the direction this attempt was given.
+  // 画面文字语言规则与调整要求都在风格层之后再拼（见下）：提示词尾部权重最高，
+  // 英文风格词收尾时，模型会把画面里的文字也渲染成英文（2026-09-28 实测：中文项目
+  // 的房屋转让协议被画成 "AGREEMENT HOUSE TRANSFER"）。
+  // 画面里允许出现文字的只有视觉阶段；文案阶段（剧本/分镜）不掺这条。
+  const TEXT_LANGUAGE_RULE = locale === 'zh'
+    ? '画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。'
+    : 'Text rendered inside the image (titles, labels, signage, documents) must be in English.'
+  const isVisualKind = stage === 'ASSET' || stage === 'IMAGE' || stage === 'VIDEO'
+  const tailTargets = isVisualKind
+    ? targets.map(target => ({ ...target, prompt: `${target.prompt}\n\n${TEXT_LANGUAGE_RULE}` }))
+    : targets
+  // 调整要求是人在这次重试里给的方向，压轴放在最后一条——盖过风格与规则，
+  // 快照同时记录基础提示词与本次方向，审计能对回每一次为什么这么抽。
   const note = options.promptNote?.trim()
   const notedTargets = note
-    ? targets.map(target => ({ ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }))
-    : targets
+    ? tailTargets.map(target => ({ ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }))
+    : tailTargets
   // P7 Prompt 守卫:任务排队开烧前的最后一道机器检查,只管 IMAGE/VIDEO 这两个
   // "长相全靠提示词"的阶段。修复型改写 prompt、警告型只留痕、拦截型让任务直接
   // 落 BLOCKED 不排队;所有留痕随请求快照入库——审计要能回答"这条 prompt 被动过吗、为什么"。

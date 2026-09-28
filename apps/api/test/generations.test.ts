@@ -226,7 +226,7 @@ describe('generation trigger', () => {
     // 标记即让路,快照里只有预设注入、没有守卫改写。
     const realistic = OFFICIAL_STYLES.find(style => style.id === 'realistic')!
     expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
-      input: { prompt: `SB2: Chase scene\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
+      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
       parameters: { seed: generationSeed(stored.idempotencyKey!) },
     })
 
@@ -792,7 +792,7 @@ describe('asset generation trigger', () => {
       // reproducibility question is answered from (the worker test pins how it is derived).
       const snapshot = JSON.parse(task!.requestSnapshot ?? '')
       expect(snapshot).toEqual({
-        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${getStyleAssetDirective(projectStyle)}` },
+        input: { prompt: `${seed.kind} ${seed.name}: ${seed.description}\n\n${spec}\n\n画面文字规则（最高优先级）：画面中出现的任何文字（标题、标签、招牌、文书内容）一律使用简体中文，禁止出现英文单词或字母。\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${getStyleAssetDirective(projectStyle)}` },
         parameters: { seed: expect.any(Number) },
         assetId,
       })
