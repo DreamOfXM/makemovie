@@ -259,6 +259,10 @@ export function PreviewPanel({
         />
       )}
 
+      {/* 无首帧的镜头不能直接生成视频——管线在绑定图生视频时对缺帧镜头一律拒绝
+          （generations:videoMissingFrames），旧版「仍然生成」按钮点了只会收到 409
+          报错：出口撒谎（2026-09-28 用户实测「只有个弹框、没有任何加载」）。
+          这个弹框的职责是指路：先补首帧，再用它带视频。 */}
       <AlertDialog open={videoGate} onOpenChange={setVideoGate}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -267,7 +271,7 @@ export function PreviewPanel({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => onRegenerate('VIDEO', note)}>
+            <AlertDialogAction onClick={() => onRegenerate('FIRST_FRAME', note)}>
               {t('workbench.videoGate.proceed')}
             </AlertDialogAction>
           </AlertDialogFooter>
