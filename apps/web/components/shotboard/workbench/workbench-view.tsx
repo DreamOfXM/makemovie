@@ -10,7 +10,6 @@ import {
   PackageIcon,
   PaletteIcon,
   PlayIcon,
-  SettingsIcon,
 } from 'lucide-react'
 import type { Asset, AssetsResponse, ShotboardResponse, ShotboardShot, Storyboard } from '@/lib/api'
 import { useI18n, type TranslateFn } from '@/lib/i18n'
@@ -263,21 +262,18 @@ export function WorkbenchView({
             <PlayIcon className="size-3.5" />
             {t('screening.preScreen')}
           </Button>
-          {styleName && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <GuardedButton action="project:update" variant="outline" size="sm" className="text-muted-foreground h-7 text-xs" onClick={onOpenSettings}>
-                  <PaletteIcon className="size-3.5" />
-                  {styleName}
-                </GuardedButton>
-              </TooltipTrigger>
-              <TooltipContent>{t('workbench.styleChipHint')}</TooltipContent>
-            </Tooltip>
-          )}
-          <GuardedButton action="project:update" variant="outline" size="sm" className="h-7 text-xs" onClick={onOpenSettings}>
-            <SettingsIcon className="size-3.5" />
-            {t('workbench.config')}
-          </GuardedButton>
+          {/* 风格入口只此一枚：弹窗里本来就只有风格设置，「电影感」状态钮与裸「配置」
+              曾并排同开一个弹窗（用户：电影感可以配置风格，配置也是干这个的）。
+              当前风格名本身就是入口——在哪展示就在哪可改；未设风格时也给出口。 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <GuardedButton action="project:update" variant="outline" size="sm" className="text-muted-foreground h-7 text-xs" onClick={onOpenSettings}>
+                <PaletteIcon className="size-3.5" />
+                {styleName ?? t('settings.style')}
+              </GuardedButton>
+            </TooltipTrigger>
+            <TooltipContent>{t('workbench.styleChipHint')}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
 
