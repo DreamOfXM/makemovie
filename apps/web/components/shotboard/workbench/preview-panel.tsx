@@ -63,16 +63,17 @@ export function PreviewPanel({
         : shot.inflight.includes('AUDIO')
   const stageBusy = (stage: RegenStage) => requestingStage === stage || stageInflight(stage)
 
-  /** S3（r05 拍板）：一次只展开一件产物，expandAll 打破此限。正看的产物上大预览。 */
+  /** S3（r05 拍板）：正看的产物上大预览；展开态独立成集合——可一件不展、可全展
+   *  （用户实测「全部收起收不全」与「行头无选中态」一并修正）。 */
   type ProductKey = 'frame' | 'video' | 'audio'
   const [activeProduct, setActiveProduct] = useState<ProductKey>('video')
-  const [expandAll, setExpandAll] = useState(false)
+  const [openSections, setOpenSections] = useState<Set<ProductKey>>(() => new Set(['video']))
   const [activeVersion, setActiveVersion] = useState<number | null>(null)
   const [choosing, setChoosing] = useState(false)
   useEffect(() => {
     setActiveProduct('video')
     setActiveVersion(null)
-    setExpandAll(false)
+    setOpenSections(new Set(['video']))
   }, [shot.id])
 
   const videoCands = [...shot.videoCandidates].sort((a, b) => a.version - b.version)
@@ -190,11 +191,11 @@ export function PreviewPanel({
               </p>
               <button
                 type="button"
-                onClick={() => setExpandAll(value => !value)}
+                onClick={() => setOpenSections(prev => (prev.size === 3 ? new Set() : new Set(['frame', 'video', 'audio'])))}
                 className="text-primary inline-flex items-center gap-0.5 text-[11px] font-medium"
               >
-                <ChevronDownIcon className={cn('size-3 transition-transform', expandAll && 'rotate-180')} />
-                {expandAll ? t('workbench.collapseAll') : t('workbench.expandAll')}
+                <ChevronDownIcon className="size-3 transition-transform" />
+                {openSections.size === 3 ? t('workbench.collapseAll') : t('workbench.expandAll')}
               </button>
             </div>
 
@@ -248,35 +249,43 @@ export function PreviewPanel({
                 kind: 'audio' as const,
               },
             ]).filter(section => section.key !== 'audio' || owesVoice).map(section => {
-              const expanded = expandAll || activeProduct === section.key
+              // 展开态归 openSections 管（可全收起——用户实测「全部收起收不全」：
+              // 旧实现 activeProduct 恒展开）。activeProduct 只管大预览跟谁走+行头选中态。
+              const expanded = openSections.has(section.key)
+              const isActive = activeProduct === section.key
               const count = section.candidates.length + (section.busy ? 1 : 0)
-              const thumb = section.key === 'frame' ? shot.firstFrame : section.key === 'video' ? shot.video : null
               return (
-                <div key={section.key} className={cn('pt-2', expanded && 'border-primary/35 border-t')}>
-                  {!expanded && <div className="border-line/60" />}
+                <div key={section.key} className="border-line/60 border-t pt-1">
                   <button
                     type="button"
                     onClick={() => {
+                      setOpenSections(prev => {
+                        const next = new Set(prev)
+                        if (next.has(section.key)) next.delete(section.key)
+                        else next.add(section.key)
+                        return next
+                      })
                       setActiveProduct(section.key)
                       setActiveVersion(null)
-                      setExpandAll(false)
                     }}
                     aria-expanded={expanded}
-                    className="flex w-full items-center gap-2.5 pt-2 text-left"
+                    aria-current={isActive ? 'true' : undefined}
+                    className={cn(
+                      'flex w-full items-center gap-2.5 rounded-md px-1.5 py-2 text-left transition-colors',
+                      isActive ? 'bg-accent' : 'hover:bg-accent/50',
+                    )}
                   >
-                    {section.key === 'frame' && thumb
-                      ? <ArtifactMedia artifact={thumb} label={section.label} interactive={false} className="h-9 w-9 shrink-0 border-0" />
-                      : <span className="text-muted-foreground grid size-9 shrink-0 place-items-center">
-                          {section.key === 'video' ? <ClapperboardIcon className="size-4" /> : <MicIcon className="size-4" />}
-                        </span>}
+                    <span className={cn('grid size-9 shrink-0 place-items-center', isActive ? 'text-primary' : 'text-muted-foreground')}>
+                      {section.key === 'frame' ? <ImageIcon className="size-4" /> : section.key === 'video' ? <ClapperboardIcon className="size-4" /> : <MicIcon className="size-4" />}
+                    </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block text-xs font-semibold">{section.label}</span>
+                      <span className={cn('block text-xs font-semibold', isActive && 'text-primary')}>{section.label}</span>
                       <span className="text-subtle-foreground block truncate text-[11px]">
                         {section.hasOutput ? (section.candidates.find(c => c.artifactId === section.pinnedId) ? `✓ ${section.pinnedLabel}` : t('workbench.autoPinned')) : section.errorText}
                       </span>
                     </span>
                     {count > 0 && (
-                      <span className="text-primary inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium">
+                      <span className={cn('inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium', isActive ? 'text-primary' : 'text-muted-foreground')}>
                         {t('workbench.versions', { count })}
                         <ChevronDownIcon className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} />
                       </span>
