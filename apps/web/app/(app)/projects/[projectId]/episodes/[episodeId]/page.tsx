@@ -536,15 +536,16 @@ function EpisodeWorkspace() {
             />
             <DeliveryPanel episodeId={episodeId} />
           </EpisodeFlow>
-          <ProjectSettingsDialog
-            open={styleSettingsOpen}
-            projectId={projectId}
-            currentStyleId={stylePresetId}
-            onOpenChange={setStyleSettingsOpen}
-            onStyleChanged={loadProjectStyle}
-          />
         </>
       )}
+
+      <ProjectSettingsDialog
+        open={styleSettingsOpen}
+        projectId={projectId}
+        currentStyleId={stylePresetId}
+        onOpenChange={setStyleSettingsOpen}
+        onStyleChanged={loadProjectStyle}
+      />
 
       <StoryboardDialog
         state={storyboardDialog}

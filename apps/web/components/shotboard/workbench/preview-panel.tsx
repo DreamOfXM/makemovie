@@ -11,6 +11,7 @@ import { useSession } from '@/lib/session'
 import { cn, formatDateTime, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
@@ -53,6 +54,8 @@ export function PreviewPanel({
   const [note, setNote] = useState('')
   // 放大态：null=关；version=null 落在已钦定/最新版，数字=点开的那一版。
   const [review, setReview] = useState<{ version: number | null } | null>(null)
+  // 无首帧直接生成视频的风险确认——花钱动作走 AlertDialog，不静默放行也不硬禁。
+  const [videoGate, setVideoGate] = useState(false)
 
   const stageInflight = (stage: RegenStage) =>
     stage === 'FIRST_FRAME' ? shot.inflight.includes('FIRST_FRAME')
@@ -185,7 +188,13 @@ export function PreviewPanel({
               solid
               verb={shot.video ? t('workbench.rerunStage', { stage: t('storyboards.video') }) : t('workbench.generateStage', { stage: t('storyboards.video') })}
               disabled={stageBusy('VIDEO')}
-              onClick={() => onRegenerate('VIDEO', note)}
+              onClick={() => {
+                if (!shot.firstFrame) {
+                  setVideoGate(true)
+                  return
+                }
+                onRegenerate('VIDEO', note)
+              }}
             />
             {owesVoice && (
               <ArtifactActionRow
@@ -249,6 +258,21 @@ export function PreviewPanel({
           onChanged={onChanged}
         />
       )}
+
+      <AlertDialog open={videoGate} onOpenChange={setVideoGate}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('workbench.videoGate.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('workbench.videoGate.body')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => onRegenerate('VIDEO', note)}>
+              {t('workbench.videoGate.proceed')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

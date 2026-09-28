@@ -598,7 +598,7 @@ export async function nextRunnableStage(
         where: { storyboard: { episodeId, supersededAt: null } },
         include: { asset: true },
       })
-      const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => `${link.asset.kind} · ${link.asset.name}`))]
+      const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => link.asset.name))]
       if (drafts.length > 0) return { blocked: stage, error: 'generations:assetsNotApproved', reasons: drafts }
     }
     return { stage }
@@ -751,7 +751,7 @@ export async function triggerStage(
       // 素材审批是首帧阶段的真门禁:首帧按素材的外观生成,带着草稿素材跑,
       // 用户随后改了定妆描述,首帧就白烧了。拦下并点名素材,让人先定稿;
       // 一镜也没有绑定素材时无事可拦,直接放行。
-      const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => `${link.asset.kind} · ${link.asset.name}`))]
+      const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => link.asset.name))]
       if (drafts.length > 0) return { ok: false, code: 409, error: 'generations:assetsNotApproved', reasons: drafts }
     }
     // 参考图槽位有限,选取顺序就是一致性优先级:角色(脸)→ 场景(基调)→ 道具。
@@ -1203,7 +1203,7 @@ export async function buildGenerationPlan(
       where: { storyboardId: { in: voiced.map(storyboard => storyboard.id) } },
       include: { asset: { select: { kind: true, name: true, status: true } } },
     })
-    const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => `${link.asset.kind} · ${link.asset.name}`))]
+    const drafts = [...new Set(links.filter(link => link.asset.status !== 'APPROVED').map(link => link.asset.name))]
     if (drafts.length > 0) return { ok: false, code: 409, error: 'generations:assetsNotApproved', reasons: drafts }
   }
 
@@ -1237,7 +1237,7 @@ export async function buildGenerationPlan(
     : 0
   const suffix = revision > 0 ? `:r${revision}` : ''
   const targets = perAsset
-    ? selectedAssets.map(asset => ({ id: asset.id, label: `${asset.kind} · ${asset.name}`, durationMs: null as number | null }))
+    ? selectedAssets.map(asset => ({ id: asset.id, label: asset.name, durationMs: null as number | null }))
     : perStoryboard
       ? voiced.map(storyboard => ({ id: storyboard.id, label: `#${storyboard.number} ${storyboard.title}`, durationMs: storyboard.durationMs as number | null }))
       : [{ id: episode.id, label: episode.title, durationMs: null as number | null }]

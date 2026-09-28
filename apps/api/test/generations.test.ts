@@ -2246,7 +2246,7 @@ describe('generation plan pre-flight', () => {
     const blocked = await plan(ownerToken, planEpisodeId, 'stage=IMAGE')
     expect(blocked.statusCode).toBe(409)
     expect(blocked.body.error).toBe('generations:assetsNotApproved')
-    expect(blocked.body.reasons).toEqual(['character · 阿墨'])
+    expect(blocked.body.reasons).toEqual(['阿墨'])
 
     await env.db.$transaction([
       env.db.assetVersion.updateMany({ where: { assetId }, data: { status: 'APPROVED' } }),
