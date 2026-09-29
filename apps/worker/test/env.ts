@@ -163,8 +163,10 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
               durationMs: 1000,
               description: 'a rainy night market',
               sourceExcerpt: 'excerpt',
-              continuityIn: 'in',
-              continuityOut: 'out',
+              // 留空：管线只在非空时注入「空间连续」段，金样提示词不掺无意义字样；
+              // 空间锚点的注入行为由专门用例拿真值断言。
+              continuityIn: '',
+              continuityOut: '',
             },
           }),
         )

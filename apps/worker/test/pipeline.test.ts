@@ -1711,6 +1711,24 @@ describe('first-frame conditioning', () => {
     expect(queued[0]!.candidates).toEqual([t2v])
   })
 
+  it('carries the previous shot\'s established space into the VIDEO prompt (spatial continuity)', async () => {
+    // 2026-09-29 用户实测镜2：许知意在镜1坐在长桌边，镜2独立生成的首帧却不知她在哪。
+    // 首帧/视频各自独立生成，空间事实必须由 continuityIn 文字锚进提示词。
+    const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
+    await env.db.storyboard.update({
+      where: { id: shot },
+      data: { continuityIn: '许知意仍坐在长桌东侧，笔搁在协议上，赵桂芬从画面左侧门口进入' },
+    })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    const prompt = (JSON.parse(task.requestSnapshot!) as { input: { prompt: string } }).input.prompt
+    expect(prompt).toContain('空间连续（上一镜已确立，不得与之矛盾）：许知意仍坐在长桌东侧，笔搁在协议上，赵桂芬从画面左侧门口进入')
+  })
+
   it('conditions a shot on its own approved frame and puts the conditioning model first', async () => {
     const seed = await env.seed()
     const [shot] = seed.storyboardIds as [string]

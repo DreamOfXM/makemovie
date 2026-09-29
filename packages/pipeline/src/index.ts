@@ -890,7 +890,13 @@ export async function triggerStage(
           entityId: storyboard.id,
           prompt: stage === 'AUDIO'
             ? voiceLine(locale, storyboard.speaker, storyboard.dialogue)
-            : `${storyboard.title}: ${storyboard.description}${stage === 'IMAGE' && assetContexts.has(storyboard.id) ? `\n\n画面中出现的素材：\n${assetContexts.get(storyboard.id)}` : ''}`,
+            : [
+                `${storyboard.title}: ${storyboard.description}`,
+                // 空间连续（2026-09-29 用户实测镜2）：首帧/视频独立生成，没有这段就不
+                // 知道上一镜确立了"谁在哪"——切镜换机位不换空间事实。
+                stage === 'IMAGE' || stage === 'VIDEO' ? (storyboard.continuityIn.trim() ? `空间连续（上一镜已确立，不得与之矛盾）：${storyboard.continuityIn.trim()}` : null) : null,
+                stage === 'IMAGE' && assetContexts.has(storyboard.id) ? `画面中出现的素材：\n${assetContexts.get(storyboard.id)}` : null,
+              ].filter(Boolean).join('\n\n'),
           storyboardId: storyboard.id,
           ...(stage === 'IMAGE' && assetReferences.has(storyboard.id) ? { assetReferenceArtifactIds: assetReferences.get(storyboard.id) } : {}),
         }))
