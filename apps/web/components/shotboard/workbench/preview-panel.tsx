@@ -128,8 +128,15 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 大预览跟随正看的产物（S3）：视频=原生播放；首帧=可点击放大；配音=音频条。 */}
-        <div className="bg-muted/30 relative aspect-video overflow-hidden rounded-lg border">
+        {/* 大预览（S3·紧凑 2026-09-29 用户拍板：不需要这么高）：默认 h-32 胶片窗，
+            视频点击整面进灯箱审大图；省出的高度还给下方产物区。 */}
+        <button
+          type="button"
+          className="group bg-muted/30 relative block h-32 w-full overflow-hidden rounded-lg border"
+          onClick={() => {
+            if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ version: null })
+          }}
+        >
           {isPlayerVideo && playerArtifact ? (
             <ArtifactMedia artifact={playerArtifact} label={`#${shot.number} ${shot.title} v${playerArtifact.version}`} className="h-full max-h-none w-full" />
           ) : !isPlayerVideo && playerArtifact ? (
@@ -179,7 +186,7 @@ export function PreviewPanel({
               {t('workbench.zoom')}
             </button>
           )}
-        </div>
+        </button>
 
         {/* S3 产物区（r05 拍板）：去框清单——一次只展开正看的那件；全部展开可破例。
             展开钮=文字+方向箭头（用户：只有文字识别不到）。调整要求全局一次，随动词提交。 */}
