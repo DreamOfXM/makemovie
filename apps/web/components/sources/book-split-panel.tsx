@@ -122,9 +122,6 @@ const EMPTY_MATRIX: ProjectSourceResponse = {
 
 interface BookSplitPanelProps {
   projectId: string
-  /** r07·A（用户拍板：拆集钮常驻剧集模块）：弹框受控于页面——入口钮住在剧集卡上，本体只出不占位。 */
-  open: boolean
-  onOpenChange: (open: boolean) => void
   /** Bumped by the page when episodes change outside this panel (created or
    *  deleted in the episodes module) — the matrix re-reads so its episode
    *  dropdown and allocation rows stay in sync. */
@@ -139,7 +136,7 @@ interface BookSplitPanelProps {
  * into a new episode or an existing one from the action bar). Episodes emerge
  * from grouping; the per-row dropdown is gone.
  */
-export function BookSplitPanel({ projectId, open, onOpenChange, refreshToken, onEpisodesChanged }: BookSplitPanelProps) {
+export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: BookSplitPanelProps) {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -517,7 +514,7 @@ export function BookSplitPanel({ projectId, open, onOpenChange, refreshToken, on
   }, [matrix.data.segments])
 
   return (
-    <>
+    <Card>
       {/* Hidden file input, mounted unconditionally: it was previously rendered
           only in the has-version branch, which made the empty state's upload
           button call a null ref and do nothing in EVERY browser. */}
@@ -534,20 +531,12 @@ export function BookSplitPanel({ projectId, open, onOpenChange, refreshToken, on
           if (picked.length > 0) void upload(picked)
         }}
       />
-
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader className="sr-only">
-            <DialogTitle>{t('bookSplit.title')}</DialogTitle>
-            <DialogDescription>{t('bookSplit.subtitle')}</DialogDescription>
-          </DialogHeader>
-          <Card className="border-0 shadow-none">
-      <CardHeader className="py-3.5">
-        <CardTitle className="flex items-center gap-2 text-sm">
+      <CardHeader className="border-b [.border-b]:pb-4">
+        <CardTitle className="flex items-center gap-2">
           <BookTextIcon className="text-muted-foreground size-4" />
           {t('bookSplit.title')}
         </CardTitle>
-        <CardDescription className="text-xs">{t('bookSplit.entryLine')}</CardDescription>
+        <CardDescription>{t('bookSplit.subtitle')}</CardDescription>
         {matrix.data.version && (
           <CardAction>
             <Button variant="outline" size="sm" onClick={matrix.reload} disabled={matrix.loading}>
@@ -1110,9 +1099,6 @@ export function BookSplitPanel({ projectId, open, onOpenChange, refreshToken, on
         </AlertDialogContent>
       </AlertDialog>
     </Card>
-        </DialogContent>
-      </Dialog>
-    </>
   )
 
   /** 解散一组 = 该组全部章节退回未分配(批量 PATCH)。 */

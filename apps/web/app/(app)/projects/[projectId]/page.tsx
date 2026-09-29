@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { FilmIcon, MoreHorizontalIcon, MoreVerticalIcon, PencilIcon, PlusIcon, Trash2Icon, BookTextIcon } from 'lucide-react'
+import { FilmIcon, MoreHorizontalIcon, MoreVerticalIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   ApiError,
@@ -155,8 +155,6 @@ export default function ProjectPage() {
 
   const [projectDialog, setProjectDialog] = useState<ProjectDialogState>(null)
   const [episodeDialogOpen, setEpisodeDialogOpen] = useState(false)
-  // r07·A（用户拍板：拆集钮常驻剧集模块）：弹框受控于本页，入口钮在剧集卡头。
-  const [bookSplitOpen, setBookSplitOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
   const [deleting, setDeleting] = useState(false)
   // 页面侧的建集/删集要同时反哺拆分矩阵（下拉的集列表、分配行）——面板自己
@@ -313,7 +311,7 @@ export default function ProjectPage() {
 
       {/* Intake first, result below: uploading and allocating chapters is what
           populates the episode table underneath. */}
-      <BookSplitPanel projectId={projectId} open={bookSplitOpen} onOpenChange={setBookSplitOpen} refreshToken={splitRefreshToken} onEpisodesChanged={episodes.reload} />
+      <BookSplitPanel projectId={projectId} refreshToken={splitRefreshToken} onEpisodesChanged={episodes.reload} />
 
       <Card>
         <CardHeader className="border-b [.border-b]:pb-4">
@@ -339,10 +337,6 @@ export default function ProjectPage() {
                     {t('projects.deleteAllEpisodesAction')}
                   </GuardedButton>
                 )}
-                <GuardedButton action="project:update" variant="outline" size="sm" onClick={() => setBookSplitOpen(true)}>
-                  <BookTextIcon className="size-4" />
-                  {t('bookSplit.title')}
-                </GuardedButton>
                 <GuardedButton action="episode:write" variant="outline" size="sm" onClick={() => setEpisodeDialogOpen(true)}>
                   <PlusIcon />
                   {t('projects.newEpisode')}
