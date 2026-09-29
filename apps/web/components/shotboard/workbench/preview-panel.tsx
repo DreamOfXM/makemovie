@@ -128,7 +128,7 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 大预览（S3·紧凑 2026-09-29 用户拍板：不需要这么高）：默认 h-32 胶片窗，
+        {/* 大预览（S3·紧凑 2026-09-29 用户拍板：不需要这么高）：默认 h-16 胶片窗，
             视频点击整面进灯箱审大图；省出的高度还给下方产物区。 */}
         <button
           type="button"
