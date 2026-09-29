@@ -86,7 +86,7 @@ async function episodeProgress(db: PrismaClient, projectId: string) {
 // the map. The shot comes from the task's own `storyboardId`, not from a segment of its
 // idempotency key: that key is an anti-collision token, and reading a relation out of it
 // would silently detach every shot from its media the day the key format changed.
-async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; importedVoice: Map<string, ArtifactDto>; importedAmbience: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string>; inflight: Map<string, Set<string>>; taskIds: Map<string, string[]>; landedAt: Map<string, Date>; errorAt: Map<string, Date> }> {
+async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ firstFrame: Map<string, ArtifactDto>; video: Map<string, ArtifactDto>; voice: Map<string, ArtifactDto>; importedVoice: Map<string, ArtifactDto>; importedAmbience: Map<string, ArtifactDto>; frameError: Map<string, string>; videoError: Map<string, string>; inflight: Map<string, Set<string>>; inflightAttempt: Map<string, Map<string, number>>; taskIds: Map<string, string[]>; landedAt: Map<string, Date>; errorAt: Map<string, Date> }> {
   const firstFrame = new Map<string, ArtifactDto>()
   const video = new Map<string, ArtifactDto>()
   const voice = new Map<string, ArtifactDto>()
@@ -100,6 +100,9 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
   const frameError = new Map<string, string>()
   const videoError = new Map<string, string>()
   const inflight = new Map<string, Set<string>>()
+  // 在产任务的当前抽数（RUNNING 时 task.attempts=第几抽）：界面要能显示「重抽中·第 2 抽」，
+  // 用户才看得见返工在烧第几次（2026-09-29 用户：重抽不用展示吗）。
+  const inflightAttempt = new Map<string, Map<string, number>>()
   const taskIds = new Map<string, string[]>()
   // 等待时钟的两个来源：最近一次落地的产物、最近一次仍然成立的失败。
   // 分镜本身没有时间字段（schema 里 Storyboard 无 createdAt/updatedAt），
@@ -151,6 +154,9 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
       const stages = inflight.get(task.storyboardId) ?? new Set<string>()
       stages.add(task.stage)
       inflight.set(task.storyboardId, stages)
+      const attemptsByStage = inflightAttempt.get(task.storyboardId) ?? new Map<string, number>()
+      attemptsByStage.set(task.stage, task.attempts)
+      inflightAttempt.set(task.storyboardId, attemptsByStage)
       if (task.stage === 'FIRST_FRAME') {
         frameError.delete(task.storyboardId)
         errorAt.delete(`${task.storyboardId}:FIRST_FRAME`)
@@ -177,7 +183,7 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
       if (ambienceArtifact) importedAmbience.set(pointer.id, ambienceArtifact)
     }
   }
-  return { firstFrame, video, voice, importedVoice, importedAmbience, frameError, videoError, inflight, taskIds, landedAt, errorAt }
+  return { firstFrame, video, voice, importedVoice, importedAmbience, frameError, videoError, inflight, inflightAttempt, taskIds, landedAt, errorAt }
 }
 
 interface StoryboardAssetDto {
@@ -1195,6 +1201,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           firstFrameError: frameError,
           videoError,
           inflight: inflightStages,
+          inflightAttempts: [...(media.inflightAttempt.get(storyboard.id)?.entries() ?? [])].map(([stage, attempt]) => ({ stage, attempt })),
           qc: qcEntries,
           selectedVideoArtifactId: storyboard.selectedVideoArtifactId,
           selectedFrameArtifactId: storyboard.selectedFrameArtifactId,

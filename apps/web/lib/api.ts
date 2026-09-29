@@ -631,6 +631,8 @@ export interface ShotboardShot {
   firstFrameError: string | null
   videoError: string | null
   inflight: string[]
+  /** 在产任务的当前抽数（重抽中=第几抽）。 */
+  inflightAttempts: { stage: string; attempt: number }[]
   qc: { kind: string; status: string; score: number | null }[]
   selectedVideoArtifactId: string | null
   /** 首帧/配音的钦定版：null = 自动取最新成功版。 */

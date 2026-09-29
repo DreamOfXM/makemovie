@@ -65,6 +65,11 @@ export function PreviewPanel({
       : stage === 'VIDEO' ? shot.inflight.includes('VIDEO')
         : shot.inflight.includes('AUDIO')
   const stageBusy = (stage: RegenStage) => requestingStage === stage || stageInflight(stage)
+  /** 重抽进行时要亮出「第几抽」——烧第几次用户看得见（2026-09-29 用户：重抽不用展示吗）。 */
+  const attemptWord = (stage: RegenStage): string | null => {
+    const running = shot.inflightAttempts.find(item => item.stage === stage)
+    return running && running.attempt > 1 ? t('workbench.reworking', { attempt: running.attempt }) : null
+  }
 
   /** S3（r05 拍板）：正看的产物上大预览；展开态独立成集合——可一件不展、可全展
    *  （用户实测「全部收起收不全」与「行头无选中态」一并修正）。 */
@@ -356,8 +361,8 @@ export function PreviewPanel({
                             </button>
                           ))}
                           {section.busy && (
-                            <span className="border-primary/40 text-primary grid aspect-video place-items-center rounded-md border border-dashed text-[10px]">
-                              <span className="flex items-center gap-1"><LoaderCircleIcon className="size-3 animate-spin" />{t('generations.cellGenerating')}</span>
+                            <span className="border-primary/40 text-primary grid aspect-video place-items-center rounded-md border border-dashed px-1 text-center text-[10px]">
+                              <span className="flex items-center gap-1"><LoaderCircleIcon className="size-3 animate-spin" />{attemptWord(section.key === 'frame' ? 'FIRST_FRAME' : section.key === 'video' ? 'VIDEO' : 'AUDIO') ?? t('generations.cellGenerating')}</span>
                             </span>
                           )}
                         </div>
