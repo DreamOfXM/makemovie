@@ -122,6 +122,9 @@ const EMPTY_MATRIX: ProjectSourceResponse = {
 
 interface BookSplitPanelProps {
   projectId: string
+  /** r07·A（用户拍板：拆集钮常驻剧集模块）：弹框受控于页面——入口钮住在剧集卡上，本体只出不占位。 */
+  open: boolean
+  onOpenChange: (open: boolean) => void
   /** Bumped by the page when episodes change outside this panel (created or
    *  deleted in the episodes module) — the matrix re-reads so its episode
    *  dropdown and allocation rows stay in sync. */
@@ -136,7 +139,7 @@ interface BookSplitPanelProps {
  * into a new episode or an existing one from the action bar). Episodes emerge
  * from grouping; the per-row dropdown is gone.
  */
-export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: BookSplitPanelProps) {
+export function BookSplitPanel({ projectId, open, onOpenChange, refreshToken, onEpisodesChanged }: BookSplitPanelProps) {
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -148,8 +151,6 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
   // file upload (the common path); pasting is one outline click away for
   // environments whose file picker cannot open.
   const [pasteOpen, setPasteOpen] = useState(false)
-  // r07·A（用户拍板）：拆集降为一行入口+弹框——常驻卡是项目页噪音（低频动作一两次即完）。
-  const [dialogOpen, setDialogOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const [pasting, setPasting] = useState(false)
   // Drop-target highlight: the dashed box must not merely look droppable.
@@ -533,22 +534,8 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
           if (picked.length > 0) void upload(picked)
         }}
       />
-      {/* r07·A（用户拍板）：拆集降为一行入口+弹框——低频动作不再常驻 236px 卡。 */}
-      <div className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3">
-        <div className="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg">
-          <BookTextIcon className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-semibold">{t('bookSplit.title')}</p>
-          <p className="text-muted-foreground truncate text-[11px]">
-            {matrix.data.version
-              ? t('bookSplit.entryVersion', { version: matrix.data.version.version, filename: matrix.data.version.filename })
-              : t('bookSplit.entryLine')}
-          </p>
-        </div>
-        <Button onClick={() => setDialogOpen(true)}>{t('bookSplit.openDialog')}</Button>
-      </div>
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+
+      <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader className="sr-only">
             <DialogTitle>{t('bookSplit.title')}</DialogTitle>

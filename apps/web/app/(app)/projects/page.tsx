@@ -350,13 +350,15 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        <Button asChild variant="destructive" size="sm">
+        {/* 按钮三档：打开=导航（outline）、重命名=次操作（outline）、删除=destructive。
+            此前三枚全红，把唯一的危险动作淹没在红色里（2026-09-30 用户圈出）。 */}
+        <Button asChild variant="outline" size="sm">
           <Link href={`/projects/${project.id}`}>
             {t('projects.open')}
             <ArrowRightIcon />
           </Link>
         </Button>
-        <Button variant="destructive" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={event => { event.stopPropagation(); onRename() }}>
+        <Button variant="outline" size="icon-sm" aria-label={t('projects.renameTitle')} disabled={!canUpdate} onClick={event => { event.stopPropagation(); onRename() }}>
           <PencilIcon />
         </Button>
         <Button variant="destructive" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={event => { event.stopPropagation(); onDelete() }}>
