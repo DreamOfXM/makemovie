@@ -402,6 +402,9 @@ export function PreviewPanel({
                           </Button>
                         )}
                       </div>
+                      {/* 声音来源（声道）跟着配音区走——曾沉在右栏底沿折叠线下被当成
+                          「被去掉了」（2026-09-29 用户实测），挪进它服务的产物展开区。 */}
+                      {section.key === 'audio' && <AudioSourceRow shot={shot} onChanged={onChanged} />}
                     </div>
                   )}
                 </div>
@@ -410,7 +413,7 @@ export function PreviewPanel({
           </div>
         )}
 
-        <AudioSourceRow shot={shot} onChanged={onChanged} />
+        {!canTrigger && <AudioSourceRow shot={shot} onChanged={onChanged} />}
 
         {(shot.firstFrameError || shot.videoError) && (
           <div className="border-destructive/30 bg-destructive/5 rounded-md border px-3 py-2 text-xs">

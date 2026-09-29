@@ -72,14 +72,7 @@ export function ProjectSettingsDialog({
         {/* Only the grid scrolls; the footer actions stay reachable no matter how
             many styles the organization has. */}
         <div className="min-h-0 flex-1 overflow-y-auto py-4">
-          <h3 className="text-sm font-medium mb-3">{t('settings.style')}</h3>
-          <StyleSelector
-            value={selectedStyleId}
-            onChange={setSelectedStyleId}
-            disabled={saving}
-          />
-
-          <h3 className="text-sm font-medium mt-6 mb-1">{t('settings.qcAttempts')}</h3>
+          <h3 className="text-sm font-medium mb-1">{t('settings.qcAttempts')}</h3>
           <p className="text-muted-foreground mb-2.5 text-xs leading-relaxed">{t('settings.qcAttemptsHint')}</p>
           <div className="mb-2 flex items-center gap-1.5">
             {[1, 2, 3].map(value => (
@@ -98,13 +91,19 @@ export function ProjectSettingsDialog({
               </button>
             ))}
           </div>
+          <h3 className="text-sm font-medium mb-3">{t('settings.style')}</h3>
+          <StyleSelector
+            value={selectedStyleId}
+            onChange={setSelectedStyleId}
+            disabled={saving}
+          />
         </div>
 
         <div className="flex justify-end gap-2 border-t pt-4">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             {t('common.cancel')}
           </Button>
-          <Button onClick={handleSave} disabled={saving || selectedStyleId === currentStyleId}>
+          <Button onClick={handleSave} disabled={saving || (selectedStyleId === (currentStyleId ?? undefined) && attempts === (qcMaxAttempts ?? 2))}>
             {saving ? t('common.saving') : t('common.save')}
           </Button>
         </div>
