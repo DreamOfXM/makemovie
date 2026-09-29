@@ -11,6 +11,7 @@ export interface StoryboardShot {
   speaker?: unknown
   sourceExcerpt?: unknown
   durationMs?: unknown
+  scene?: unknown
   continuityIn?: unknown
   continuityOut?: unknown
   number?: unknown

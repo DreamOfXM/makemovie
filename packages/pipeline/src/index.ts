@@ -744,6 +744,39 @@ export async function triggerStage(
   // 上面的素材上下文只服务"被点名者";画面里有人却没点名时,外观锚点由守卫接住——
   // 两者共用同一份 links 与同一个 mentioned() 判定,口径不会分叉。
   const shotGuardInfo = new Map<string, { boundAssetCount: number; characters: GuardCharacterInfo[] }>()
+  // 场次主帧的事实底座：全集聚合每场首镜（编号最小），首镜的可用钦定帧=该场主帧。
+  // usableFirstFrames 已是「钦定优先，悬空回退最新」——主帧跟人的选择走。
+  const sceneFirstByShot = new Map<string, { id: string; number: number; scene: number }>()
+  const sceneMasterFrames = new Map<string, string>()
+  const blockedByMaster = new Map<string, string>()
+  if (stage === 'IMAGE') {
+    const sceneShots = await db.storyboard.findMany({
+      where: { episodeId: episode.id, supersededAt: null, sceneNumber: { not: null } },
+      select: { id: true, sceneNumber: true, number: true },
+    })
+    const firstByScene = new Map<number, { id: string; number: number }>()
+    for (const shot of sceneShots) {
+      const current = firstByScene.get(shot.sceneNumber!)
+      if (!current || shot.number < current.number) firstByScene.set(shot.sceneNumber!, { id: shot.id, number: shot.number })
+    }
+    // 每镜指向「它所在场的首镜」——不是它自己（首镜映射写反曾让闸门永不触发）。
+    for (const shot of sceneShots) {
+      const first = firstByScene.get(shot.sceneNumber!)!
+      sceneFirstByShot.set(shot.id, { id: first.id, number: first.number, scene: shot.sceneNumber! })
+    }
+    const nonFirstSelected = selected.filter(storyboard => {
+      const first = sceneFirstByShot.get(storyboard.id)
+      return first != null && first.id !== storyboard.id
+    })
+    const firstIds = [...new Set(nonFirstSelected.map(storyboard => sceneFirstByShot.get(storyboard.id)!.id))]
+    if (firstIds.length > 0) {
+      const masters = await usableFirstFrames(db, organizationId, episode.id, firstIds)
+      for (const id of firstIds) {
+        const artifactId = masters.get(id)
+        if (artifactId) sceneMasterFrames.set(id, artifactId)
+      }
+    }
+  }
   if (stage === 'IMAGE' || stage === 'VIDEO') {
     const links = await db.storyboardAsset.findMany({
       where: { storyboardId: { in: selected.map(storyboard => storyboard.id) } },
@@ -786,26 +819,42 @@ export async function triggerStage(
           .map(link => ({ name: link.asset.name, description: link.asset.description, mentioned: mentioned(link.asset.name) })),
       })
       if (stage !== 'IMAGE') continue
-      const referenced = shotLinks
+      let referenced = shotLinks
         .filter(link => link.asset.versions[0]?.artifactId)
         .filter(link => link.asset.kind === 'scene' || mentioned(link.asset.name))
         .slice(0, 3)
+      // r06·A 场景主帧（用户拍板，首镜升格=零额外成本）：场内非首镜挂本场主帧为
+      // 第 1 参考图——桌椅位置/光线方向/人物相对方位只有画面能钉死，文字锚点不够。
+      // 主帧未就绪（首镜还没跑完）时该镜落 BLOCKED 等待，重试路径自动复活。
+      let masterLine: string | null = null
+      const sceneFirst = storyboard.sceneNumber != null ? sceneFirstByShot.get(storyboard.id) : undefined
+      if (sceneFirst && sceneFirst.id !== storyboard.id) {
+        const masterArtifactId = sceneMasterFrames.get(sceneFirst.id)
+        if (!masterArtifactId) {
+          blockedByMaster.set(storyboard.id, `等待场景 ${storyboard.sceneNumber} 主帧：先生成并钦定本场景第 1 镜（#${sceneFirst.number}）的首帧，再重试这一镜`)
+        } else {
+          masterLine = `图1＝场景主帧｜同一场景、换机位基准：环境布局、桌椅位置、光线方向与主帧一致；人物按下方空间连续与外观参考执行，不复刻主帧的景别与构图`
+          referenced = referenced.slice(0, 2)
+          assetReferences.set(storyboard.id, [masterArtifactId, ...referenced.map(link => link.asset.versions[0]!.artifactId!)])
+        }
+      }
       const rest = shotLinks.filter(link => !referenced.includes(link))
       const lines: string[] = []
-      if (referenced.length > 0) {
+      if (referenced.length > 0 || masterLine) {
         // 定妆照参考图本身是多角度排版,模型容易把排版也复刻进画面——实测出过双格/三格拼图。
         lines.push('输出要求:只生成一幅连续的单画面(电影分镜中的一帧);不要多格拼图、分屏、网格或三视图排版;参考图仅用于锁定人物与物体的外观,不要复刻参考图的排版布局。')
         lines.push('随附参考图按顺序对应以下素材,画面中人物与物体的外观必须与对应素材的外观完全一致:')
+        if (masterLine) lines.push(masterLine)
         referenced.forEach((link, index) => {
           const sheetKind = link.asset.kind === 'character' ? '角色外观参考' : '设定图'
-          lines.push(`图${index + 1}＝${sheetKind}｜${link.asset.kind}·${link.asset.name}：${link.asset.description}`)
+          lines.push(`图${index + 2}＝${sheetKind}｜${link.asset.kind}·${link.asset.name}：${link.asset.description}`)
         })
       }
       for (const link of rest) {
         lines.push(`其他出场素材｜${link.asset.kind}·${link.asset.name}：${link.asset.description}`)
       }
       if (lines.length > 0) assetContexts.set(storyboard.id, lines.join('\n'))
-      if (referenced.length > 0) assetReferences.set(storyboard.id, referenced.map(link => link.asset.versions[0]!.artifactId!))
+      if (referenced.length > 0 && !assetReferences.has(storyboard.id)) assetReferences.set(storyboard.id, referenced.map(link => link.asset.versions[0]!.artifactId!))
     }
   }
 
@@ -899,6 +948,8 @@ export async function triggerStage(
               ].filter(Boolean).join('\n\n'),
           storyboardId: storyboard.id,
           ...(stage === 'IMAGE' && assetReferences.has(storyboard.id) ? { assetReferenceArtifactIds: assetReferences.get(storyboard.id) } : {}),
+          // 场景主帧未就绪的镜不排队不烧钱，重试路径在首镜落位后复活它。
+          ...(blockedByMaster.has(storyboard.id) ? { blockedReason: blockedByMaster.get(storyboard.id)! } : {}),
         }))
       : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 

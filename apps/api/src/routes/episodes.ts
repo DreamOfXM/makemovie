@@ -218,6 +218,7 @@ interface StoryboardDto {
   number: number
   title: string
   durationMs: number
+  sceneNumber: number | null
   description: string
   dialogue: string
   speaker: string | null
@@ -256,6 +257,7 @@ function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<str
     speaker: storyboard.speaker,
     sourceExcerpt: storyboard.sourceExcerpt,
     continuityIn: storyboard.continuityIn,
+    sceneNumber: storyboard.sceneNumber,
     continuityOut: storyboard.continuityOut,
     status: storyboard.status,
     supersededAt: storyboard.supersededAt?.toISOString() ?? null,
@@ -1175,6 +1177,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           sourceExcerpt: storyboard.sourceExcerpt,
           continuityIn: storyboard.continuityIn,
           continuityOut: storyboard.continuityOut,
+          sceneNumber: storyboard.sceneNumber,
           status: storyboard.status,
           assets: linkedAssets,
           // 首帧/配音的生效版与视频同规则：钦定优先，无钦定取最新成功——界面上

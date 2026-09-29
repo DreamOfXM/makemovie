@@ -8,6 +8,7 @@ import { toWorkflowStatus } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
 import { useSession } from '@/lib/session'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn, formatDuration } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -112,6 +113,17 @@ export function ShotEditor({
         <h2 className="text-base font-semibold">
           <span className="text-muted-foreground font-mono text-sm">#{shot.number}</span> {shot.title}
         </h2>
+        {/* r06·A：场次归属——本场首镜的钦定首帧是全场的画面基准（场景主帧）。 */}
+        {shot.sceneNumber != null && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-subtle-foreground cursor-help rounded border px-1.5 py-0.5 text-[10.5px]">
+                {t('workbench.sceneChip', { number: shot.sceneNumber })}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{t('workbench.sceneChipHint')}</TooltipContent>
+          </Tooltip>
+        )}
         <StatusBadge status={status} label={t(`status.${status}`)} className="h-5 px-1.5 text-[11px]" />
         <span className="text-subtle-foreground text-xs tabular-nums">{formatDuration(shot.durationMs)}</span>
         <div className="ml-auto flex items-center gap-1">

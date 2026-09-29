@@ -1711,6 +1711,44 @@ describe('first-frame conditioning', () => {
     expect(queued[0]!.candidates).toEqual([t2v])
   })
 
+  it('anchors a later shot\'s first frame to its scene master, and blocks it until the master exists', async () => {
+    // r06·A（用户拍板）：场内非首镜的首帧挂本场主帧（=场首镜的钦定/最新可用帧）作
+    // 第 1 参考图；主帧未就绪时任务落 BLOCKED 等待——不烧钱，重试路径复活。
+    const seed = await env.seed({ storyboards: 2 })
+    const [first, second] = seed.storyboardIds as [string, string]
+    await approveScript(seed)
+    await env.db.storyboard.update({ where: { id: first }, data: { sceneNumber: 1 } })
+    await env.db.storyboard.update({ where: { id: second }, data: { sceneNumber: 1 } })
+    await bindImageSlot(seed)
+    // 无素材守卫会先拦没绑素材的镜——各绑一个已定稿场景让守卫放行，专测主帧闸门。
+    const scene = await env.db.asset.create({ data: { episodeId: seed.episodeId, kind: 'scene', name: '老城客厅', description: '九十年代客厅', status: 'APPROVED' } })
+    for (const storyboardId of [first, second]) {
+      await env.db.storyboardAsset.create({ data: { storyboardId, assetId: scene.id, role: 'scene' } })
+    }
+
+    // 主帧未就绪：第二镜 BLOCKED，第一镜照常排队。
+    const noMaster = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
+    if (!noMaster.ok) throw new Error(`IMAGE refused: ${noMaster.error}`)
+    const tasks1 = await env.db.generationTask.findMany({ where: { batchId: noMaster.batchId } })
+    expect(tasks1).toHaveLength(2)
+    const blocked = tasks1.find(task => task.storyboardId === second)!
+    expect(blocked.status).toBe('BLOCKED')
+    expect(blocked.errorSnapshot).toContain('等待场景 1 主帧')
+    expect(tasks1.find(task => task.storyboardId === first)!.status).toBe('QUEUED')
+
+    // 首镜落帧并钦定 → 重试第二镜：参考图第 1 张=主帧，提示词含「图1＝场景主帧」。
+    const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: first })
+    await env.db.storyboard.update({ where: { id: first }, data: { selectedFrameArtifactId: frame.artifactId } })
+    const retry = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE', { storyboardIds: [second] })
+    if (!retry.ok) throw new Error(`IMAGE retry refused: ${retry.error}`)
+    // 幂等重试复用旧批次——按镜头取任务，别按批次乱抓。
+    const task2 = await env.db.generationTask.findFirstOrThrow({ where: { storyboardId: second }, orderBy: { id: 'desc' } })
+    expect(task2.status).toBe('QUEUED')
+    const snapshot = JSON.parse(task2.requestSnapshot!) as { referenceArtifacts?: { artifactId: string }[]; input: { prompt: string } }
+    expect(snapshot.referenceArtifacts?.[0]?.artifactId).toBe(frame.artifactId)
+    expect(snapshot.input.prompt).toContain('图1＝场景主帧｜同一场景、换机位基准')
+  })
+
   it('carries the previous shot\'s established space into the VIDEO prompt (spatial continuity)', async () => {
     // 2026-09-29 用户实测镜2：许知意在镜1坐在长桌边，镜2独立生成的首帧却不知她在哪。
     // 首帧/视频各自独立生成，空间事实必须由 continuityIn 文字锚进提示词。

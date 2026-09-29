@@ -449,6 +449,8 @@ model Storyboard {
   selectedVideoArtifactId                                    String?
   /// 首帧钦定版：视频生成的条件帧。null = 自动取最新成功版。
   selectedFrameArtifactId                                     String?
+  /// 场次归属（r06·A）：场次首镜的钦定首帧=该场主帧。null = 旧数据，不参与。
+  sceneNumber                                                 Int?
   /// 配音钦定版：合成时的音轨。null = 自动取最新成功版。
   selectedVoiceArtifactId                                     String?
   /// 这一镜成片里听到什么。null = 按镜型默认（有台词=只用配音，无台词=只用原声）。

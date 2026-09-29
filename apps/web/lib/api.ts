@@ -304,6 +304,8 @@ export interface Storyboard {
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
+  /** 场次归属（r06·A 场景主帧）；null=旧数据。 */
+  sceneNumber: number | null
   status: DbWorkflowStatus
   /** Which of this shot's succeeded clips the human pinned; null means the selection gate is still open. */
   selectedVideoArtifactId?: string | null
@@ -619,6 +621,8 @@ export interface ShotboardShot {
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
+  /** 场次归属（r06·A 场景主帧）；null=旧数据。 */
+  sceneNumber: number | null
   status: string
   assets: { id: string; kind: string; name: string; status: string; role: string; hasVersions: boolean; reference: boolean }[]
   firstFrame: GenerationArtifact | null
