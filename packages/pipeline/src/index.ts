@@ -1398,6 +1398,12 @@ export async function advancePipeline(
     if (!next) break
     if ('blocked' in next) return { ok: false, code: 409, error: next.error, ...(next.reasons ? { reasons: next.reasons } : {}) }
     const stage = next.stage
+    // 自动推进只接力文字阶段（源→剧本→分镜，一次文本调用的量级）；首帧/视频/配音/
+    // 配乐是花钱大户，必须由人按下按钮——用户实测「只点了重新分镜，13 个首帧自己
+    // 排上队」（2026-09-29），与重抽上限同一条原则：花钱的节奏归人。
+    if (options.auto && stage !== 'SCRIPT' && stage !== 'STORYBOARD') {
+      return { ok: false, code: 409, error: 'pipeline:autoAdvanceStoppedBeforeMedia', reasons: [stage] }
+    }
     const result = await triggerStage(store, organizationId, userId, episodeId, stage)
     if (result.ok) {
       await audit(store.db, {

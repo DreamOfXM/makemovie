@@ -1555,10 +1555,10 @@ describe('auto-advance', () => {
     })
   }
 
-  it('relays a completed storyboard batch into an ASSET batch for the extracted cast', async () => {
+  it('stops auto-advance before money stages — ASSET waits for a human trigger', async () => {
+    // 2026-09-29 政策翻转（用户实测「只点了重新分镜，13 个首帧自己排上队」）：
+    // 自动推进只接力文字阶段；ASSET/首帧/视频/配音/配乐都是花钱大户，下一步由人按。
     const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
-    // ASSET resolves the same image_gen slot IMAGE does, and needs an approved script
-    // only from IMAGE onwards.
     await env.db.scriptVersion.create({ data: { episodeId: seed.episodeId, version: 1, content: 'the approved script', checksum: 'advance-script', status: 'APPROVED' } })
     await bindImageGen(seed)
 
@@ -1566,32 +1566,25 @@ describe('auto-advance', () => {
 
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('SUCCEEDED')
-
-    // The storyboard task wrote its shots and extracted the assets, which rolled the
-    // batch to COMPLETED and auto-advanced the pipeline into ASSET — the stage that
-    // used to stall until a human authored an asset by hand.
     const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId } })
     expect(boards).toHaveLength(MOCK_STORYBOARD.shots.length)
     const assets = await env.db.asset.findMany({ where: { episodeId: seed.episodeId } })
     expect(assets).toHaveLength(MOCK_STORYBOARD.assets.length)
 
+    // 分镜照写、素材照提；但 ASSET 批不自动排——一分钱不动，等按钮。
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'ASSET' } })).toBe(0)
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+    expect(await env.db.auditEvent.count({ where: { organizationId: seed.organizationId, action: 'pipeline.autoAdvance' } })).toBe(0)
+
+    // 人按下推进（非 auto）后接力照常：ASSET 批正常排队。
+    const manual = await advancePipeline({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId)
+    expect(manual.ok).toBe(true)
     const assetBatch = await env.db.generationBatch.findFirstOrThrow({ where: { episodeId: seed.episodeId, stage: 'ASSET' } })
     expect(assetBatch.plannedCount).toBe(assets.length)
-    expect(assetBatch.status).toBe('RUNNING')
-    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
-
-    const assetTasks = await env.db.generationTask.findMany({ where: { batchId: assetBatch.id } })
-    expect(assetTasks.map(task => (JSON.parse(task.requestSnapshot!) as { assetId: string }).assetId).sort()).toEqual(assets.map(asset => asset.id).sort())
-
-    // One ASSET run-task job was enqueued per extracted asset, each carrying the image candidate.
     const queued = await env.takeWaitingRunTasks()
     expect(queued).toHaveLength(assets.length)
     expect(queued.every(payload => payload.candidates[0]?.model === 'mock-image')).toBe(true)
-
-    // The relay is attributed to the system, not to a user.
-    const advance = await env.db.auditEvent.findFirst({ where: { organizationId: seed.organizationId, action: 'pipeline.autoAdvance' } })
-    expect(advance).toBeTruthy()
-    expect(advance!.entityId).toBe(seed.episodeId)
   })
 
   it('does not advance when the next stage is gated or has no candidate', async () => {
