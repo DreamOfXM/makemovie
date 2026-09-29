@@ -335,7 +335,10 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
             <SparklesIcon className="text-muted-foreground size-4" />
             {t('generations.title')}
           </CardTitle>
-          <CardDescription>{active ? t('generations.pollHint') : t('generations.mediaHint')}</CardDescription>
+          <CardDescription className="flex items-center gap-1.5">
+            {active ? t('generations.pollHint') : t('generations.mediaShort')}
+            <HelpHint text={t('generations.mediaHint')} />
+          </CardDescription>
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             {onStyleClick ? (
               <button
@@ -443,7 +446,10 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
             ) : (
               <div className="space-y-5">
                 {/* 整集级动作只剩「更多」菜单里的整集重跑;逐镜产物与重做在上方镜头卡,这里只管批次与排障。 */}
-                <p className="text-muted-foreground text-xs">{t('generations.silentByDesign')}</p>
+                <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
+                  {t('generations.silentShort')}
+                  <HelpHint text={t('generations.silentByDesign')} />
+                </span>
                 <div className="relative space-y-5 border-l pl-6">
                   {batches.slice(0, 1).map(batch => (
                     <div key={batch.id} className="relative">

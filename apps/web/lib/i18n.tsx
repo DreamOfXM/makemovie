@@ -395,6 +395,7 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.eventBreakdownReplaced': 'Revision {revision} of this shot, later replaced',
 
     'generations.title': 'Batches & Episode Runs',
+    'generations.mediaShort': 'Shot media & music — details on the ?.',
     'generations.mediaHint': 'Shot media and score only: "Trigger generation" = pick a stage, fill in shots that lack a result; "Re-run" = pick a stage, redo everything and overwrite. Script, assets and storyboards are generated in their own panels. Per-shot artifacts live on the shot cards above; the batch timeline below is for errors and logs, and episode-wide re-runs live under "More".',
     'generations.selectEpisode': 'Select an episode first.',
     'generations.stage': 'Stage',
@@ -787,6 +788,7 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'storyboards.clipFailed': 'Video clip failed',
     'generations.cellGenerating': 'Generating…',
     'generations.logs': 'Execution log',
+    'generations.silentShort': 'Clips are silent by design.',
     'generations.silentByDesign': 'Clips carrying no sound is normal — these models do not produce audio at all. Voice lines and the score are added at the Compose step.',
     'generations.logsEmpty': 'No execution entries for this task.',
     'generations.regenColumn': 'Regenerate',
@@ -2076,6 +2078,7 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
 
     'generations.title': '批次与整集运行',
     'generations.mediaHint': '这里只管镜头媒体与配乐：「触发生成」= 选一个阶段，给缺产物的镜头补跑；「重跑」= 选一个阶段，全部重来并覆盖。剧本、素材、分镜在各自面板生成。逐镜产物在上方镜头卡，下方批次时间线用来排障，整集级重活在「更多」菜单里。',
+    'generations.mediaShort': '批次与整集运行 · 说明见 ?。',
     'generations.selectEpisode': '请先选择一集。',
     'generations.stage': '阶段',
     'generations.currentStyle': '当前风格：{name}',
@@ -2468,6 +2471,7 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'generations.cellGenerating': '生成中…',
     'generations.logs': '执行日志',
     'generations.silentByDesign': '视频片段没有声音是正常的——这类模型本身不出声音。台词配音和配乐在「合成」这一步加进去。',
+    'generations.silentShort': '片段无声属正常。',
     'generations.logsEmpty': '该任务没有执行日志。',
     'generations.regenColumn': '重新生成',
     'generations.more': '更多',

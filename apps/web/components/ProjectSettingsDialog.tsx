@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { StyleSelector } from '@/components/StyleSelector'
 import { apiErrorMessage } from '@/lib/api-error'
 import { cn } from '@/lib/utils'
+import { HelpHint } from '@/components/ui/help-hint'
 
 interface ProjectSettingsDialogProps {
   open: boolean
@@ -72,8 +73,10 @@ export function ProjectSettingsDialog({
         {/* Only the grid scrolls; the footer actions stay reachable no matter how
             many styles the organization has. */}
         <div className="min-h-0 flex-1 overflow-y-auto py-4">
-          <h3 className="text-sm font-medium mb-1">{t('settings.qcAttempts')}</h3>
-          <p className="text-muted-foreground mb-2.5 text-xs leading-relaxed">{t('settings.qcAttemptsHint')}</p>
+          <h3 className="text-sm font-medium mb-2 flex items-center gap-1.5">
+            {t('settings.qcAttempts')}
+            <HelpHint text={t('settings.qcAttemptsHint')} />
+          </h3>
           <div className="mb-2 flex items-center gap-1.5">
             {[1, 2, 3].map(value => (
               <button
