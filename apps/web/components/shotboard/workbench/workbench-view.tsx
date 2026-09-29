@@ -43,6 +43,8 @@ interface WorkbenchViewProps {
   onOpenShot(shotId: string): void
   onReviewAssets(): void
   onOpenFlow(): void
+  /** 跳流程页分镜卡（AI 重新分镜按钮所在）。 */
+  onOpenStoryboardCard(): void
   /** 页面持有的弹窗与动作。 */
   onOpenSettings(): void
   /** 项目级风格名（外化只读徽章；空=没选或加载失败，不渲染）。 */
@@ -67,6 +69,7 @@ export function WorkbenchView({
   onOpenShot,
   onReviewAssets,
   onOpenFlow,
+  onOpenStoryboardCard,
   onOpenSettings,
   styleName,
   onCreateShot,
@@ -342,6 +345,7 @@ export function WorkbenchView({
                 onBindAssets={onBindAssets}
                 onChangeStatus={onChangeStatus}
                 onOpenShot={onOpenShot}
+                onOpenStoryboardCard={onOpenStoryboardCard}
                 onOpenAsset={assetId => { setTab('assets'); setFocusAssetId(assetId) }}
                 onSaved={board.reload}
               />

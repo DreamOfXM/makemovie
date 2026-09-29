@@ -426,6 +426,7 @@ function EpisodeWorkspace() {
             setFlowScrollTarget('step-assets')
           }}
           onOpenFlow={() => setView('flow')}
+          onOpenStoryboardCard={() => { setFlowScrollTarget('step-storyboards'); setView('flow') }}
           onOpenSettings={() => setStyleSettingsOpen(true)}
           styleName={styleName}
           onCreateShot={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}

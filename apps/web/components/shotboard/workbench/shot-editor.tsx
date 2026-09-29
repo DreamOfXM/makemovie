@@ -27,6 +27,8 @@ interface ShotEditorProps {
   onChangeStatus(shot: Pick<Storyboard, 'id' | 'number' | 'title' | 'status'>): void
   /** 跳去流程页这一镜的上下文。 */
   onOpenShot(shotId: string): void
+  /** 跳去流程页分镜卡（「AI 重新分镜」按钮所在）——重跑分镜链接的正确落点。 */
+  onOpenStoryboardCard(): void
   /** 编辑器点绑定 chip → 左列切到素材页签并展开。 */
   onOpenAsset(assetId: string): void
   /** 保存成功后的外层刷新（镜头列表/轮询数据）。 */
@@ -44,6 +46,7 @@ export function ShotEditor({
   onBindAssets,
   onChangeStatus,
   onOpenShot,
+  onOpenStoryboardCard,
   onOpenAsset,
   onSaved,
 }: ShotEditorProps) {
@@ -227,9 +230,8 @@ export function ShotEditor({
           <span className="text-muted-foreground mb-1 flex items-center justify-between text-xs font-medium">
             <span>{t('storyboards.description')}</span>
             {/* 整集重跑分镜的入口曾只住在流程页，用户在制作台找不到（2026-09-29）。 */}
-            <button type="button" onClick={() => onOpenShot(shot.id)} className="text-primary hover:underline inline-flex items-center gap-1 font-medium">
+            <button type="button" onClick={onOpenStoryboardCard} className="text-primary hover:underline font-medium">
               {t('storyboards.rewriteAllHint')}
-              <span aria-hidden>↗</span>
             </button>
           </span>
           <Textarea rows={3} value={form.description} disabled={!canWrite} onChange={event => field('description', event.target.value)} />
