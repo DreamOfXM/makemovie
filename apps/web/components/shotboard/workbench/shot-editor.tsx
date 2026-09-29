@@ -224,7 +224,14 @@ export function ShotEditor({
         </div>
 
         <label className="block">
-          <span className="text-muted-foreground mb-1 block text-xs font-medium">{t('storyboards.description')}</span>
+          <span className="text-muted-foreground mb-1 flex items-center justify-between text-xs font-medium">
+            <span>{t('storyboards.description')}</span>
+            {/* 整集重跑分镜的入口曾只住在流程页，用户在制作台找不到（2026-09-29）。 */}
+            <button type="button" onClick={() => onOpenShot(shot.id)} className="text-primary hover:underline inline-flex items-center gap-1 font-medium">
+              {t('storyboards.rewriteAllHint')}
+              <span aria-hidden>↗</span>
+            </button>
+          </span>
           <Textarea rows={3} value={form.description} disabled={!canWrite} onChange={event => field('description', event.target.value)} />
         </label>
 
