@@ -595,18 +595,23 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
               )
             }
           />
-          <p className="text-muted-foreground mt-2 text-center text-xs">{t('bookSplit.dropHint')}</p>
+          {/* 尾部三段说明（拖拽格式/粘贴入口/IAB 排障）收进问号——常驻时这块比上传框本体还高
+              （2026-09-29 用户：能再小一点吗）。 */}
+          <div className="text-muted-foreground mt-1 flex items-center justify-center gap-3 text-xs">
+            <span className="inline-flex items-center gap-1">
+              {t('bookSplit.dropShort')}
+              <HelpHint text={t('bookSplit.dropHint')} />
+            </span>
+            {!pasteOpen && (
+              <button type="button" onClick={() => { setPasteOpen(true); setUploadError(null) }} className="text-primary font-medium hover:underline">
+                {t('bookSplit.pasteShort')}
+              </button>
+            )}
+          </div>
           {!pasteOpen && (
-            <div className="mt-2 flex flex-col items-center gap-1">
-              <Button size="sm" variant="outline" disabled={uploading} onClick={() => { setPasteOpen(true); setUploadError(null) }}>
-                {t('bookSplit.pasteOpen')}
-              </Button>
-              {/* Embedded webviews cannot open a native file picker at all — the
-                  button above "does nothing" there. Naming that on screen saves
-                  the user from thinking the product is broken. */}
-              <p className="text-muted-foreground max-w-md text-center text-xs">
-                {t('bookSplit.pickerHint')}
-              </p>
+            <div className="text-muted-foreground mt-1 flex items-center justify-center gap-1 text-xs">
+              {t('bookSplit.pickerShort')}
+              <HelpHint text={t('bookSplit.pickerHint')} />
             </div>
           )}
           {pasteOpen && (
