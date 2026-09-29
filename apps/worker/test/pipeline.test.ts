@@ -100,7 +100,9 @@ describe('run-task', () => {
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
 
-  it('reworks a rejected artifact up to three attempts and then fails the task', async () => {
+  it('reworks a rejected artifact up to the default two attempts, then fails the task', async () => {
+    // 默认上限 2026-09-29 从 3 调到 2（每次重抽都计费，花几次由不得机器慷慨）；
+    // 项目可用 Project.qcMaxAttempts 调回 3——下一用例覆盖。
     const seed = await env.seed()
     const deps = env.deps({ qcMode: 'fail', pollIntervalMs: 10 })
 
@@ -113,21 +115,41 @@ describe('run-task', () => {
     expect(second[0]!.candidates).toEqual(seed.candidates)
     await runTask(second[0]!, deps)
 
-    const third = await env.takeWaitingRunTasks()
-    expect(third.map(payload => payload.attempt)).toEqual([3])
-    await runTask(third[0]!, deps)
-
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('FAILED')
+    expect(task.attempts).toBe(2)
+    expect(task.errorSnapshot).toBe('fake-qc: threshold not met after 2 attempts')
+
+    const checks = await env.db.qualityCheck.findMany({ where: { artifact: { taskId: seed.taskId } } })
+    expect(checks).toHaveLength(2)
+    expect(checks.every(check => check.status === 'NEEDS_REVIEW' && check.kind === 'fake-qc' && check.score === 0.1)).toBe(true)
+    expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(2)
+    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+  })
+
+  it('honors a per-project re-roll limit of 3 and carries the audit rejection into the retry prompt', async () => {
+    const seed = await env.seed()
+    // 项目把上限调回 3——上限是花钱决策，归项目主人。
+    await env.db.project.update({ where: { id: seed.projectId }, data: { qcMaxAttempts: 3 } })
+    const deps = env.deps({ qcMode: 'fail', pollIntervalMs: 10 })
+
+    await runTask(env.runPayload(seed, 1), deps)
+    const second = (await env.takeWaitingRunTasks())[0]!
+    await runTask(second, deps)
+    const third = (await env.takeWaitingRunTasks())[0]!
+    expect(third.attempt).toBe(3)
+    await runTask(third, deps)
+
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
     expect(task.attempts).toBe(3)
     expect(task.errorSnapshot).toBe('fake-qc: threshold not met after 3 attempts')
 
-    const checks = await env.db.qualityCheck.findMany({ where: { artifact: { taskId: seed.taskId } } })
-    expect(checks).toHaveLength(3)
-    expect(checks.every(check => check.status === 'NEEDS_REVIEW' && check.kind === 'fake-qc' && check.score === 0.1)).toBe(true)
-    expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(3)
-    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+    // 返工抽必须带着审计否决原因（2026-09-29 用户拍板）：同一提示词盲抽是烧钱。
+    const logs = await env.db.generationLog.findMany({ where: { taskId: seed.taskId, event: 'qc.reworkPrompt' } })
+    expect(logs.length).toBeGreaterThanOrEqual(1)
+    expect(JSON.stringify(logs[0]!.data)).toContain('below threshold')
   })
 
   it('fails with per-candidate errors when no candidate is usable', async () => {
@@ -304,18 +326,14 @@ describe('model-driven visual audit', () => {
     expect(second.map(payload => payload.attempt)).toEqual([2])
     await runTask(second[0]!, deps)
 
-    const third = await env.takeWaitingRunTasks()
-    expect(third.map(payload => payload.attempt)).toEqual([3])
-    await runTask(third[0]!, deps)
-
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
-    expect(task.attempts).toBe(3)
-    expect(task.errorSnapshot).toBe('visual-audit: threshold not met after 3 attempts')
+    expect(task.attempts).toBe(2)
+    expect(task.errorSnapshot).toBe('visual-audit: threshold not met after 2 attempts')
 
     const checks = await env.db.qualityCheck.findMany({ where: { artifact: { taskId: seed.taskId } } })
-    expect(checks).toHaveLength(3)
+    expect(checks).toHaveLength(2)
     expect(checks.every(check => check.status === 'NEEDS_REVIEW' && check.kind === 'visual-audit' && check.score === 0.2)).toBe(true)
     expect(JSON.parse(checks[0]!.report)).toMatchObject({ reasons: ['lead actor is missing from the shot'] })
     expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)

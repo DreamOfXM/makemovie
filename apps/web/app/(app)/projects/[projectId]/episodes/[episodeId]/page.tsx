@@ -110,6 +110,7 @@ function EpisodeWorkspace() {
   // what a run will look like is visible where the run is triggered.
   const [stylePresetId, setStylePresetId] = useState<string | null>(null)
   const [styleName, setStyleName] = useState<string | null>(null)
+  const [qcMaxAttempts, setQcMaxAttempts] = useState<number | null>(null)
   const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
   // 风格是项目级事实：徽章只读展示名字，变更仍走配置弹窗。
   useEffect(() => {
@@ -120,7 +121,11 @@ function EpisodeWorkspace() {
 
   const loadProjectStyle = useCallback(() => {
     api<Project[]>('/projects')
-      .then(list => setStylePresetId(list.find(item => item.id === projectId)?.stylePresetId ?? null))
+      .then(list => {
+        const row = list.find(item => item.id === projectId)
+        setStylePresetId(row?.stylePresetId ?? null)
+        setQcMaxAttempts(typeof row?.qcMaxAttempts === 'number' ? row.qcMaxAttempts : null)
+      })
       .catch(() => setStylePresetId(null))
   }, [api, projectId])
   useEffect(() => {
@@ -552,6 +557,7 @@ function EpisodeWorkspace() {
         open={styleSettingsOpen}
         projectId={projectId}
         currentStyleId={stylePresetId}
+        qcMaxAttempts={qcMaxAttempts}
         onOpenChange={setStyleSettingsOpen}
         onStyleChanged={loadProjectStyle}
       />

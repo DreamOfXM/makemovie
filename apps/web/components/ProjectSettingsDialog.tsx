@@ -9,11 +9,14 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { StyleSelector } from '@/components/StyleSelector'
 import { apiErrorMessage } from '@/lib/api-error'
+import { cn } from '@/lib/utils'
 
 interface ProjectSettingsDialogProps {
   open: boolean
   projectId: string
   currentStyleId: string | null
+  /** 审计重抽上限（1-3）；null=默认 2。花用户的钱，次数由项目主人定。 */
+  qcMaxAttempts: number | null
   onOpenChange: (open: boolean) => void
   onStyleChanged: () => void
 }
@@ -22,17 +25,20 @@ export function ProjectSettingsDialog({
   open,
   projectId,
   currentStyleId,
+  qcMaxAttempts,
   onOpenChange,
   onStyleChanged,
 }: ProjectSettingsDialogProps) {
   const { t } = useI18n()
   const { api } = useSession()
   const [selectedStyleId, setSelectedStyleId] = useState<string | undefined>(currentStyleId ?? undefined)
+  const [attempts, setAttempts] = useState<number>(qcMaxAttempts ?? 2)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     setSelectedStyleId(currentStyleId ?? undefined)
-  }, [currentStyleId])
+    setAttempts(qcMaxAttempts ?? 2)
+  }, [currentStyleId, qcMaxAttempts, open])
 
   async function handleSave() {
     setSaving(true)
@@ -40,6 +46,10 @@ export function ProjectSettingsDialog({
       await api(`/projects/${projectId}/apply-style`, {
         method: 'POST',
         body: JSON.stringify({ styleId: selectedStyleId }),
+      })
+      await api(`/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ qcMaxAttempts: attempts }),
       })
       toast.success(t('settings.saved'))
       onStyleChanged()
@@ -68,6 +78,26 @@ export function ProjectSettingsDialog({
             onChange={setSelectedStyleId}
             disabled={saving}
           />
+
+          <h3 className="text-sm font-medium mt-6 mb-1">{t('settings.qcAttempts')}</h3>
+          <p className="text-muted-foreground mb-2.5 text-xs leading-relaxed">{t('settings.qcAttemptsHint')}</p>
+          <div className="mb-2 flex items-center gap-1.5">
+            {[1, 2, 3].map(value => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={attempts === value}
+                onClick={() => setAttempts(value)}
+                disabled={saving}
+                className={cn(
+                  'h-7 rounded-md border px-3 text-xs font-medium transition-colors',
+                  attempts === value ? 'border-primary bg-primary/15 text-primary' : 'border-control-line hover:bg-accent/50',
+                )}
+              >
+                {t('settings.qcAttemptsOption', { count: value })}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex justify-end gap-2 border-t pt-4">

@@ -24,7 +24,9 @@ export type GenerationStage = (typeof generationStages)[number]
  * A second copy in either side is how the UI starts lying about what the pipeline did.
  */
 export const QC_THRESHOLD = 0.7
-export const MAX_ATTEMPTS = 3
+/** 审计不过线时的自动重抽上限默认值（项目可用 Project.qcMaxAttempts 覆盖 1-3）。
+ *  2026-09-29 从 3 调到 2：每抽一次都计一次生成费，默认花几次由不得机器慷慨。 */
+export const DEFAULT_MAX_ATTEMPTS = 2
 
 // P7 prompt guards: the chain lives in guards.ts; the console and the tests meet it here.
 export { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE } from './guards.js'

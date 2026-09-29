@@ -527,6 +527,7 @@ export default function ProjectPage() {
         open={settingsOpen}
         projectId={projectId}
         currentStyleId={project?.stylePresetId ?? null}
+        qcMaxAttempts={project?.qcMaxAttempts ?? null}
         onOpenChange={setSettingsOpen}
         onStyleChanged={projects.reload}
       />

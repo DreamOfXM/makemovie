@@ -228,6 +228,8 @@ export interface Project {
   contentLocale: ContentLocale
   /** The project's default style preset for generation. */
   stylePresetId: string | null
+  /** 审计不过线时的自动重抽上限（1-3）；null = 默认 2。 */
+  qcMaxAttempts: number | null
   createdAt: string
   updatedAt: string
   /** Episode status summary, carried so the lifecycle bar renders without a drill-down. */

@@ -263,6 +263,8 @@ model Project {
   targetDurationMs     Int?
   stylePresetId        String?
   pipelineConfigId     String?
+  /// 审计不过线时的自动重抽上限（1-3）。null = 默认 2。花用户的钱，次数由项目主人定。
+  qcMaxAttempts        Int?
   capabilityBindings   CapabilityBinding[]
   episodes             Episode[]
   organization         Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)

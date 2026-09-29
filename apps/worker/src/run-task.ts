@@ -8,7 +8,7 @@ import { buildObjectKey, extensionFor, REFERENCE_IMAGE_MAX_BYTES_10MB, synthesiz
 import {
   advancePipeline,
   buildStoryboardPrompt,
-  MAX_ATTEMPTS,
+  DEFAULT_MAX_ATTEMPTS,
   mergeStoryboardReplies,
   planStoryboardSegments,
   targetShotDurationMs,
@@ -156,6 +156,28 @@ async function runCandidate(
 
   const capability = toCapability(connection.provider, capabilityRow)
   const request = parseRequest(task.requestSnapshot, candidate.model)
+  // 返工抽带否决原因（2026-09-29 用户拍板）：同一提示词盲抽重试浪费的是用户的钱，
+  // 审计已经写明了错在哪，把原因拼进这一抽的尾部让它修正。快照仍是原始请求，
+  // 修正内容随执行日志留痕（qc.reworkPrompt）。
+  if (payload.attempt > 1 && typeof request.input.prompt === 'string' && request.input.prompt !== '') {
+    const previous = await deps.db.qualityCheck.findFirst({
+      where: { status: 'NEEDS_REVIEW', artifact: { taskId: task.id } },
+      orderBy: { id: 'desc' },
+      select: { report: true },
+    })
+    if (previous) {
+      try {
+        const parsed = JSON.parse(previous.report) as { reasons?: unknown }
+        const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.filter((r): r is string => typeof r === 'string') : []
+        if (reasons.length > 0) {
+          request.input.prompt = `${request.input.prompt}\n\n重抽修正（审计否决了上一抽，原因）：${reasons.join('；')}。这一抽必须修正以上问题，其余要求不变。`
+          await taskLog(deps.db, anchor, 'info', 'qc.reworkPrompt', 'rework attempt carries the audit rejection reasons', { reasons })
+        }
+      } catch {
+        // 旧报文不是 JSON 就不带原因，照旧重试
+      }
+    }
+  }
   const billed = pinBilledParameters(request, capability, capabilityRow.spec, payload.attempt)
   if (Object.keys(billed).length > 0) {
     await taskLog(deps.db, anchor, 'info', 'candidate.params', `${label(candidate)} billed with ${Object.entries(billed).map(([field, value]) => `${field}=${String(value)}`).join(' ')}`, billed)
@@ -277,15 +299,16 @@ async function runCandidate(
     }
 
     if (verdict.decision === 'rework') {
-      if (payload.attempt >= MAX_ATTEMPTS) {
-        await taskLog(deps.db, anchor, 'error', 'task.fail', `${verdict.kind}: quality threshold not met after ${MAX_ATTEMPTS} attempts`, { reasons: verdict.reasons })
+      const maxAttempts = task.batch.episode.project.qcMaxAttempts ?? DEFAULT_MAX_ATTEMPTS
+      if (payload.attempt >= maxAttempts) {
+        await taskLog(deps.db, anchor, 'error', 'task.fail', `${verdict.kind}: quality threshold not met after ${maxAttempts} attempts`, { reasons: verdict.reasons })
         await deps.db.generationTask.update({
           where: { id: task.id },
-          data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: threshold not met after ${MAX_ATTEMPTS} attempts`, provider: candidate.provider, model: candidate.model },
+          data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: threshold not met after ${maxAttempts} attempts`, provider: candidate.provider, model: candidate.model },
         })
         return { status: 'exhausted' }
       }
-      await taskLog(deps.db, anchor, 'warn', 'qc.rework', `quality threshold not met (score ${verdict.score}) — retrying (attempt ${payload.attempt + 1}/${MAX_ATTEMPTS})`, { reasons: verdict.reasons })
+      await taskLog(deps.db, anchor, 'warn', 'qc.rework', `quality threshold not met (score ${verdict.score}) — retrying (attempt ${payload.attempt + 1}/${maxAttempts})`, { reasons: verdict.reasons })
       await deps.enqueueJob({ ...payload, attempt: payload.attempt + 1 })
       return { status: 'rework' }
     }
@@ -467,15 +490,16 @@ async function runSegmentedStoryboard(
         return { status: 'exhausted' }
       }
       if (verdict.decision === 'rework') {
-        if (payload.attempt >= MAX_ATTEMPTS) {
-          await taskLog(deps.db, anchor, 'error', 'task.fail', `${verdict.kind}: quality threshold not met after ${MAX_ATTEMPTS} attempts`, { reasons: verdict.reasons })
+        const maxAttempts = task.batch.episode.project.qcMaxAttempts ?? DEFAULT_MAX_ATTEMPTS
+        if (payload.attempt >= maxAttempts) {
+          await taskLog(deps.db, anchor, 'error', 'task.fail', `${verdict.kind}: quality threshold not met after ${maxAttempts} attempts`, { reasons: verdict.reasons })
           await deps.db.generationTask.update({
             where: { id: task.id },
-            data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: threshold not met after ${MAX_ATTEMPTS} attempts`, provider: candidate.provider, model: candidate.model },
+            data: { status: 'FAILED', errorSnapshot: `${verdict.kind}: threshold not met after ${maxAttempts} attempts`, provider: candidate.provider, model: candidate.model },
           })
           return { status: 'exhausted' }
         }
-        await taskLog(deps.db, anchor, 'warn', 'qc.rework', `quality threshold not met (score ${verdict.score}) on segment ${index + 1} — retrying (attempt ${payload.attempt + 1}/${MAX_ATTEMPTS})`, { reasons: verdict.reasons })
+        await taskLog(deps.db, anchor, 'warn', 'qc.rework', `quality threshold not met (score ${verdict.score}) on segment ${index + 1} — retrying (attempt ${payload.attempt + 1}/${maxAttempts})`, { reasons: verdict.reasons })
         await deps.enqueueJob({ ...payload, attempt: payload.attempt + 1 })
         return { status: 'rework' }
       }
