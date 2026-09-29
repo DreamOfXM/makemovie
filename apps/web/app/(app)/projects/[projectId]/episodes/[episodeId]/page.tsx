@@ -7,6 +7,7 @@ import { apiErrorMessage } from '@/lib/api-error'
 import {
   ClapperboardIcon,
   LoaderCircleIcon,
+  SparklesIcon,
   PlusIcon,
 } from 'lucide-react'
 import {
@@ -33,6 +34,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
 import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog'
 import { SourcesPanel } from '@/components/sources/sources-panel'
@@ -112,12 +114,33 @@ function EpisodeWorkspace() {
   const [styleName, setStyleName] = useState<string | null>(null)
   const [qcMaxAttempts, setQcMaxAttempts] = useState<number | null>(null)
   const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
+  const [regenStoryboardOpen, setRegenStoryboardOpen] = useState(false)
+  const [regenStoryboardBusy, setRegenStoryboardBusy] = useState(false)
   // 风格是项目级事实：徽章只读展示名字，变更仍走配置弹窗。
   useEffect(() => {
     void api<{ styles: { id: string; name: string }[] }>('/styles?limit=200')
       .then(list => setStyleName(list.styles.find(item => item.id === stylePresetId)?.name ?? null))
       .catch(() => setStyleName(null))
   }, [stylePresetId])
+
+  // 整集重新分镜（2026-09-29 补真按钮）：写新的一版（场次/景别机位/空间锚点随新规则），
+  // 旧版与已生成媒体保留在历史；确认弹窗把代价说清才放行。
+  async function regenerateStoryboard() {
+    setRegenStoryboardBusy(true)
+    try {
+      await api(`/episodes/${episodeId}/generations`, {
+        method: 'POST',
+        body: JSON.stringify({ stage: 'STORYBOARD', regenerate: true }),
+      })
+      toast.success(t('storyboards.regenQueued'))
+      setRegenStoryboardOpen(false)
+      refreshAfterAdvance()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setRegenStoryboardBusy(false)
+    }
+  }
 
   const loadProjectStyle = useCallback(() => {
     api<Project[]>('/projects')
@@ -464,6 +487,20 @@ function EpisodeWorkspace() {
                   </div>
                 )}
                 <CardAction>
+                  {/* 重新分镜的真按钮曾根本不存在（引导条在有分镜后永不显示该动作），
+                      用户全站找不到入口（2026-09-29）。 */}
+                  {storyboards.length > 0 && (
+                    <GuardedButton
+                      action="generation:trigger"
+                      size="sm"
+                      variant="outline"
+                      disabled={breakdownGenerating}
+                      onClick={() => setRegenStoryboardOpen(true)}
+                    >
+                      {breakdownGenerating ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon className="size-4" />}
+                      {t('storyboards.regenAction')}
+                    </GuardedButton>
+                  )}
                   <GuardedButton
                     action="storyboard:write"
                     size="sm"
@@ -552,6 +589,21 @@ function EpisodeWorkspace() {
           </EpisodeFlow>
         </>
       )}
+
+      <AlertDialog open={regenStoryboardOpen} onOpenChange={setRegenStoryboardOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('storyboards.regenTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('storyboards.regenBody')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={regenStoryboardBusy}>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction disabled={regenStoryboardBusy} onClick={() => void regenerateStoryboard()}>
+              {regenStoryboardBusy ? t('common.saving') : t('storyboards.regenConfirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ProjectSettingsDialog
         open={styleSettingsOpen}
