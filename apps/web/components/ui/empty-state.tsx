@@ -13,7 +13,7 @@ function EmptyState({ icon, title, description, action, className, ...props }: E
     <div
       data-slot="empty-state"
       className={cn(
-        'flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed px-6 py-14 text-center',
+        'flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed px-6 py-6 text-center',
         className,
       )}
       {...props}
