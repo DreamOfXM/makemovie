@@ -18,6 +18,9 @@ import { ArtifactMedia } from '@/components/generations/artifact-media'
 import { AudioSourceRow } from './audio-source-row'
 import { VideoReviewLightbox } from './video-review-lightbox'
 
+/** 审计合格线，与 worker 的 QC_THRESHOLD 同值——被否红标、计费提示共用这一档。 */
+const QC_PASS_LINE = 0.7
+
 /** 右栏一枚产物行的重跑动词：缺产物=「生成」（只补缺），有产物=「重跑」（覆盖）。 */
 type RegenStage = 'FIRST_FRAME' | 'VIDEO' | 'AUDIO'
 
@@ -327,11 +330,29 @@ export function PreviewPanel({
                               )}
                             >
                               <ArtifactMedia artifact={candidateToArtifact(candidate)} label={`${section.label} v${candidate.version}`} interactive={false} className="aspect-video h-auto w-full" />
-                              <span className="bg-background/75 absolute inset-x-0 bottom-0 flex items-center justify-between px-1 py-0.5 text-[10px] font-medium backdrop-blur-sm">
-                                v{candidate.version}
-                                {candidate.qc?.score != null && <span className="text-subtle-foreground">{Math.round(candidate.qc.score * 100)}</span>}
-                                {candidate.artifactId === section.pinnedId && <span className="text-success-ink">✓ {section.pinnedLabel}</span>}
-                              </span>
+                              {(() => {
+                                // 被审计否决的尝试亮红并给原因——自动重抽花的是用户的钱，
+                                // 失败理由不许埋库（2026-09-29 用户：不合格是黑盒）。
+                                const rejected = candidate.qc?.score != null && candidate.qc.score < QC_PASS_LINE
+                                const reasons = (candidate.qc?.reasons ?? []).join('\n')
+                                return rejected ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="bg-destructive/85 text-destructive-foreground absolute inset-x-0 bottom-0 flex cursor-help items-center justify-between gap-1 px-1 py-0.5 text-[10px] font-medium">
+                                        v{candidate.version} · {Math.round(candidate.qc!.score! * 100)}
+                                        <span className="truncate">{t('workbench.rejected')}</span>
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-72 whitespace-pre-line text-left text-[11px] leading-relaxed">{reasons || t('workbench.noReasons')}</TooltipContent>
+                                  </Tooltip>
+                                ) : (
+                                  <span className="bg-background/75 absolute inset-x-0 bottom-0 flex items-center justify-between px-1 py-0.5 text-[10px] font-medium backdrop-blur-sm">
+                                    v{candidate.version}
+                                    {candidate.qc?.score != null && <span className="text-subtle-foreground">{Math.round(candidate.qc.score * 100)}</span>}
+                                    {candidate.artifactId === section.pinnedId && <span className="text-success-ink">✓ {section.pinnedLabel}</span>}
+                                  </span>
+                                )
+                              })()}
                             </button>
                           ))}
                           {section.busy && (
@@ -340,6 +361,11 @@ export function PreviewPanel({
                             </span>
                           )}
                         </div>
+                      )}
+                      {section.candidates.filter(c => c.qc?.score != null && c.qc.score < QC_PASS_LINE).length > 0 && (
+                        <p className="text-faint-foreground mt-2 px-0.5 text-[11px]">
+                          {t('workbench.reworkCost', { count: section.candidates.filter(c => c.qc?.score != null && c.qc.score < QC_PASS_LINE).length })}
+                        </p>
                       )}
                       <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         {(() => {

@@ -599,7 +599,7 @@ export interface ShotVideoCandidate {
   durationMs: number | null
   createdAt: string
   selected: boolean
-  qc: { kind: string; status: string; score: number | null } | null
+  qc: { kind: string; status: string; score: number | null; reasons?: string[] } | null
 }
 
 /** One live shot as the overview grid reads it: media, verdicts, spend and attention codes. */

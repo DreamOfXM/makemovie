@@ -197,7 +197,7 @@ interface VideoCandidateDto {
   durationMs: number | null
   createdAt: string
   selected: boolean
-  qc: { kind: string; status: string; score: number | null } | null
+  qc: { kind: string; status: string; score: number | null; reasons: string[] } | null
 }
 
 type StoryboardAssetLink = { role: string; asset: { id: string; kind: string; name: string; status: string } }
@@ -977,9 +977,19 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       const stageQcRows = stageArtifacts.length
         ? await app.db.qualityCheck.findMany({ where: { artifactId: { in: stageArtifacts.map(a => a.id) } }, orderBy: { id: 'asc' } })
         : []
-      const latestQcByArtifact = new Map<string, { kind: string; status: string; score: number | null }>()
+      // reasons 一并带出：被审计否决的尝试必须把扣分原因亮给用户——自动重抽花的是
+      // 用户的钱，失败理由埋在库里就是黑盒（2026-09-29 用户实测）。
+      const latestQcByArtifact = new Map<string, { kind: string; status: string; score: number | null; reasons: string[] }>()
       for (const qc of stageQcRows) {
-        if (qc.artifactId) latestQcByArtifact.set(qc.artifactId, { kind: qc.kind, status: qc.status, score: qc.score })
+        if (!qc.artifactId) continue
+        let reasons: string[] = []
+        try {
+          const parsed = JSON.parse(qc.report) as { reasons?: unknown }
+          if (Array.isArray(parsed.reasons)) reasons = parsed.reasons.filter((r): r is string => typeof r === 'string').slice(0, 4)
+        } catch {
+          // 报文不是 JSON（旧格式/人工记录）就没有 reasons，分数照样展示
+        }
+        latestQcByArtifact.set(qc.artifactId, { kind: qc.kind, status: qc.status, score: qc.score, reasons })
       }
       const artifactsById = new Map(stageArtifacts.map(artifact => [artifact.id, artifact]))
       const candidatesByStage = new Map<'VIDEO' | 'FIRST_FRAME' | 'AUDIO', Map<string, Omit<VideoCandidateDto, 'selected'>[]>>()
