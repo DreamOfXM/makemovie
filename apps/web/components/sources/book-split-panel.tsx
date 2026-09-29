@@ -546,25 +546,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
               : t('bookSplit.entryLine')}
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            onClick={() => {
-              setDialogOpen(true)
-              pickFile()
-            }}
-          >
-            {t('bookSplit.upload')}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setPasteOpen(true)
-              setDialogOpen(true)
-            }}
-          >
-            {t('bookSplit.pasteShort')}
-          </Button>
-        </div>
+        <Button onClick={() => setDialogOpen(true)}>{t('bookSplit.openDialog')}</Button>
       </div>
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
