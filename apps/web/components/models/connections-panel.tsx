@@ -38,6 +38,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import {
   Dialog,
   DialogContent,
@@ -161,8 +162,8 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
     <div className="space-y-4">
       <div id="connections-panel" className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
-          <h2 className="text-base font-semibold">{t('models.connections')}</h2>
-          <p className="text-muted-foreground text-sm">{t('models.connectionsHint')}</p>
+          <h2 className="text-base font-semibold flex items-center gap-1.5">{t('models.connections')}<HelpHint text={t('models.connectionsHint')} /></h2>
+
         </div>
         <GuardedButton action="providers:manage" onClick={() => setDialog({ mode: 'create' })}>
           <PlusIcon />

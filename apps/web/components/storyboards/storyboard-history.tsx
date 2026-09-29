@@ -6,6 +6,7 @@ import type { Asset, GenerationTask, Storyboard } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { formatDateTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { HelpHint } from '@/components/ui/help-hint'
 import { StoryboardCard } from '@/components/storyboards/storyboard-card'
 
 interface StoryboardHistoryProps {
@@ -81,7 +82,10 @@ export function StoryboardHistory({
 
       {open && (
         <div className="space-y-5 border-t p-3">
-          <p className="text-muted-foreground text-xs">{t('storyboards.historyHint')}</p>
+          <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+            {t('storyboards.historyShort')}
+            <HelpHint text={t('storyboards.historyHint')} />
+          </p>
           {revisions.map(revision => (
             <section key={revision.revision} className="space-y-3">
               <header className="flex flex-wrap items-center gap-2">

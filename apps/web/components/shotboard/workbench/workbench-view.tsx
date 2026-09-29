@@ -109,6 +109,11 @@ export function WorkbenchView({
 
   const shots = board.data?.shots ?? []
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 无选中时自动落第一镜：三栏布局的中右列靠选中态才有内容，空选中=两栏全高空白
+  // （2026-09-29 用户：「需要这么高的高度吗，大部分是空白区」）。
+  useEffect(() => {
+    if (selectedId === null && shots.length > 0) setSelectedId(shots[0]!.id)
+  }, [selectedId, shots])
   const [tab, setTab] = useState<'shots' | 'assets'>('shots')
   const [focusAssetId, setFocusAssetId] = useState<string | null>(null)
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)

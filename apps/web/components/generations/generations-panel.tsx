@@ -1027,7 +1027,10 @@ function EpisodeTracksCard({
             />
           )}
         </CardTitle>
-        <CardDescription>{t('generations.episodeTracksHint')}</CardDescription>
+        <CardDescription className="flex items-center gap-1.5">
+          {t('generations.episodeTracksShort')}
+          <HelpHint text={t('generations.episodeTracksHint')} />
+        </CardDescription>
         {composition === null || composition.status !== 'RUNNING' ? (
           <CardAction>
             <GuardedButton action="generation:trigger" variant="outline" size="sm" disabled={composing} onClick={onCompose}>
@@ -1107,7 +1110,10 @@ function MasterVideo({ artifact, subtitleArtifact }: { artifact: GenerationArtif
         <a href={href} download className="text-primary inline-flex items-center gap-1 text-xs underline-offset-4 hover:underline">
           {t('generations.download')}
         </a>
-        <p className="text-muted-foreground max-w-56 text-xs">{t('generations.subtitleOverlayHint')}</p>
+        <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
+          {t('generations.subtitleOverlayShort')}
+          <HelpHint text={t('generations.subtitleOverlayHint')} />
+        </span>
       </div>
     </div>
   )

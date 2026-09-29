@@ -12,6 +12,7 @@ import { useAsync, type AsyncState } from '@/lib/use-async'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   AlertDialog,
@@ -214,7 +215,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
           <div className="flex items-center gap-1.5">
-            <h2 className="text-base font-semibold">{t('models.bindings')}</h2>
+            <h2 className="text-base font-semibold flex items-center gap-1.5">{t('models.bindings')}<HelpHint text={t('models.bindingsHint')} /></h2>
             <Tooltip>
               <TooltipTrigger asChild>
                 <span tabIndex={0} className="text-muted-foreground inline-flex cursor-help">
@@ -224,7 +225,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
               <TooltipContent className="max-w-xs">{t('models.slotsHelp')}</TooltipContent>
             </Tooltip>
           </div>
-          <p className="text-muted-foreground text-sm">{t('models.bindingsHint')}</p>
+
         </div>
         <span id="bind-btn" className="inline-flex">
           <GuardedButton

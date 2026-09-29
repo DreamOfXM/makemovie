@@ -32,6 +32,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
@@ -80,8 +81,8 @@ export function CatalogsPanel({ catalogs, onChanged }: { catalogs: AsyncState<Ca
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold">{t('models.catalogs')}</h2>
-        <p className="text-muted-foreground text-sm">{t('models.catalogsHint')}</p>
+        <h2 className="text-base font-semibold flex items-center gap-1.5">{t('models.catalogs')}<HelpHint text={t('models.catalogsHint')} /></h2>
+
       </div>
 
       {catalogs.loading && catalogs.data.length === 0 ? (

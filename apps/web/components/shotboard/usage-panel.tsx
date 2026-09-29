@@ -10,6 +10,7 @@ import { useAsync } from '@/lib/use-async'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -188,7 +189,10 @@ export function UsagePanel({ episodeId = null, projectId = null, scopeFromUrl = 
               <CoinsIcon className="text-muted-foreground size-4" />
               {t('usage.title')}
             </CardTitle>
-            <CardDescription>{t('usage.unitsHint')}</CardDescription>
+            <CardDescription className="flex items-center gap-1.5">
+              {t('usage.unitsShort')}
+              <HelpHint text={t('usage.unitsHint')} />
+            </CardDescription>
           </>
         )}
         <CardAction>

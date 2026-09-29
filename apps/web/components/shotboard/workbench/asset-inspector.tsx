@@ -10,6 +10,7 @@ import { assetFailureCopy } from '@/lib/failure-cause'
 import { useSession } from '@/lib/session'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Button } from '@/components/ui/button'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
@@ -141,7 +142,10 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
         {/* 版本条：行=切换上图；批准就地。最新一版在最上。 */}
         {asset.versions.length > 0 && (
           <div className="space-y-1">
-            <p className="text-muted-foreground text-[11px]">{t('workbench.selectVersionHint')}</p>
+            <p className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+              {t('workbench.selectVersionShort')}
+              <HelpHint text={t('workbench.selectVersionHint')} />
+            </p>
             {asset.versions.map(version => {
               const active = current?.version === version.version
               return (

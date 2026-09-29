@@ -25,6 +25,7 @@ import { cn, formatDuration } from '@/lib/utils'
 import type { ShotEvent } from '@/lib/shot-history'
 import { audioModeWord, shotAudioMode, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { Badge } from '@/components/ui/badge'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { StatusBadge } from '@/components/ui/status-badge'
@@ -293,7 +294,7 @@ export function StoryboardCard({
                         </button>
                       )
                     })}
-                    <span className="text-muted-foreground text-xs">{t('storyboards.assetsHint')}</span>
+                    <HelpHint text={t('storyboards.assetsHint')} />
                   </div>
                 )}
               </div>
