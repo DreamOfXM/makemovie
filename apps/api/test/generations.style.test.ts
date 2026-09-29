@@ -73,7 +73,7 @@ async function bindMockImage(token: string): Promise<void> {
   expect(binding.statusCode).toBe(201)
 }
 
-async function triggerImage(token: string, episodeId: string, body: { storyboardIds?: string[]; styleId?: string }): Promise<{ statusCode: number; body: any }> {
+async function triggerImage(token: string, episodeId: string, body: { storyboardIds?: string[]; styleId?: string; regenerate?: boolean; promptNote?: string }): Promise<{ statusCode: number; body: any }> {
   const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: env.authHeaders(token), payload: { stage: 'IMAGE', ...body } })
   return { statusCode: res.statusCode, body: res.json() }
 }
@@ -114,6 +114,20 @@ describe('generation style presets', () => {
     const prompt = await batchPrompt(res.body.batch.id)
     expect(prompt).toContain('视觉风格：')
     expect(prompt).toContain(anime.visualStyle)
+  })
+
+  // 2026-09-29 事故回放：调整要求曾拼在风格层之前，英文风格尾巴排最后压住人的
+  // 方向（用户重跑快照实测）。调整要求必须真正压轴——快照里它是最后一段。
+  it('puts the rerun note after the style layer so the human direction has the last word', async () => {
+    // regenerate 走新批次，不与其它用例的补缺触发抢幂等；风格沿用项目已应用的预设。
+    const withNote = await triggerImage(ownerToken, episodeId, { storyboardIds: [shotIds[1]], regenerate: true, promptNote: '只画赵桂芬一人，背对镜头' })
+    expect(withNote.statusCode).toBe(201)
+    const prompt = await batchPrompt(withNote.body.batch.id)
+    const styleAt = prompt.indexOf('视觉风格：')
+    const noteAt = prompt.indexOf('调整要求：只画赵桂芬一人，背对镜头')
+    expect(styleAt).toBeGreaterThan(-1)
+    expect(noteAt).toBeGreaterThan(styleAt)
+    expect(noteAt).toBe(prompt.length - '调整要求：只画赵桂芬一人，背对镜头'.length)
   })
 
   it('falls back to the project default style when no styleId is passed', async () => {

@@ -916,12 +916,10 @@ export async function triggerStage(
         prompt: [target.prompt, TEXT_LANGUAGE_RULE, MOTION_RULE].filter(Boolean).join('\n\n'),
       }))
     : targets
-  // 调整要求是人在这次重试里给的方向，压轴放在最后一条——盖过风格与规则，
-  // 快照同时记录基础提示词与本次方向，审计能对回每一次为什么这么抽。
+  // 调整要求是人在这次重试里给的方向——必须真正压轴：拼在风格层之后。
+  // 此前实现先拼 note 再叠风格，英文风格尾巴排到了最后，把人的方向压下去
+  // （2026-09-29 用户重跑快照实测发现：调整要求后面还跟着 40 词的电影感尾巴）。
   const note = options.promptNote?.trim()
-  const notedTargets = note
-    ? tailTargets.map(target => ({ ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }))
-    : tailTargets
   // P7 Prompt 守卫:任务排队开烧前的最后一道机器检查,只管 IMAGE/VIDEO 这两个
   // "长相全靠提示词"的阶段。修复型改写 prompt、警告型只留痕、拦截型让任务直接
   // 落 BLOCKED 不排队;所有留痕随请求快照入库——审计要能回答"这条 prompt 被动过吗、为什么"。
@@ -931,11 +929,14 @@ export async function triggerStage(
   // 默认写实基准,显式选的风格永远赢;没有预设时守卫照旧兜底。
   // ASSET 也在内:定妆照是逐镜首帧的参考输入,它不吃风格的话全片画风从第一步就分叉。
   let promptedTargets: GenerationTarget[] = style && isVisualStyleStage(stage)
-    ? notedTargets.map(target => ({
+    ? tailTargets.map(target => ({
         ...target,
         prompt: applyStyleToPrompt(stage, target.prompt, style),
       }))
-    : notedTargets
+    : tailTargets
+  if (note) {
+    promptedTargets = promptedTargets.map(target => ({ ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }))
+  }
   promptedTargets = stage === 'IMAGE' || stage === 'VIDEO'
     ? promptedTargets.map(target => {
         const info = target.storyboardId ? shotGuardInfo.get(target.storyboardId) : undefined
