@@ -128,12 +128,12 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 大预览（2026-09-30 定稿 h-28=112px）：h-16 压扁了原生视频控件；
-            h-32 太高被用户打回。112px 够放控件+画面可辨。
+        {/* 大预览（2026-09-30 定稿 h-40=160px）：h-16/h-28 依次被用户打回压扁，
+            160px 是控件+画面+人不高的折中。
             视频点击整面进灯箱审大图；省出的高度还给下方产物区。 */}
         <button
           type="button"
-          className="group bg-muted/30 relative block h-28 w-full overflow-hidden rounded-lg border"
+          className="group bg-muted/30 relative block h-40 w-full overflow-hidden rounded-lg border"
           onClick={() => {
             if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ version: null })
           }}
