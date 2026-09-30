@@ -318,7 +318,15 @@ export function PreviewPanel({
                       {section.key === 'audio' && !owesVoice && section.candidates.length === 0 ? (
                         <p className="text-subtle-foreground px-1 py-1 text-[11px]">{t('workbench.audioNativePlaceholder')}</p>
                       ) : section.candidates.length === 0 && !section.busy ? (
-                        <p className="text-subtle-foreground px-1 text-[11px]">{section.hasOutput ? '' : section.errorText}</p>
+                        <div>
+                          <p className="text-subtle-foreground px-1 text-[11px]">{section.hasOutput ? '' : section.errorText}</p>
+                          {/* 零版本时也要给动词入口——否则配音/首帧的「生成」按钮被锁在
+                              展开区里永远够不着（2026-09-30 用户：哪有生成声音的地方）。 */}
+                          <Button variant="outline" size="sm" className="mt-1.5 h-7 text-[11px]" onClick={section.onRerun}>
+                            <RotateCcwIcon className="size-3" />
+                            {section.rerunLabel}
+                          </Button>
+                        </div>
                       ) : section.kind === 'audio' ? (
                         <div className="space-y-1">
                           {section.candidates.map(candidate => (
