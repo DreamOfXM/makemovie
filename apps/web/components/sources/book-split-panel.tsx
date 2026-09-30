@@ -148,6 +148,9 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
   // file upload (the common path); pasting is one outline click away for
   // environments whose file picker cannot open.
   const [pasteOpen, setPasteOpen] = useState(false)
+  // 上传弹框（2026-09-30 用户拍板）：空态的上传框+粘贴+拖拽全进弹框，
+  // 项目页只留一行入口；有版本后工作台（章节/工具行/应用）照旧常驻。
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const [pasting, setPasting] = useState(false)
   // Drop-target highlight: the dashed box must not merely look droppable.
@@ -514,6 +517,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
   }, [matrix.data.segments])
 
   return (
+    <>
     <Card>
       {/* Hidden file input, mounted unconditionally: it was previously rendered
           only in the has-version branch, which made the empty state's upload
@@ -556,103 +560,26 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
           <TableSkeleton rows={4} columns={4} />
         </CardContent>
       ) : matrix.data.version === null ? (
-        <CardContent
-          className={cn('transition-colors', dropping && 'bg-primary/5 ring-primary/40 -mx-1 rounded-xl ring-2')}
-          onDragOver={event => {
-            if (event.dataTransfer.types.includes('Files')) {
-              event.preventDefault()
-              setDropping(true)
-            }
-          }}
-          onDragLeave={() => setDropping(false)}
-          onDrop={event => {
-            event.preventDefault()
-            setDropping(false)
-            // 文件夹以目录条目抵达,不是 files 列表;条目必须同步取走,遍历可以异步。
-            void collectDroppedFiles(event.dataTransfer).then(files => void upload(files))
-          }}
-        >
-          <EmptyState
-            icon={<BookTextIcon />}
-            title={t('bookSplit.emptyTitle')}
-            description={
-              <span className="inline-flex flex-wrap items-center justify-center gap-1">
-                {t('bookSplit.emptyHint')}
-                <HelpHint text={t('bookSplit.mechanicalHint')} />
-              </span>
-            }
-            action={
-              uploading ? (
-                <Button size="sm" disabled>
-                  <LoaderCircleIcon className="animate-spin" />
-                  {t('bookSplit.uploading')}
-                </Button>
-              ) : (
-                <GuardedButton action="project:update" size="sm" onClick={pickFile}>
-                  <FileUpIcon />
-                  {t('bookSplit.upload')}
-                </GuardedButton>
-              )
-            }
-          />
-          {/* 尾部三段说明（拖拽格式/粘贴入口/IAB 排障）收进问号——常驻时这块比上传框本体还高
-              （2026-09-29 用户：能再小一点吗）。 */}
-          <div className="text-muted-foreground mt-1 flex items-center justify-center gap-3 text-xs">
-            <span className="inline-flex items-center gap-1">
-              {t('bookSplit.dropShort')}
-              <HelpHint text={t('bookSplit.dropHint')} />
-            </span>
-            {!pasteOpen && (
-              <button type="button" onClick={() => { setPasteOpen(true); setUploadError(null) }} className="text-primary font-medium hover:underline">
-                {t('bookSplit.pasteShort')}
-              </button>
-            )}
+        <CardContent className="py-3">
+          <div className="flex items-center gap-3">
+            <div className="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg">
+              <BookTextIcon className="size-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-semibold">{t('bookSplit.title')}</p>
+              <p className="text-muted-foreground truncate text-[11px]">{t('bookSplit.entryLine')}</p>
+            </div>
+            <GuardedButton action="project:update" size="sm" onClick={() => setUploadDialogOpen(true)}>
+              {uploading ? <LoaderCircleIcon className="animate-spin" /> : <FileUpIcon />}
+              {uploading ? t('bookSplit.uploading') : t('bookSplit.openUpload')}
+            </GuardedButton>
           </div>
-          {!pasteOpen && (
-            <div className="text-muted-foreground mt-1 flex items-center justify-center gap-1 text-xs">
-              {t('bookSplit.pickerShort')}
-              <HelpHint text={t('bookSplit.pickerHint')} />
-            </div>
-          )}
-          {pasteOpen && (
-            <div className="mt-3 space-y-2">
-              <Textarea
-                aria-label={t('bookSplit.pasteLabel')}
-                placeholder={t('bookSplit.pastePlaceholder')}
-                value={pasteText}
-                onChange={event => setPasteText(event.target.value)}
-                disabled={pasting}
-                rows={8}
-                className="font-mono text-xs"
-              />
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <span className="text-muted-foreground text-xs">
-                  {t('bookSplit.pasteCount', { count: pasteText.length, limit: 1_000_000 })}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <Button size="sm" variant="ghost" disabled={pasting} onClick={() => { setPasteOpen(false); setUploadError(null) }}>
-                    {t('bookSplit.pasteCancel')}
-                  </Button>
-                  {pasting ? (
-                    <Button size="sm" disabled>
-                      <LoaderCircleIcon className="animate-spin" />
-                      {t('bookSplit.uploading')}
-                    </Button>
-                  ) : (
-                    <Button size="sm" disabled={!pasteText.trim()} onClick={() => void uploadPasted()}>
-                      {t('bookSplit.pasteSubmit')}
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
           {uploadError && (
-            <Alert variant="destructive" className="mt-3">
+            <Alert variant="destructive" className="mt-2">
               <CircleAlertIcon />
               <AlertDescription className="justify-items-start">
                 <p>{uploadError}</p>
-                <Button size="sm" variant="outline" disabled={uploading || pasting} onClick={() => (pasteOpen ? setPasteOpen(true) : pickFile())}>
+                <Button size="sm" variant="outline" disabled={uploading || pasting} onClick={() => setUploadDialogOpen(true)}>
                   {t('common.retry')}
                 </Button>
               </AlertDescription>
@@ -1098,7 +1025,110 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
     </Card>
+      <Dialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen}>
+        <DialogContent className="max-h-[92vh] sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('bookSplit.title')}</DialogTitle>
+            <DialogDescription>{t('bookSplit.emptyHint')}</DialogDescription>
+          </DialogHeader>
+          <div
+            className={cn('transition-colors', dropping && 'bg-primary/5 ring-primary/40 rounded-xl ring-2')}
+            onDragOver={event => {
+              if (event.dataTransfer.types.includes('Files')) {
+                event.preventDefault()
+                setDropping(true)
+              }
+            }}
+            onDragLeave={() => setDropping(false)}
+            onDrop={event => {
+              event.preventDefault()
+              setDropping(false)
+              void collectDroppedFiles(event.dataTransfer).then(files => void upload(files))
+            }}
+          >
+            <EmptyState
+              icon={<BookTextIcon />}
+              title={t('bookSplit.emptyTitle')}
+              description={
+                <span className="inline-flex flex-wrap items-center justify-center gap-1">
+                  {t('bookSplit.dropShort')}
+                  <HelpHint text={t('bookSplit.dropHint')} />
+                </span>
+              }
+              action={
+                uploading ? (
+                  <Button size="sm" disabled>
+                    <LoaderCircleIcon className="animate-spin" />
+                    {t('bookSplit.uploading')}
+                  </Button>
+                ) : (
+                  <GuardedButton action="project:update" size="sm" onClick={pickFile}>
+                    <FileUpIcon />
+                    {t('bookSplit.upload')}
+                  </GuardedButton>
+                )
+              }
+            />
+            <div className="text-muted-foreground flex items-center justify-center gap-3 text-xs">
+              {!pasteOpen ? (
+                <button type="button" onClick={() => { setPasteOpen(true); setUploadError(null) }} className="text-primary font-medium hover:underline">
+                  {t('bookSplit.pasteShort')}
+                </button>
+              ) : (
+                <span className="text-muted-foreground">{t('bookSplit.pickerShort')}</span>
+              )}
+              <HelpHint text={t('bookSplit.pickerHint')} />
+            </div>
+            {pasteOpen && (
+              <div className="mt-3 space-y-2">
+                <Textarea
+                  aria-label={t('bookSplit.pasteLabel')}
+                  placeholder={t('bookSplit.pastePlaceholder')}
+                  value={pasteText}
+                  onChange={event => setPasteText(event.target.value)}
+                  disabled={pasting}
+                  rows={8}
+                  className="font-mono text-xs"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-muted-foreground text-xs">
+                    {t('bookSplit.pasteCount', { count: pasteText.length, limit: 1_000_000 })}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <Button size="sm" variant="ghost" disabled={pasting} onClick={() => setPasteOpen(false)}>
+                      {t('bookSplit.pasteCancel')}
+                    </Button>
+                    {pasting ? (
+                      <Button size="sm" disabled>
+                        <LoaderCircleIcon className="animate-spin" />
+                        {t('bookSplit.uploading')}
+                      </Button>
+                    ) : (
+                      <Button size="sm" disabled={!pasteText.trim()} onClick={() => void uploadPasted()}>
+                        {t('bookSplit.pasteSubmit')}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            {uploadError && (
+              <Alert variant="destructive" className="mt-3">
+                <CircleAlertIcon />
+                <AlertDescription className="justify-items-start">
+                  <p>{uploadError}</p>
+                  <Button size="sm" variant="outline" disabled={uploading || pasting} onClick={pickFile}>
+                    {t('common.retry')}
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 
   /** 解散一组 = 该组全部章节退回未分配(批量 PATCH)。 */

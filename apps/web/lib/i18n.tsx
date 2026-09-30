@@ -958,8 +958,8 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'sources.scriptInUseError': 'This script is traced by storyboards and cannot be deleted.',
 
     'bookSplit.title': 'Whole-book split',
-    'bookSplit.openDialog': 'Open book split',
-    'bookSplit.entryLine': 'Split workspace: upload the book, then group chapters into episodes yourself.',
+    'bookSplit.openUpload': 'Upload the book',
+    'bookSplit.entryLine': 'Upload the whole novel, then group chapters into episodes.',
     'bookSplit.entryVersion': 'Imported v{version} · {filename}',
     'bookSplit.splitEnter': '✂ Split into episodes',
     'bookSplit.splitExit': '✓ Exit splitting',
@@ -2647,8 +2647,8 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'sources.scriptInUseError': '该剧本已被分镜引用，无法删除。',
 
     'bookSplit.title': '整本拆集',
-    'bookSplit.openDialog': '打开拆集',
-    'bookSplit.entryLine': '拆集工作台：上传整本，手动归章成集',
+    'bookSplit.openUpload': '上传整本',
+    'bookSplit.entryLine': '上传整本小说，手动归章成集。',
     'bookSplit.entryVersion': '已导入 v{version} · {filename}',
     'bookSplit.splitEnter': '拆集',
     'bookSplit.splitExit': '退出拆集',
