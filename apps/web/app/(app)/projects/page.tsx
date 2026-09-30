@@ -364,7 +364,7 @@ function ProjectRow({ project, locale, canUpdate, canDelete, onRename, onDelete 
         {/* 用户拍板（2026-09-30）：删除钮不要红色——列表行里红色太刺眼。
             改 outline，悬停才显 destructive 色；确认弹窗仍然拦不可逆操作。 */}
         <Button variant="outline" size="icon-sm" aria-label={t('common.delete')} disabled={!canDelete} onClick={event => { event.stopPropagation(); onDelete() }}>
-          <Trash2Icon className="text-muted-foreground group-hover/project:text-destructive" />
+          <Trash2Icon className="text-muted-foreground" />
         </Button>
       </div>
     </li>
