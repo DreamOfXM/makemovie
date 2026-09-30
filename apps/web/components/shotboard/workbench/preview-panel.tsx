@@ -138,7 +138,16 @@ export function PreviewPanel({
             if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ version: null })
           }}
         >
-          {isPlayerVideo && playerArtifact ? (
+          {/* 生成中蒙版（2026-09-30 用户）：点生成/重跑时大预览立即切到该产物的生成中态，
+              而非继续展示旧版本——旧版和新版混在同一个框里，用户分不清哪个在跑。 */}
+          {stageBusy(activeProduct === 'frame' ? 'FIRST_FRAME' : activeProduct === 'audio' ? 'AUDIO' : 'VIDEO') ? (
+            <span className="text-primary absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/80 backdrop-blur-sm">
+              <LoaderCircleIcon className="size-5 animate-spin" />
+              <span className="text-xs font-medium">
+                {attemptWord(activeProduct === 'frame' ? 'FIRST_FRAME' : activeProduct === 'audio' ? 'AUDIO' : 'VIDEO') ?? t('generations.cellGenerating')}
+              </span>
+            </span>
+          ) : isPlayerVideo && playerArtifact ? (
             <ArtifactMedia artifact={playerArtifact} label={`#${shot.number} ${shot.title} v${playerArtifact.version}`} className="h-full max-h-none w-full" />
           ) : !isPlayerVideo && playerArtifact ? (
             activeProduct === 'frame' ? (
@@ -210,7 +219,7 @@ export function PreviewPanel({
                 onClick={() => setOpenSections(prev => (prev.size === 3 ? new Set() : new Set(['frame', 'video', 'audio'])))}
                 className="text-primary inline-flex items-center gap-0.5 text-[11px] font-medium"
               >
-                <ChevronDownIcon className="size-3 transition-transform" />
+                <ChevronDownIcon className={cn('size-3 transition-transform', openSections.size === 3 ? '' : '-rotate-90')} />
                 {openSections.size === 3 ? t('workbench.collapseAll') : t('workbench.expandAll')}
               </button>
             </div>
@@ -300,7 +309,7 @@ export function PreviewPanel({
                     {count > 0 && (
                       <span className={cn('inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium', isActive ? 'text-primary' : 'text-muted-foreground')}>
                         {t('workbench.versions', { count })}
-                        <ChevronDownIcon className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} />
+                        <ChevronDownIcon className={cn('size-3.5 transition-transform', expanded ? '' : '-rotate-90')} />
                       </span>
                     )}
                   </button>
