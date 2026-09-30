@@ -417,7 +417,7 @@ describe('dashscope request building', () => {
       input: { prompt: 'a rainy street' },
       parameters: { resolution: '1080P' },
     })
-    expect(req.body).toMatchObject({ parameters: { prompt_extend: false, resolution: '1080P' } })
+    expect(req.body).toMatchObject({ parameters: { prompt_extend: false, audio: true, resolution: '1080P' } })
     expect((req.body as { parameters: Record<string, unknown> }).parameters.watermark).toBeUndefined()
 
     const optedOut = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {

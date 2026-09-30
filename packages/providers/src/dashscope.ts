@@ -257,7 +257,9 @@ export function usesMediaVideoApi(model: string): boolean {
  * once inside this adapter.
  */
 function videoParameters(parameters: Record<string, unknown>): Record<string, unknown> {
-  return { prompt_extend: false, ...parameters }
+  // audio: true 让 wan2.5+/wan3.0 在生成视频时同时输出原生音频（口型同步）。
+  // 调用方可以显式传 audio: false 关掉（如已走独立 TTS 叠加时）。
+  return { prompt_extend: false, audio: true, ...parameters }
 }
 
 /** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image.
