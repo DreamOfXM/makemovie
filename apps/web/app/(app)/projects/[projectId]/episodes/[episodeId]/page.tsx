@@ -113,6 +113,7 @@ function EpisodeWorkspace() {
   const [stylePresetId, setStylePresetId] = useState<string | null>(null)
   const [styleName, setStyleName] = useState<string | null>(null)
   const [qcMaxAttempts, setQcMaxAttempts] = useState<number | null>(null)
+  const [audioMode, setAudioMode] = useState<'video_native' | 'voice_clone' | null>(null)
   const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
   const [regenStoryboardOpen, setRegenStoryboardOpen] = useState(false)
   const [regenStoryboardBusy, setRegenStoryboardBusy] = useState(false)
@@ -148,6 +149,7 @@ function EpisodeWorkspace() {
         const row = list.find(item => item.id === projectId)
         setStylePresetId(row?.stylePresetId ?? null)
         setQcMaxAttempts(typeof row?.qcMaxAttempts === 'number' ? row.qcMaxAttempts : null)
+        setAudioMode(row?.audioMode === 'voice_clone' ? 'voice_clone' : 'video_native')
       })
       .catch(() => setStylePresetId(null))
   }, [api, projectId])
@@ -611,6 +613,7 @@ function EpisodeWorkspace() {
         projectId={projectId}
         currentStyleId={stylePresetId}
         qcMaxAttempts={qcMaxAttempts}
+        audioMode={audioMode}
         onOpenChange={setStyleSettingsOpen}
         onStyleChanged={loadProjectStyle}
       />

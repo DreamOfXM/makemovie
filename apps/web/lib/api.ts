@@ -230,6 +230,8 @@ export interface Project {
   stylePresetId: string | null
   /** 审计不过线时的自动重抽上限（1-3）；null = 默认 2。 */
   qcMaxAttempts: number | null
+  /** 语音模式（r10）：video_native = 视频自带声音（默认），voice_clone = 用角色绑定音色。 */
+  audioMode: 'video_native' | 'voice_clone' | null
   createdAt: string
   updatedAt: string
   /** Episode status summary, carried so the lifecycle bar renders without a drill-down. */

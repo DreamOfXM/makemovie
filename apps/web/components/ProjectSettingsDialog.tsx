@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings2Icon } from 'lucide-react'
+import { Settings2Icon, VideoIcon, MicIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -18,6 +18,8 @@ interface ProjectSettingsDialogProps {
   currentStyleId: string | null
   /** 审计重抽上限（1-3）；null=默认 2。花用户的钱，次数由项目主人定。 */
   qcMaxAttempts: number | null
+  /** 语音模式：video_native=视频自带（默认），voice_clone=用角色绑定音色。null=video_native。 */
+  audioMode: 'video_native' | 'voice_clone' | null
   onOpenChange: (open: boolean) => void
   onStyleChanged: () => void
 }
@@ -27,6 +29,7 @@ export function ProjectSettingsDialog({
   projectId,
   currentStyleId,
   qcMaxAttempts,
+  audioMode,
   onOpenChange,
   onStyleChanged,
 }: ProjectSettingsDialogProps) {
@@ -34,12 +37,14 @@ export function ProjectSettingsDialog({
   const { api } = useSession()
   const [selectedStyleId, setSelectedStyleId] = useState<string | undefined>(currentStyleId ?? undefined)
   const [attempts, setAttempts] = useState<number>(qcMaxAttempts ?? 2)
+  const [mode, setMode] = useState<'video_native' | 'voice_clone'>(audioMode ?? 'video_native')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     setSelectedStyleId(currentStyleId ?? undefined)
     setAttempts(qcMaxAttempts ?? 2)
-  }, [currentStyleId, qcMaxAttempts, open])
+    setMode(audioMode ?? 'video_native')
+  }, [currentStyleId, qcMaxAttempts, audioMode, open])
 
   async function handleSave() {
     setSaving(true)
@@ -50,7 +55,7 @@ export function ProjectSettingsDialog({
       })
       await api(`/projects/${projectId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ qcMaxAttempts: attempts }),
+        body: JSON.stringify({ qcMaxAttempts: attempts, audioMode: mode }),
       })
       toast.success(t('settings.saved'))
       onStyleChanged()
@@ -62,6 +67,11 @@ export function ProjectSettingsDialog({
     }
   }
 
+  const dirty =
+    selectedStyleId !== (currentStyleId ?? undefined) ||
+    attempts !== (qcMaxAttempts ?? 2) ||
+    mode !== (audioMode ?? 'video_native')
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[85vh] max-w-2xl flex-col">
@@ -70,43 +80,100 @@ export function ProjectSettingsDialog({
           <DialogDescription>{t('settings.description')}</DialogDescription>
         </DialogHeader>
 
-        {/* Only the grid scrolls; the footer actions stay reachable no matter how
-            many styles the organization has. */}
-        <div className="min-h-0 flex-1 overflow-y-auto py-4">
-          <h3 className="text-sm font-medium mb-2 flex items-center gap-1.5">
-            {t('settings.qcAttempts')}
-            <HelpHint text={t('settings.qcAttemptsHint')} />
-          </h3>
-          <div className="mb-2 flex items-center gap-1.5">
-            {[1, 2, 3].map(value => (
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto py-4">
+          {/* 语音设置（r10 音频体系） */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+              {t('settings.audioMode')}
+              <HelpHint text={t('settings.audioModeHint')} />
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
               <button
-                key={value}
                 type="button"
-                aria-pressed={attempts === value}
-                onClick={() => setAttempts(value)}
+                aria-pressed={mode === 'video_native'}
                 disabled={saving}
+                onClick={() => setMode('video_native')}
                 className={cn(
-                  'h-7 rounded-md border px-3 text-xs font-medium transition-colors',
-                  attempts === value ? 'border-primary bg-primary/15 text-primary' : 'border-control-line hover:bg-accent/50',
+                  'flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors',
+                  mode === 'video_native' ? 'border-primary bg-primary/8%' : 'border-border hover:border-control-line',
                 )}
               >
-                {t('settings.qcAttemptsOption', { count: value })}
+                <span className="flex items-center gap-1.5 text-[13px] font-semibold">
+                  <VideoIcon className="size-4" />
+                  {t('settings.audioVideoNative')}
+                </span>
+                <span className="text-muted-foreground text-[11px] leading-relaxed">
+                  {t('settings.audioVideoNativeDesc')}
+                </span>
+                <span className="text-muted-foreground mt-1 inline-flex self-start rounded-full bg-muted px-2 py-0.5 text-[9.5px]">
+                  {t('settings.audioDefault')}
+                </span>
               </button>
-            ))}
-          </div>
-          <h3 className="text-sm font-medium mb-3">{t('settings.style')}</h3>
-          <StyleSelector
-            value={selectedStyleId}
-            onChange={setSelectedStyleId}
-            disabled={saving}
-          />
+              <button
+                type="button"
+                aria-pressed={mode === 'voice_clone'}
+                disabled={saving}
+                onClick={() => setMode('voice_clone')}
+                className={cn(
+                  'flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors',
+                  mode === 'voice_clone' ? 'border-primary bg-primary/8%' : 'border-border hover:border-control-line',
+                )}
+              >
+                <span className="flex items-center gap-1.5 text-[13px] font-semibold">
+                  <MicIcon className="size-4" />
+                  {t('settings.audioVoiceClone')}
+                </span>
+                <span className="text-muted-foreground text-[11px] leading-relaxed">
+                  {t('settings.audioVoiceCloneDesc')}
+                </span>
+                <span className="mt-1 inline-flex self-start rounded-full bg-primary/15 px-2 py-0.5 text-[9.5px] text-primary">
+                  {t('settings.audioRecommended')}
+                </span>
+              </button>
+            </div>
+          </section>
+
+          {/* 重抽上限 */}
+          <section>
+            <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+              {t('settings.qcAttempts')}
+              <HelpHint text={t('settings.qcAttemptsHint')} />
+            </h3>
+            <div className="flex items-center gap-1.5">
+              {[1, 2, 3].map(value => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={attempts === value}
+                  onClick={() => setAttempts(value)}
+                  disabled={saving}
+                  className={cn(
+                    'h-7 rounded-md border px-3 text-xs font-medium transition-colors',
+                    attempts === value ? 'border-primary bg-primary/15 text-primary' : 'border-control-line hover:bg-accent/50',
+                  )}
+                >
+                  {t('settings.qcAttemptsOption', { count: value })}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* 视觉风格 */}
+          <section>
+            <h3 className="mb-2 text-sm font-medium">{t('settings.style')}</h3>
+            <StyleSelector
+              value={selectedStyleId}
+              onChange={setSelectedStyleId}
+              disabled={saving}
+            />
+          </section>
         </div>
 
         <div className="flex justify-end gap-2 border-t pt-4">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             {t('common.cancel')}
           </Button>
-          <Button onClick={handleSave} disabled={saving || (selectedStyleId === (currentStyleId ?? undefined) && attempts === (qcMaxAttempts ?? 2))}>
+          <Button onClick={handleSave} disabled={saving || !dirty}>
             {saving ? t('common.saving') : t('common.save')}
           </Button>
         </div>
