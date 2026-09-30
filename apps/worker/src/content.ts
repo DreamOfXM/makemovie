@@ -93,7 +93,7 @@ async function recordStoryboards(db: PrismaClient, task: ContentTask, text: stri
         sourceExcerpt: asString(shot.sourceExcerpt),
         // r06·A：场次号（LLM 输出 scene）。非法值（0/负/非整数）丢弃置 null，
         // 旧模型不带该字段时整集 null——不参与场景主帧逻辑，行为与从前一致。
-        sceneNumber: Number.isInteger(shot.scene) && (shot.scene as number) > 0 ? shot.scene : null,
+        sceneNumber: Number.isInteger(shot.scene) && (shot.scene as number) > 0 ? (shot.scene as number) : null,
         continuityIn: asString(shot.continuityIn),
         continuityOut: asString(shot.continuityOut),
         status: 'DRAFT',

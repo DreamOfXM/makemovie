@@ -16,6 +16,8 @@ model Asset {
   description      String
   generationTaskId String?
   projectAssetId   String?
+  /// 角色绑定的声音（r10 音频体系）：指向音频 artifact。null = 未绑定。
+  voiceArtifactId  String?
   episode          Episode           @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   generationTask   GenerationTask?   @relation(fields: [generationTaskId], references: [id])
   projectAsset     ProjectAsset?     @relation(fields: [projectAssetId], references: [id])
