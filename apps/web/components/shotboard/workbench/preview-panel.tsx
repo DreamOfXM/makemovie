@@ -128,11 +128,12 @@ export function PreviewPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3">
-        {/* 大预览（S3·紧凑 2026-09-29 用户拍板：不需要这么高）：默认 h-16 胶片窗，
+        {/* 大预览（2026-09-30 定稿 h-28=112px）：h-16 压扁了原生视频控件；
+            h-32 太高被用户打回。112px 够放控件+画面可辨。
             视频点击整面进灯箱审大图；省出的高度还给下方产物区。 */}
         <button
           type="button"
-          className="group bg-muted/30 relative block h-16 w-full overflow-hidden rounded-lg border"
+          className="group bg-muted/30 relative block h-28 w-full overflow-hidden rounded-lg border"
           onClick={() => {
             if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ version: null })
           }}
@@ -263,7 +264,7 @@ export function PreviewPanel({
                 onRerun: () => onRegenerate('AUDIO', note, Boolean(voiceTrack)),
                 kind: 'audio' as const,
               },
-            ]).filter(section => section.key !== 'audio' || owesVoice).map(section => {
+            ]).map(section => {
               // 展开态归 openSections 管（可全收起——用户实测「全部收起收不全」：
               // 旧实现 activeProduct 恒展开）。activeProduct 只管大预览跟谁走+行头选中态。
               const expanded = openSections.has(section.key)
@@ -305,7 +306,9 @@ export function PreviewPanel({
                   </button>
                   {expanded && (
                     <div className="mt-2.5">
-                      {section.candidates.length === 0 && !section.busy ? (
+                      {section.key === 'audio' && !owesVoice && section.candidates.length === 0 ? (
+                        <p className="text-subtle-foreground px-1 py-1 text-[11px]">{t('workbench.audioNativePlaceholder')}</p>
+                      ) : section.candidates.length === 0 && !section.busy ? (
                         <p className="text-subtle-foreground px-1 text-[11px]">{section.hasOutput ? '' : section.errorText}</p>
                       ) : section.kind === 'audio' ? (
                         <div className="space-y-1">
