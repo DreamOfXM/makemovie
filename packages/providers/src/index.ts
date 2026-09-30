@@ -2,6 +2,7 @@ export * from './types.js'
 export * from './catalog.js'
 export * from './mock.js'
 export * from './dashscope.js'
+export * from './voicebox.js'
 export * from './seedance.js'
 export * from './kling.js'
 export * from './openai.js'
@@ -19,6 +20,7 @@ import { OpenAIAdapter } from './openai.js'
 import { GoogleAdapter } from './google.js'
 import { AnthropicAdapter } from './anthropic.js'
 import { OpenAICompatibleAdapter } from './openai-compatible.js'
+import { createVoiceboxAdapter } from './voicebox.js'
 import { getCatalog } from './catalog.js'
 
 export function createAdapter(provider: string, options: AdapterOptions): ProviderAdapter {
@@ -30,6 +32,7 @@ export function createAdapter(provider: string, options: AdapterOptions): Provid
   if (provider === 'google') return new GoogleAdapter(options)
   if (provider === 'anthropic') return new AnthropicAdapter(options)
   if (provider === 'openai_compatible') return new OpenAICompatibleAdapter(options)
+  if (provider === 'voicebox') return createVoiceboxAdapter(options.baseUrl)
   throw new Error(`unknown provider "${provider}"`)
 }
 
