@@ -267,6 +267,8 @@ model Project {
   pipelineConfigId     String?
   /// 审计不过线时的自动重抽上限（1-3）。null = 默认 2。花用户的钱，次数由项目主人定。
   qcMaxAttempts        Int?
+  /// 语音模式（r10 音频体系）：video_native = 视频模型自带声音（默认），voice_clone = 用角色绑定音色。
+  audioMode            String?
   capabilityBindings   CapabilityBinding[]
   episodes             Episode[]
   organization         Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)

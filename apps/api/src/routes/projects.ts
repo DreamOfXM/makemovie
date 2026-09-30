@@ -93,7 +93,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(project)
   })
 
-  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; qcMaxAttempts?: number | null } }>(
+  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; qcMaxAttempts?: number | null; audioMode?: 'video_native' | 'voice_clone' | null } }>(
     '/projects/:projectId',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
@@ -105,15 +105,18 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (request.body?.format !== undefined || request.body?.targetDurationMs !== undefined) {
         return reply.code(400).send({ error: 'format and targetDurationMs are set at project creation and cannot be changed here' })
       }
-      const { name, contentLocale, qcMaxAttempts } = request.body ?? {}
-      if (name === undefined && contentLocale === undefined && qcMaxAttempts === undefined) {
-        return reply.code(400).send({ error: 'name, contentLocale or qcMaxAttempts is required' })
+      const { name, contentLocale, qcMaxAttempts, audioMode } = request.body ?? {}
+      if (name === undefined && contentLocale === undefined && qcMaxAttempts === undefined && audioMode === undefined) {
+        return reply.code(400).send({ error: 'name, contentLocale, qcMaxAttempts or audioMode is required' })
       }
       if (name !== undefined && !name.trim()) return reply.code(400).send({ error: 'name is required' })
       if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
         return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
       }
       // 审计重抽上限：每次重抽都计一次生成费，范围钉死 1-3，null=回全局默认（2）。
+      if (audioMode !== undefined && audioMode !== null && !['video_native', 'voice_clone'].includes(audioMode)) {
+        return reply.code(400).send({ error: 'audioMode must be video_native or voice_clone' })
+      }
       if (qcMaxAttempts !== undefined && qcMaxAttempts !== null && ![1, 2, 3].includes(qcMaxAttempts)) {
         return reply.code(400).send({ error: 'qcMaxAttempts must be 1, 2 or 3 (null restores the default)' })
       }
@@ -123,6 +126,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           ...(name === undefined ? {} : { name: name.trim() }),
           ...(contentLocale === undefined ? {} : { contentLocale }),
           ...(qcMaxAttempts === undefined ? {} : { qcMaxAttempts }),
+          ...(audioMode === undefined ? {} : { audioMode }),
         },
       })
       await recordAudit(app.db, {
@@ -131,7 +135,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         action: 'project.update',
         entityType: 'Project',
         entityId: project.id,
-        payload: { from: { name: project.name, contentLocale: project.contentLocale, qcMaxAttempts: project.qcMaxAttempts }, to: { name: updated.name, contentLocale: updated.contentLocale, qcMaxAttempts: updated.qcMaxAttempts } },
+        payload: { from: { name: project.name, contentLocale: project.contentLocale, qcMaxAttempts: project.qcMaxAttempts }, to: { name: updated.name, contentLocale: updated.contentLocale, qcMaxAttempts: updated.qcMaxAttempts, audioMode: updated.audioMode } },
       })
       return updated
     },

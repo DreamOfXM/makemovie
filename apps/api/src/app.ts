@@ -20,6 +20,7 @@ import { artifactRoutes } from './routes/artifacts.js'
 import { sourceRoutes } from './routes/sources.js'
 import { projectSourceRoutes } from './routes/project-sources.js'
 import { styleRoutes } from './routes/styles.js'
+import { systemRoutes } from './routes/system.js'
 import { pipelineRoutes } from './routes/pipelines.js'
 import { assetRoutes } from './routes/assets.js'
 import { deliveryRoutes } from './routes/deliveries.js'
@@ -83,6 +84,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(assetRoutes, { prefix: '/api' })
   await app.register(deliveryRoutes, { prefix: '/api' })
   await app.register(usageRoutes, { prefix: '/api' })
+  await app.register(systemRoutes, { prefix: '/api' })
 
   app.addHook('onClose', async () => {
     await storage.close()

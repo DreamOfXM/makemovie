@@ -121,7 +121,7 @@ describe('episode assets', () => {
     const created = await env.app.inject({ method: 'POST', url: assetsUrl, headers: authHeaders(editorToken), payload: { kind: 'character', name: '小雨', description: '雨夜中撑伞的少女' } })
     expect(created.statusCode).toBe(201)
     const asset = created.json().asset as AssetDto
-    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'projectAssetId', 'run', 'status', 'usageCount', 'versions'])
+    expect(Object.keys(asset).sort()).toEqual(['description', 'generationTaskId', 'id', 'kind', 'name', 'projectAssetId', 'run', 'status', 'usageCount', 'versions', 'voiceArtifactId'])
     // Authored by a human and bound to no shot yet.
     expect(asset.usageCount).toBe(0)
     expect(asset.generationTaskId).toBeNull()

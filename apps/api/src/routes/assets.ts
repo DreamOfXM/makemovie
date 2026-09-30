@@ -28,6 +28,8 @@ interface AssetDto {
   status: WorkflowStatus
   generationTaskId: string | null
   projectAssetId: string | null
+  /** 角色绑定的声音 artifact ID（r10 音频体系）。null = 未绑定。 */
+  voiceArtifactId: string | null
   /** How many live shots bind this asset — the reach its approval (or edit) has. */
   usageCount: number
   /** 最近一次定妆照任务的实况：界面据此画"生成中/失败"，不靠点击之后的本地回声。 */
@@ -121,6 +123,7 @@ function toAssetDto(asset: AssetRow, usageCount = 0, run: AssetRunDto | null = n
     status: asset.status,
     generationTaskId: asset.generationTaskId,
     projectAssetId: asset.projectAssetId,
+    voiceArtifactId: asset.voiceArtifactId,
     usageCount,
     run,
     versions: asset.versions.map(toVersionDto),
@@ -373,6 +376,47 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // 素材整体删除:连同其全部版本;已通过审批的素材不可删(先不审批或走归档语义)。
+  // ── 声音绑定（r10 音频体系）──
+  // 角色绑定的声音指向一个音频 artifact（从视频提取/用户上传/参考录音）。
+  // 绑定后 AUDIO 阶段用这个声音生成台词；解绑回退到项目级默认（视频原生/云端 TTS）。
+  app.post<{ Params: { episodeId: string; assetId: string }; Body: { artifactId?: string | null } }>(
+    '/episodes/:episodeId/assets/:assetId/voice-bind',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const asset = await app.db.asset.findFirst({ where: { id: request.params.assetId, episodeId: episode.id } })
+      if (!asset) return reply.code(404).send({ error: 'Asset not found' })
+
+      const { artifactId } = request.body ?? {}
+      if (artifactId === undefined) return reply.code(400).send({ error: 'artifactId is required, null to unbind' })
+      if (artifactId !== null) {
+        // 校验 artifact 确实是音频且属于本组织
+        const artifact = await app.db.mediaArtifact.findFirst({
+          where: { id: artifactId, organizationId: auth.organizationId },
+          select: { mimeType: true },
+        })
+        if (!artifact) return reply.code(400).send({ error: 'artifact not found in this organization' })
+        if (!artifact.mimeType.startsWith('audio/')) return reply.code(400).send({ error: 'artifact is not audio' })
+      }
+
+      const updated = await app.db.asset.update({
+        where: { id: asset.id },
+        data: { voiceArtifactId: artifactId },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'asset.voice-bind',
+        entityType: 'Asset',
+        entityId: asset.id,
+        payload: { artifactId, assetName: asset.name },
+      })
+      return { asset: { id: updated.id, voiceArtifactId: updated.voiceArtifactId } }
+    },
+  )
+
   app.delete<{ Params: { episodeId: string; assetId: string } }>(
     '/episodes/:episodeId/assets/:assetId',
     { preHandler: requirePermission('episode:write') },
