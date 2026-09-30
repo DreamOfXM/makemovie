@@ -815,6 +815,8 @@ export interface Asset {
   status: string
   /** Set when this episode asset is linked to the project-level library (角色中台). */
   projectAssetId: string | null
+  /** 角色绑定的声音 artifact ID（r10 音频体系）；null = 未绑定。 */
+  voiceArtifactId: string | null
   /** The generation task that extracted this asset from the script; null means a human created it. */
   generationTaskId: string | null
   /** Live shots binding this asset — the reach of its approval (absent when listed outside an episode). */

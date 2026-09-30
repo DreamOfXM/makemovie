@@ -26,6 +26,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
+import { AssetVoiceTrack } from './asset-voice-track'
 import { PlanDialog } from '@/components/generations/plan-dialog'
 import { apiErrorMessage } from '@/lib/api-error'
 import { assetFailureCopy } from '@/lib/failure-cause'
@@ -521,6 +522,7 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                         const { phase, error } = runPhaseOf(asset, awaiting.has(asset.id))
                         const mayWrite = can('episode:write')
                         return (
+                          <>
                           <AssetCard
                             key={asset.id}
                             asset={asset}
@@ -535,6 +537,10 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
                             onEditDescription={mayWrite ? editDescription : undefined}
                             onDeprecate={mayWrite ? deprecateVersion : undefined}
                           />
+                          {asset.kind === 'character' && (
+                            <AssetVoiceTrack asset={asset} episodeId={episodeId} onChanged={reload} />
+                          )}
+                          </>
                         )
                       })
                     ))}
