@@ -132,7 +132,7 @@ export function PreviewPanel({
             视频点击整面进灯箱审大图；省出的高度还给下方产物区。 */}
         <button
           type="button"
-          className="group bg-muted/30 relative block h-32 w-full overflow-hidden rounded-lg border"
+          className="group bg-muted/30 relative block h-16 w-full overflow-hidden rounded-lg border"
           onClick={() => {
             if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ version: null })
           }}

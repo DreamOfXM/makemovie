@@ -587,7 +587,7 @@ export function BookSplitPanel({ projectId, refreshToken, onEpisodesChanged }: B
           )}
         </CardContent>
       ) : (
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-2.5">
           <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1.5 text-sm">
             <span>
               <span className="text-muted-foreground">{t('bookSplit.statChars')} </span>
