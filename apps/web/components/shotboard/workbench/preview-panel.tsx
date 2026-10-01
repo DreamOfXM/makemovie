@@ -354,7 +354,7 @@ export function PreviewPanel({
                                   ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span>
                                   : null}
                               </button>
-                              {can('storyboard:write') && candidate.artifactId !== section.pinnedId && (
+                              {can('storyboard:write') && isPlaying && candidate.artifactId !== section.pinnedId && (
                                 <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact('voice', candidate.artifactId)}>
                                   {section.pickLabel}
                                 </Button>
