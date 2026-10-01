@@ -413,10 +413,12 @@ export function PreviewPanel({
                             </Button>
                           ) : null
                         })()}
-                        <Button variant="outline" size="sm" className="h-7 text-[11px]" disabled={section.busy} onClick={section.onRerun}>
-                          <RotateCcwIcon className="size-3" />
-                          {section.rerunLabel}
-                        </Button>
+                        {section.key !== 'audio' || owesVoice ? (
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" disabled={section.busy} onClick={section.onRerun}>
+                            <RotateCcwIcon className="size-3" />
+                            {section.rerunLabel}
+                          </Button>
+                        ) : null}
                         {section.key === 'video' && (shot.video || shot.videoCandidates.length > 0) && (
                           <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => setReview({ version: null })}>
                             <Maximize2Icon className="size-3" />
