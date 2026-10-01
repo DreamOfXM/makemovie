@@ -14,6 +14,7 @@ import { HelpHint } from '@/components/ui/help-hint'
 import { Button } from '@/components/ui/button'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
+import { AssetVoiceTrack } from '@/components/assets/asset-voice-track'
 
 /**
  * 制作台中列 · 素材检查器：审图是素材页签的主任务，宽列给图——左列选中谁，
@@ -203,6 +204,11 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
               )
             })}
           </div>
+        )}
+
+        {/* 声音行（r10 音频体系）：角色卡的声音绑定入口。从视频提取/录音/导入。 */}
+        {asset.kind === 'character' && (
+          <AssetVoiceTrack asset={asset} episodeId={episodeId} onChanged={onChanged} />
         )}
 
         {/* 花钱动作全屏只此一枚（实心）：重跑/生成「参考图」。禁止无方向盲抽。 */}
