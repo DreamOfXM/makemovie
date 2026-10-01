@@ -329,23 +329,39 @@ export function PreviewPanel({
                         </div>
                       ) : section.kind === 'audio' ? (
                         <div className="space-y-1">
-                          {section.candidates.map(candidate => (
-                            <div key={candidate.artifactId} className={cn('flex items-center gap-2 rounded-md px-1 py-1.5', candidate.version === (activeProduct === 'audio' ? activeVersion : null) && 'bg-accent')}>
-                              <button type="button" onClick={() => { setActiveProduct('audio'); setActiveVersion(candidate.version) }} className="text-primary size-5 shrink-0" aria-label={`v${candidate.version}`}>▶</button>
-                              <span className="min-w-0 flex-1 truncate text-[11px] tabular-nums">
-                                v{candidate.version}
-                                {candidate.durationMs !== null && ` · ${formatDuration(candidate.durationMs)}`}
-                                {` · ${formatDateTime(candidate.createdAt, locale)}`}
-                              </span>
-                              {candidate.artifactId === section.pinnedId
-                                ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span>
-                                : can('storyboard:write') && (
-                                  <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact('voice', candidate.artifactId)}>
-                                    {section.pickLabel}
-                                  </Button>
+                          {section.candidates.map(candidate => {
+                            const isPlaying = candidate.version === (activeProduct === 'audio' ? activeVersion : null)
+                            return (
+                              <div key={candidate.artifactId} className="flex items-center">
+                              <button
+                                type="button"
+                                aria-pressed={isPlaying}
+                                onClick={() => { setActiveProduct('audio'); setActiveVersion(candidate.version) }}
+                                className={cn(
+                                  'flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors',
+                                  isPlaying ? 'bg-accent' : 'hover:bg-accent/50',
                                 )}
+                              >
+                                <span className={cn('shrink-0 text-[10px]', isPlaying ? 'text-primary' : 'text-muted-foreground')}>
+                                  {isPlaying ? '▶' : '▷'}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-[11px] tabular-nums">
+                                  <span className={cn('font-medium', isPlaying && 'text-primary')}>v{candidate.version}</span>
+                                  {candidate.durationMs !== null && ` · ${formatDuration(candidate.durationMs)}`}
+                                  {` · ${formatDateTime(candidate.createdAt, locale)}`}
+                                </span>
+                                {candidate.artifactId === section.pinnedId
+                                  ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span>
+                                  : null}
+                              </button>
+                              {can('storyboard:write') && candidate.artifactId !== section.pinnedId && (
+                                <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact('voice', candidate.artifactId)}>
+                                  {section.pickLabel}
+                                </Button>
+                              )}
                             </div>
-                          ))}
+                            )
+                          })}
                         </div>
                       ) : (
                         <div className="grid grid-cols-2 gap-2">
