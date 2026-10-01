@@ -164,11 +164,11 @@ describe('film distillation prompt (5)', () => {
 
 describe('voiceLine', () => {
   it('keeps the bracket form Chinese tasks have always sent', () => {
-    expect(voiceLine('zh', '沈亦', '照片背面有字……')).toBe('【沈亦】照片背面有字……')
+    expect(voiceLine('zh', '沈亦', '照片背面有字……')).toBe('照片背面有字……')
   })
 
-  it('attributes an English line the way an English script does', () => {
-    expect(voiceLine('en', 'Shen Yi', 'There is writing on the back.')).toBe('Shen Yi: There is writing on the back.')
+  it('sends only the dialogue text, not the speaker attribution', () => {
+    expect(voiceLine('en', 'Shen Yi', 'There is writing on the back.')).toBe('There is writing on the back.')
   })
 
   it('hands a silent shot no speaker at all', () => {

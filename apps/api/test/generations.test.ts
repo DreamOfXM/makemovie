@@ -1791,7 +1791,7 @@ describe('per-shot voice', () => {
     expect(tasks.map(task => task.idempotencyKey)).toEqual(speakingIds.map(id => `${episodeId}:AUDIO:${id}`))
     // The shot's own words go to the synthesizer — not the title, not the episode name.
     expect(tasks.map(task => (JSON.parse(task.requestSnapshot ?? '') as { input: { prompt: string } }).input.prompt)).toEqual([
-      '【林晚】这条街不能待了。',
+      '这条街不能待了。',
       '我跟你走。',
     ])
     expect((await queue.getJob(`run-${tasks[0].id}-1`))?.data).toMatchObject({ kind: 'run-task' })

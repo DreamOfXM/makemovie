@@ -149,11 +149,13 @@ export function buildMusicPrompt(locale: ContentLocale, scriptContent: string): 
 }
 
 /**
- * How a shot's line is handed to a voice model: the speaker marker plus the words
- * to speak. Chinese uses the `【】` script convention the providers have always been
- * sent; English uses the equivalent attribution in its own convention.
+ * How a shot's line is handed to a voice model: just the words to speak.
+ *
+ * The speaker name used to travel in the text as 【说话人】 / "Speaker:" — but TTS
+ * models read it aloud ("许知意，我妈第二次开口…"), which nobody wants in the master.
+ * The speaker selects the voice (via the asset's bound voice profile or the model's
+ * own routing); it must not be part of the spoken text. (2026-09-30 user report.)
  */
-export function voiceLine(locale: ContentLocale, speaker: string | null, dialogue: string): string {
-  if (!speaker) return dialogue
-  return locale === 'zh' ? `【${speaker}】${dialogue}` : `${speaker}: ${dialogue}`
+export function voiceLine(_locale: ContentLocale, _speaker: string | null, dialogue: string): string {
+  return dialogue
 }
