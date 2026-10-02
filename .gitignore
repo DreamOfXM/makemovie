@@ -31,4 +31,8 @@ LAN-ACCESS.md
 PLAN_v*.md
 RESEARCH.md
 packages/db/probe_*.cjs
+packages/db/mint_session_*.cjs
 packages/db/shot-audio-session.cjs
+
+# Agent tooling local config (same category as .qoder/ above)
+.zcodeignore
