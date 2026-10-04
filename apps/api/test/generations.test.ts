@@ -2024,7 +2024,9 @@ describe('project content language', () => {
     })
     expect(shot.statusCode).toBe(201)
     const audioBatch = await trigger(episodeId, 'AUDIO')
-    expect(await requestInput(audioBatch.tasks[0].id)).toEqual({ prompt: 'Shen Yi: There is writing on the back.', contentLocale: 'en' })
+    // 台词就是纯对白（3c6ec03）：说话人标记是剧本约定不是内容，拼进 TTS 文本
+    // 会被念出来（"Shen Yi: There is…" 念成"申壹冒号……"）。
+    expect(await requestInput(audioBatch.tasks[0].id)).toEqual({ prompt: 'There is writing on the back.', contentLocale: 'en' })
   })
 
   it('sends a Chinese project the same base template, plus only the sanctioned duration block', async () => {

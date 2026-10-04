@@ -21,8 +21,9 @@ import type { PipelineDeps } from './deps.js'
 import { taskLog, type LogAnchor } from './execution-log.js'
 import { errorMessage, pollToSettled, toCapability } from './provider-call.js'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
+import { runCharacterVoice } from './voice.js'
 
-type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { include: { episode: { include: { project: true } } } } } }>
+export type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { include: { episode: { include: { project: true } } } } } }>
 
 type CandidateOutcome = { status: 'succeeded' } | { status: 'rework' } | { status: 'exhausted' } | { status: 'next'; error: string }
 
@@ -46,7 +47,7 @@ const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 
  *  作用域阶梯：镜头任务按镜头×阶段；素材任务按任务↔素材多对多；其余按剧集。
  *  重排队（同任务重试）天然兼容：全集的 max ≥ 本任务的 max，(objectKey, version)
  *  唯一键照旧错开。 */
-async function nextArtifactVersion(
+export async function nextArtifactVersion(
   db: PipelineDeps['db'],
   task: { stage: TaskRow['stage']; storyboardId: string | null; batch: { episodeId: string }; assets?: { id: string }[] },
 ): Promise<number> {
@@ -88,6 +89,32 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
   // the clip, and a text-only fallback that says nothing about the lost frame reads as if
   // no conditioning was ever planned.
   const referenceLog: ReferenceRecord[] = []
+
+  // 角色声音优先（r10 音频体系）：说话人绑定了声音且本机 Voicebox 在线时，配音先走
+  // 零成本本机克隆；任何一步不成立（没绑定/引擎不在线/克隆失败）都让位给云端 TTS
+  // 候选——这条路径的价值是「有就用、没有不挡路」。
+  if (task.stage === 'AUDIO') {
+    let voice: Awaited<ReturnType<typeof runCharacterVoice>>
+    try {
+      voice = await runCharacterVoice(task, payload, deps, anchor)
+    } catch (error) {
+      voice = { kind: 'next', error: `voicebox clone: ${errorMessage(error)}` }
+    }
+    if (voice.kind === 'skip') {
+      await taskLog(deps.db, anchor, 'info', 'voice.skip', voice.reason)
+    } else if (voice.kind === 'next') {
+      await taskLog(deps.db, anchor, 'warn', 'voice.fallback', `${voice.error} — falling back to cloud TTS candidates`)
+    } else if (voice.kind === 'succeeded') {
+      const status = await syncBatchStatus(deps.db, task.batchId)
+      await taskLog(deps.db, anchor, 'info', 'task.success', `completed via voicebox-clone (character voice)`)
+      if (status === 'COMPLETED') await autoAdvance(deps, task)
+      return
+    } else {
+      // rework（已重排）与 exhausted（已 FAILED）在 runCharacterVoice 内收尾。
+      return
+    }
+  }
+
   for (const candidate of payload.candidates) {
     let outcome: CandidateOutcome
     await taskLog(deps.db, anchor, 'info', 'candidate.start', `trying ${label(candidate)}`)
@@ -698,7 +725,7 @@ function readFrameReferences(snapshot: string | null): { artifactId: string }[] 
   return references
 }
 
-function parseRequest(snapshot: string | null, fallbackModel: string): ProviderRequest {
+export function parseRequest(snapshot: string | null, fallbackModel: string): ProviderRequest {
   if (!snapshot) throw new Error('task has no requestSnapshot')
   const parsed = JSON.parse(snapshot) as { model?: unknown; input?: unknown; parameters?: unknown }
   return {

@@ -1,143 +1,229 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import type { ModelCapability, ProviderAdapter, ProviderRequest, PollResult, ProbeResult } from './types.js'
 
 /**
  * Voicebox — the local AI voice studio (github.com/jamiepine/voicebox, 56K stars).
  *
- * MakeMovie talks to its REST API (default http://127.0.0.1:17493) for two things:
- *   1. listing voice profiles (GET /profiles) — for the asset panel's voice picker
- *   2. generating speech with a cloned voice (POST /generate) — for the AUDIO stage
+ * MakeMovie talks to its REST API (default http://127.0.0.1:17493, verified against
+ * the shipped app on 2026-10-04) for the character-voice flow:
+ *   1. GET  /health                    — liveness + model/backend facts
+ *   2. GET  /profiles                  — voice profiles (preset | cloned)
+ *   3. POST /profiles                  — create a cloned profile
+ *   4. POST /profiles/:id/samples      — upload reference audio (multipart: file + reference_text)
+ *   5. POST /generate                  — start an async job {profile_id, text, engine?, language?}
+ *   6. GET  /history                   — poll jobs (status: generating|loading_model|completed|failed)
  *
- * Everything runs locally on the user's machine (MLX on Apple Silicon), so this
- * provider costs nothing per call. It is the recommended TTS engine when present;
- * DashScope TTS is the cloud fallback when Voicebox is not running.
- *
- * The adapter is intentionally thin: Voicebox already handles model loading,
- * zero-shot cloning from reference audio, and multi-engine routing. We do not
- * reimplement any of that — we just speak its three-endpoint REST contract.
+ * Generation is asynchronous: /generate returns immediately with a job id, the audio
+ * lands in /history once the job completes (first runs download models, which can take
+ * minutes for the ~1GB clone engine). Completed jobs expose audio_path, a file inside
+ * Voicebox's data dir on this machine; there is no dedicated download endpoint, so the
+ * bytes are read from that local path (worker and Voicebox share the host by design).
  */
 
+export const VOICEBOX_DEFAULT_BASE_URL = 'http://127.0.0.1:17493'
+
 const HEALTH_TIMEOUT_MS = 2000
-const GENERATE_TIMEOUT_MS = 120_000
+const REQUEST_TIMEOUT_MS = 30_000
 
 export interface VoiceboxProfile {
   id: string
   name: string
-  /** Some engines expose more metadata; we only need id and name for the picker. */
+  language: string | null
+  /** 'preset' ships with the app; 'cloned' is fed by uploaded samples. */
+  voice_type: 'preset' | 'cloned' | string
+  default_engine: string | null
+  preset_engine: string | null
+  preset_voice_id: string | null
+  sample_count: number
   [key: string]: unknown
 }
 
-export interface VoiceboxGenerateResult {
-  /** Path to the generated audio file on disk (Voicebox returns a file path). */
-  path?: string
-  /** Or raw audio bytes if the API returns them inline. */
-  bytes?: Uint8Array
-  mimeType: string
+export interface VoiceboxJob {
+  id: string
+  status: string
+  duration: number
+  audio_path: string
+  error: string | null
+  [key: string]: unknown
 }
 
-export function isVoiceboxRunning(baseUrl?: string): Promise<boolean> {
-  const url = baseUrl ?? 'http://127.0.0.1:17493'
-  return fetch(`${url}/profiles`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
-    .then(res => res.ok)
-    .catch(() => false)
+export function voiceboxBaseUrl(baseUrl?: string): string {
+  return baseUrl ?? process.env.VOICEBOX_URL ?? VOICEBOX_DEFAULT_BASE_URL
+}
+
+/**
+ * Completed jobs report audio_path relative to Voicebox's data dir (verified:
+ * "generations/<id>.wav"), so the absolute location is resolved here. An absolute
+ * path is used as-is for forward compatibility.
+ */
+function resolveVoiceboxAudioPath(audioPath: string): string {
+  if (audioPath.startsWith('/')) return audioPath
+  return join(homedir(), 'Library', 'Application Support', 'sh.voicebox.app', audioPath)
+}
+
+export async function isVoiceboxRunning(baseUrl?: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${voiceboxBaseUrl(baseUrl)}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+    if (!res.ok) return false
+    const body = await res.json() as { status?: unknown }
+    return body.status === 'healthy'
+  } catch {
+    return false
+  }
 }
 
 export async function listVoiceboxProfiles(baseUrl?: string): Promise<VoiceboxProfile[]> {
-  const url = baseUrl ?? 'http://127.0.0.1:17493'
-  const res = await fetch(`${url}/profiles`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+  const res = await fetch(`${voiceboxBaseUrl(baseUrl)}/profiles`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
   if (!res.ok) throw new Error(`voicebox profiles: HTTP ${res.status}`)
   const data = await res.json() as unknown
   if (!Array.isArray(data)) return []
-  return data.flatMap(item => {
-    if (typeof item !== 'object' || item === null) return []
-    const record = item as Record<string, unknown>
-    const id = typeof record.id === 'string' ? record.id : typeof record.profile_id === 'string' ? record.profile_id : undefined
-    const name = typeof record.name === 'string' ? record.name : undefined
-    return id ? [{ id, name: name ?? id, ...record }] : []
+  return data.filter((item): item is VoiceboxProfile => {
+    return typeof item === 'object' && item !== null && typeof (item as VoiceboxProfile).id === 'string'
   })
 }
 
-/**
- * Generates speech with a specific cloned voice. The text is the dialogue line;
- * the profile_id selects which cloned voice speaks it. Language defaults to
- * Chinese (the product's primary locale).
- */
-export async function generateVoiceboxSpeech(options: {
-  text: string
+export async function createVoiceboxProfile(options: { name: string; language?: string; baseUrl?: string }): Promise<VoiceboxProfile> {
+  const res = await fetch(`${voiceboxBaseUrl(options.baseUrl)}/profiles`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: options.name, ...(options.language ? { language: options.language } : {}) }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!res.ok) throw new Error(`voicebox create profile: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`)
+  return await res.json() as VoiceboxProfile
+}
+
+/** Feeds one reference clip to a cloned profile. Voicebox requires the clip's transcript. */
+export async function addVoiceboxSample(options: {
   profileId: string
+  bytes: Uint8Array
+  filename: string
+  mimeType: string
+  referenceText: string
+  baseUrl?: string
+}): Promise<void> {
+  const form = new FormData()
+  form.append('file', new Blob([options.bytes as BlobPart], { type: options.mimeType }), options.filename)
+  form.append('reference_text', options.referenceText)
+  const res = await fetch(`${voiceboxBaseUrl(options.baseUrl)}/profiles/${options.profileId}/samples`, {
+    method: 'POST',
+    body: form,
+    // Sample ingestion runs on the model server, which may be busy loading a model.
+    signal: AbortSignal.timeout(120_000),
+  })
+  if (!res.ok) throw new Error(`voicebox add sample: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`)
+}
+
+export async function startVoiceboxJob(options: {
+  profileId: string
+  text: string
   language?: string
   baseUrl?: string
-}): Promise<VoiceboxGenerateResult> {
-  const url = options.baseUrl ?? 'http://127.0.0.1:17493'
-  const res = await fetch(`${url}/generate`, {
+}): Promise<VoiceboxJob> {
+  const res = await fetch(`${voiceboxBaseUrl(options.baseUrl)}/generate`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      text: options.text,
       profile_id: options.profileId,
-      language: options.language ?? 'zh',
+      text: options.text,
+      ...(options.language ? { language: options.language } : {}),
     }),
-    signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`voicebox generate: HTTP ${res.status} ${body.slice(0, 200)}`)
-  }
-  const contentType = res.headers.get('content-type') ?? 'audio/wav'
-  if (contentType.startsWith('audio/')) {
-    const buffer = await res.arrayBuffer()
-    return { bytes: new Uint8Array(buffer), mimeType: contentType }
-  }
-  // Some versions return a JSON with a file path or a data URL.
-  const data = await res.json().catch(() => ({})) as Record<string, unknown>
-  const path = typeof data.path === 'string' ? data.path : typeof data.file === 'string' ? data.file : undefined
-  const dataUrl = typeof data.audio === 'string' ? data.audio : typeof data.url === 'string' ? data.url : undefined
-  if (path) return { path, mimeType: 'audio/wav' }
-  if (dataUrl?.startsWith('data:audio/')) {
-    const [header, base64] = dataUrl.split(',')
-    const mime = /data:(audio\/[^;]+)/.exec(header)?.[1] ?? 'audio/wav'
-    return { bytes: base64ToBytes(base64), mimeType: mime }
-  }
-  throw new Error('voicebox generate: unexpected response shape')
+  if (!res.ok) throw new Error(`voicebox generate: HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`)
+  return await res.json() as VoiceboxJob
 }
 
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
-  return bytes
+export async function getVoiceboxJob(options: { jobId: string; baseUrl?: string }): Promise<VoiceboxJob | null> {
+  const res = await fetch(`${voiceboxBaseUrl(options.baseUrl)}/history`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  if (!res.ok) throw new Error(`voicebox history: HTTP ${res.status}`)
+  const data = await res.json() as { items?: unknown }
+  const items = Array.isArray(data.items) ? data.items : []
+  for (const item of items) {
+    if (typeof item === 'object' && item !== null && (item as VoiceboxJob).id === options.jobId) return item as VoiceboxJob
+  }
+  return null
+}
+
+export interface VoiceboxSpeechResult {
+  bytes: Uint8Array
+  mimeType: string
+  durationMs: number | null
+  job: VoiceboxJob
 }
 
 /**
- * The provider adapter for the capability system. Voicebox is a local service
- * rather than a cloud API, so submit() hits the generate endpoint directly and
- * poll() resolves immediately — there is no async task to wait for.
+ * Runs a generation to completion. `onStatus` receives every status transition
+ * (loading_model during the first ~1GB engine download included) so the caller can
+ * surface progress instead of looking hung.
+ */
+export async function generateVoiceboxSpeech(options: {
+  profileId: string
+  text: string
+  language?: string
+  baseUrl?: string
+  intervalMs?: number
+  timeoutMs?: number
+  onStatus?: (status: string, job: VoiceboxJob) => void
+}): Promise<VoiceboxSpeechResult> {
+  const intervalMs = options.intervalMs ?? 2000
+  const deadline = Date.now() + (options.timeoutMs ?? 600_000)
+  const job = await startVoiceboxJob(options)
+  options.onStatus?.(job.status, job)
+  let last = job.status
+  for (;;) {
+    if (Date.now() > deadline) throw new Error(`voicebox generate: timed out in status "${last}"`)
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+    const current = await getVoiceboxJob({ jobId: job.id, baseUrl: options.baseUrl })
+    if (!current) throw new Error('voicebox generate: job disappeared from history')
+    if (current.status !== last) {
+      last = current.status
+      options.onStatus?.(current.status, current)
+    }
+    if (current.status === 'failed' || current.status === 'error') {
+      throw new Error(`voicebox generate failed: ${String(current.error ?? 'unknown error').slice(0, 300)}`)
+    }
+    if (current.status === 'completed' || (current.status === 'ready' && current.audio_path)) {
+      if (!current.audio_path) throw new Error('voicebox generate: completed without audio_path')
+      const bytes = new Uint8Array(await readFile(resolveVoiceboxAudioPath(current.audio_path)))
+      if (bytes.byteLength === 0) throw new Error('voicebox generate: audio file is empty')
+      return { bytes, mimeType: 'audio/wav', durationMs: current.duration > 0 ? Math.round(current.duration * 1000) : null, job: current }
+    }
+  }
+}
+
+/**
+ * The provider adapter, for the day Voicebox is registered as a connection. Cloned
+ * generation is async in Voicebox, so submit() returns the job id and poll() maps
+ * /history states onto the pipeline's poll contract.
  */
 export function createVoiceboxAdapter(baseUrl?: string): ProviderAdapter {
-  const url = baseUrl ?? 'http://127.0.0.1:17493'
   return {
     provider: 'voicebox',
     async probe(): Promise<ProbeResult> {
-      const running = await isVoiceboxRunning(url)
+      const running = await isVoiceboxRunning(baseUrl)
       return running
-        ? { ok: true, status: 200, message: 'Voicebox is running and answering on /profiles' }
-        : { ok: false, status: 0, message: 'Voicebox is not running (expected at http://127.0.0.1:17493)' }
+        ? { ok: true, status: 200, message: 'Voicebox is running and healthy' }
+        : { ok: false, status: 0, message: `Voicebox is not running (expected at ${voiceboxBaseUrl(baseUrl)})` }
     },
     async submit(_capability: ModelCapability, request: ProviderRequest): Promise<{ taskId: string }> {
       const text = typeof request.input.prompt === 'string' ? request.input.prompt : String(request.input.prompt ?? '')
-      const profileId = typeof request.parameters.profileId === 'string' ? request.parameters.profileId : 'default'
-      const language = typeof request.parameters.language === 'string' ? request.parameters.language : 'zh'
-      const result = await generateVoiceboxSpeech({ text, profileId, language, baseUrl: url })
-      if (!result.bytes) throw new Error('voicebox adapter expects inline audio bytes (file-path results need worker-side reading)')
-      // Inline the result as a base64 data reference in the taskId so poll() returns it
-      // synchronously. Voicebox has no async task to poll — the answer is final.
-      const encoded = JSON.stringify({ m: result.mimeType, b: Array.from(result.bytes).join(',') })
-      return { taskId: `voicebox:${encoded}` }
+      const profileId = typeof request.parameters.profileId === 'string' ? request.parameters.profileId : ''
+      if (!profileId) throw new Error('voicebox adapter requires parameters.profileId (the cloned profile to speak with)')
+      const job = await startVoiceboxJob({ profileId, text, baseUrl })
+      return { taskId: job.id }
     },
     async poll(_capability: ModelCapability, taskId: string): Promise<PollResult> {
-      if (!taskId.startsWith('voicebox:')) throw new Error('not a voicebox task')
-      const payload = JSON.parse(taskId.slice('voicebox:'.length)) as { m: string; b: string }
-      const bytes = new Uint8Array(payload.b.split(',').map(Number))
-      return { status: 'completed', inlineArtifact: { bytes, mimeType: payload.m } }
+      const job = await getVoiceboxJob({ jobId: taskId, baseUrl })
+      if (!job) return { status: 'failed', error: 'voicebox job disappeared from history' }
+      if (job.status === 'failed' || job.status === 'error') return { status: 'failed', error: String(job.error ?? 'voicebox reported failure').slice(0, 300) }
+      if (job.status === 'completed' || (job.status === 'ready' && job.audio_path)) {
+        const bytes = new Uint8Array(await readFile(resolveVoiceboxAudioPath(job.audio_path)))
+        return { status: 'completed', inlineArtifact: { bytes, mimeType: 'audio/wav' } }
+      }
+      return { status: 'running' }
     },
   }
 }

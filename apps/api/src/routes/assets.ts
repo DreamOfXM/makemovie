@@ -1,10 +1,41 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, extname, join } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import type { Asset, AssetVersion, MediaArtifact, PrismaClient, WorkflowStatus } from '@studio/db'
+import { buildObjectKey, probeDuration } from '@studio/media'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 import { toArtifactDto, type ArtifactDto } from './artifacts.js'
 
 const maxDescriptionLength = 200_000
+
+/** 角色声音样本的约束与镜头音频导入保持同一套（episodes.ts 的 VOICE_IMPORT_*）。 */
+const VOICE_SAMPLE_MAX_BYTES = 32 * 1024 * 1024
+const VOICE_SAMPLE_TYPES = new Map([
+  ['.wav', 'audio/wav'],
+  ['.mp3', 'audio/mpeg'],
+  ['.m4a', 'audio/mp4'],
+  ['.aac', 'audio/aac'],
+  ['.ogg', 'audio/ogg'],
+  ['.flac', 'audio/flac'],
+  // 浏览器 MediaRecorder 的原生产物（录音入口）。
+  ['.webm', 'audio/webm'],
+])
+
+/** ffprobe 只吃路径：样本时长探测落一次临时盘，用完即删。 */
+async function probeAudioDuration(bytes: Buffer, filename: string): Promise<number | null> {
+  const dir = await mkdtemp(join(tmpdir(), 'studio-voice-sample-'))
+  const file = join(dir, basename(filename))
+  try {
+    await writeFile(file, bytes)
+    return await probeDuration(file)
+  } catch {
+    return null
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
 
 interface AssetBody {
   kind?: string
@@ -414,6 +445,92 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
         payload: { artifactId, assetName: asset.name },
       })
       return { asset: { id: updated.id, voiceArtifactId: updated.voiceArtifactId } }
+    },
+  )
+
+  // ── 角色声音上传（r10 音频体系）──
+  // 上传一段参考音频 + 它说了什么（transcript），落成音频 artifact 并顺手绑定。
+  // transcript 是克隆引擎的校准输入：Voicebox 的 /samples 端点把它列为必填，
+  // 没有它克隆质量明显劣化，所以在 API 层就要求（空串放行——引擎接受，质量自负）。
+  // 文件校验/探测时长复用镜头音频导入的同一套约束（32MB、五格式、ffprobe）。
+  app.post<{ Params: { episodeId: string; assetId: string } }>(
+    '/episodes/:episodeId/assets/:assetId/voice-upload',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const asset = await app.db.asset.findFirst({ where: { id: request.params.assetId, episodeId: episode.id } })
+      if (!asset) return reply.code(404).send({ error: 'Asset not found' })
+      if (asset.kind !== 'character') return reply.code(400).send({ error: 'voice upload is only for character assets' })
+
+      // 字段与文件可能以任意顺序到达，必须走 parts() 迭代——request.file() 会把
+      // 排在文件前后的文本字段静默吞掉（fastify-multipart 的既有坑）。
+      let fileBuffer: Buffer | null = null
+      let fileMimeType: string | null = null
+      let fileExtension = ''
+      let filename = ''
+      let transcript = ''
+      for await (const part of request.parts({ limits: { fileSize: VOICE_SAMPLE_MAX_BYTES, files: 1 } })) {
+        if (part.type === 'file') {
+          const bytes = await part.toBuffer()
+          if (fileBuffer !== null) continue // 多余文件消费后丢弃
+          const extension = extname(part.filename ?? '').toLowerCase()
+          const mimeType = VOICE_SAMPLE_TYPES.get(extension)
+          if (!mimeType) return reply.code(400).send({ error: `only ${[...VOICE_SAMPLE_TYPES.keys()].join(' ')} files are accepted` })
+          if (part.file.truncated || bytes.byteLength > VOICE_SAMPLE_MAX_BYTES) {
+            return reply.code(413).send({ error: `file is larger than ${Math.round(VOICE_SAMPLE_MAX_BYTES / 1024 / 1024)} MB` })
+          }
+          if (bytes.byteLength === 0) return reply.code(400).send({ error: 'file is empty' })
+          fileBuffer = bytes
+          fileMimeType = mimeType
+          fileExtension = extension
+          filename = part.filename ?? ''
+        } else if (part.fieldname === 'transcript' && typeof part.value === 'string') {
+          transcript = part.value.slice(0, 2000)
+        }
+      }
+      if (!fileBuffer || !fileMimeType) return reply.code(400).send({ error: 'audio file is required' })
+
+      const durationMs = await probeAudioDuration(fileBuffer, filename || `sample${fileExtension}`)
+      const prefix = [auth.organizationId, episode.projectId, episode.id, 'AUDIO', `assetvoice-${asset.id}`].join('/') + '/'
+      const version = (await app.db.mediaArtifact.count({ where: { objectKey: { startsWith: prefix } } })) + 1
+      const objectKey = buildObjectKey({
+        tenantId: auth.organizationId,
+        projectId: episode.projectId,
+        episodeId: episode.id,
+        stage: 'AUDIO',
+        entityId: `assetvoice-${asset.id}`,
+        version,
+        extension: fileExtension.slice(1),
+      })
+      const stored = await app.storage.put(objectKey, new Uint8Array(fileBuffer), fileMimeType)
+      const artifact = await app.db.mediaArtifact.create({
+        data: {
+          organizationId: auth.organizationId,
+          stage: 'AUDIO',
+          objectKey: stored.key,
+          checksum: stored.checksum,
+          mimeType: stored.mimeType,
+          version,
+          durationMs: durationMs || null,
+          metadata: JSON.stringify({ assetVoice: asset.id, transcript, filename, imported: true }),
+        },
+      })
+      const updated = await app.db.asset.update({
+        where: { id: asset.id },
+        data: { voiceArtifactId: artifact.id },
+        select: { id: true, voiceArtifactId: true },
+      })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'asset.voice-upload',
+        entityType: 'Asset',
+        entityId: asset.id,
+        payload: { artifactId: artifact.id, filename, bytes: stored.sizeBytes, transcript: transcript.slice(0, 200) },
+      })
+      return reply.code(201).send({ asset: updated, artifact: toArtifactDto(artifact) })
     },
   )
 

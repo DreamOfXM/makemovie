@@ -17,4 +17,6 @@ export interface PipelineDeps {
   checker?: QualityChecker
   pollIntervalMs?: number
   pollTimeoutMs: number
+  /** Voicebox 本机语音引擎的地址（r10 音频体系）。留空走 VOICEBOX_URL 环境变量再走默认 17493。 */
+  voiceboxBaseUrl?: string
 }
