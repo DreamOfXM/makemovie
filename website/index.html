@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MakeMovie — turn a page of story into a delivered episode</title>
+<meta name="description" content="MakeMovie is a self-hosted AI film and video production platform. Feed it a novel excerpt, a treatment or a screenplay and it returns a finished episode: script, shots, cast references, first frames, clips, character voices, score, subtitles, master and delivery manifest — with your approval in front of every stage that costs you something.">
+<meta name="theme-color" content="#202124">
+<link rel="canonical" href="https://dreamofxm.github.io/makemovie/">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="MakeMovie — turn a page of story into a delivered episode">
+<meta property="og:description" content="Self-hosted AI video production: source text in, audited episode master out. Approval gates before every paid stage, lineage on every artifact, Apache-2.0.">
+<meta property="og:url" content="https://dreamofxm.github.io/makemovie/">
+<meta property="og:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-en.png">
+<meta property="og:image:alt" content="The MakeMovie Workbench: shot list on the left, the selected shot's script in the middle, its frame, clip and voice tracks on the right.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-en.png">
+<link rel="alternate" hreflang="en" href="./">
+<link rel="alternate" hreflang="zh-Hans" href="zh/">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+<symbol id="i-film" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></symbol>
+<symbol id="i-book-open" viewBox="0 0 24 24"><path d="M12 5v16"/><path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+<symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+<symbol id="i-list-checks" viewBox="0 0 24 24"><path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/></symbol>
+<symbol id="i-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+<symbol id="i-workflow" viewBox="0 0 24 24"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
+<symbol id="i-package" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/></symbol>
+<symbol id="i-message-square" viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></symbol>
+</svg>
+<a href="#workflow" class="btn btn-sm btn-outline" style="position:absolute;left:-9999px;top:0">Skip to the production chain</a>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="mark" href="./">
+      <span class="glyph"><svg aria-hidden="true"><use href="#i-film"/></svg></span>
+      MakeMovie
+    </a>
+    <nav class="nav-links" aria-label="Page sections">
+      <a class="hide-sm" href="#different">Why</a>
+      <a class="hide-sm" href="#compare">Compare</a>
+      <a href="#workflow">The chain</a>
+      <a href="#install">Install</a>
+      <a class="hide-sm" href="#faq">FAQ</a>
+      <div class="lang" aria-open="false">
+        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Language">
+          <svg class="ic" aria-hidden="true" style="width:15px;height:15px"><use href="#i-globe"/></svg>
+          English
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+        <div class="lang-menu" role="listbox" aria-label="Language">
+          <a class="lang-opt" role="option" href="./" aria-selected="true">English
+            <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
+          <a class="lang-opt" role="option" href="zh/" aria-selected="false">简体中文
+            <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
+        </div>
+      </div>
+      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie" rel="nofollow">
+        <svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wash" aria-hidden="true"></div>
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot" aria-hidden="true"></span>Free · Open source · Apache-2.0</span>
+    <h1>Turn a page of story into a <span class="thin">delivered</span> episode.</h1>
+    <p class="lead">MakeMovie takes a piece of source writing — a novel excerpt, a treatment, a screenplay — and returns an episode master: the shooting script, the shot list, cast and prop references, first frames, clips, character voices, a score bed, subtitles and a delivery manifest. <strong>Text stages chain on their own. Every stage that costs you something waits for a button.</strong></p>
+
+    <p class="promise">
+      <svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg>
+      <span>Nothing is queued until you see the count. Before a batch starts, the console says how many tasks it will create and which shots are still missing their inputs — so the spending decision is made once, on real numbers, instead of discovered later in a bill.</span>
+    </p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#install"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-terminal"/></svg>Run it locally</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
+    </div>
+
+    <div class="clone">
+      <code>git clone https://github.com/DreamOfXM/makemovie.git</code>
+      <button class="copy" type="button" aria-label="Copy the clone command">
+        <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+        <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+      </button>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>7</b><span>steps on one rail, source text to delivery</span></div>
+      <div class="stat"><b>9</b><span>model slots to bind — 4 of them required</span></div>
+      <div class="stat"><b>8</b><span>bundled model catalogs, one of them needs no key</span></div>
+      <div class="stat"><b>0</b><span>API keys to walk the whole chain end to end</span></div>
+    </div>
+
+    <figure class="shot">
+      <div class="shot-bar" aria-hidden="true">
+        <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
+        <span class="addr">localhost:3010 · Workbench</span>
+      </div>
+      <img src="assets/hero-workbench-en.png" width="2880" height="1800" alt="The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right.">
+      <figcaption>One card per shot: its script on the left, its picture, clip and voice on the right. Captured mid-production on a local instance — of the 13 shots, two have all their artifacts in and await review, one failed its first frame, and the hatched cells have not run yet.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="mission">
+  <div class="wrap">
+    <span class="eyebrow">Why it exists</span>
+    <p>We believe the barrier to telling a story shouldn't be the size of your budget or your crew. MakeMovie exists to open a new possibility for everyone who loves making videos: one person, one computer, and a story worth telling is enough to deliver a real episode.</p>
+  </div>
+</section>
+
+<section id="different">
+  <div class="wrap">
+    <p class="tag">What a prompt box leaves out</p>
+    <h2>You stay the one who decides.</h2>
+    <p class="sub">The generation is the easy part. What breaks a real production is the part nobody builds: who signed for the spend, which version made it into the cut, and what it cost you.</p>
+
+    <div class="cards">
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-list-checks"/></svg></span>
+        <h3>Approval sits in front of the spend</h3>
+        <p>Source, script and reference images each have an approve action, and the pipeline stops at every stage that bills you. Regenerating a stage is deliberate, and a running batch can be stopped from the console — cancelling what has not started instead of letting a mistake finish.</p>
+        <p class="proof">Stages that cost wait for a click</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-scroll-text"/></svg></span>
+        <h3>Every artifact carries its own paper trail</h3>
+        <p>Each script, shot, asset and media file records the task, prompt, provider, model and quality check that produced it. Versions run one continuous number per shot and stage, so a re-run gives v2 rather than minting a second v1 — and a rejected artifact names its reason.</p>
+        <p class="proof">task · prompt · provider · model · score</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg></span>
+        <h3>Usage in units, never a bill</h3>
+        <p>The ledger reports physical quantities only: billed calls, retries, prompt characters, artifact bytes — per stage and per model. There is no currency field anywhere in the console or the API, because the app cannot see what your vendor actually charges you.</p>
+        <p class="proof">calls · retries · characters · bytes</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg></span>
+        <h3>It runs where you run it</h3>
+        <p>Your Postgres, your Redis, your disk or S3 bucket, your keys — encrypted at rest and never returned by a read endpoint. There is no analytics or telemetry code in the app: the only outbound calls go to the model vendors you bind and the storage endpoint you configure.</p>
+        <p class="proof">docker compose up -d</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <p class="tag">Against the crowd</p>
+    <h2>Generators hand you clips. This hands you an episode.</h2>
+    <p class="sub">The category leaders — closed or open source — are excellent at one shot from one prompt; the appetite for one-click video is real. MakeMovie starts from a piece of writing and ends at a master plus an edit list, with a human approval between the two.</p>
+
+    <div class="cmp-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th scope="col">Product</th>
+            <th scope="col">What you feed it</th>
+            <th scope="col">Where it runs</th>
+            <th scope="col">Approval before the render spend</th>
+            <th scope="col">Lineage per artifact</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="us">MakeMovie</th>
+            <td class="us">A novel excerpt, treatment or screenplay</td>
+            <td class="us"><span class="yes">Your own machine or server</span> — Compose stack, Apache-2.0</td>
+            <td class="us"><span class="yes">Yes</span> — built into the pipeline</td>
+            <td class="us"><span class="yes">Yes</span> — task, prompt, model and score</td>
+          </tr>
+          <tr>
+            <th scope="row">LTX Studio</th>
+            <td>Script, concept, image or video</td>
+            <td>Hosted service</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">Runway</th>
+            <td>Prompt or reference media, per generation</td>
+            <td>Hosted service</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">HeyGen</th>
+            <td>Script or prompt, avatar-led</td>
+            <td>Hosted service</td>
+            <td>Stated on its enterprise tier</td>
+            <td>Stated on its enterprise tier</td>
+          </tr>
+          <tr>
+            <th scope="row">Kling</th>
+            <td>Prompt or image, per clip</td>
+            <td>Hosted service</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">Pika</th>
+            <td>Prompt or image, per tool</td>
+            <td>Hosted service</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">MoneyPrinterTurbo</th>
+            <td>A topic or keyword — auto-written copy over retrieved stock footage</td>
+            <td>Your own machine — open source (MIT)</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">ShortGPT</th>
+            <td>A topic — an automation framework: LLM script, sourced footage, voiceover, auto-edit</td>
+            <td>Your own machine — open source (MIT, Python framework)</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">NarratoAI</th>
+            <td>Existing footage — AI writes the narration and auto-edits it into a video</td>
+            <td>Your own machine — open source, self-hosted</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cmp-cards">
+      <div class="cmp-card ours">
+        <h3>MakeMovie</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>A novel excerpt, treatment or screenplay</dd></div>
+          <div><dt>Where it runs</dt><dd>Your own machine or server — Compose stack, Apache-2.0</dd></div>
+          <div><dt>Approval before spend</dt><dd>Yes — built into the pipeline</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>Yes — task, prompt, model and score</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>LTX Studio</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Script, concept, image or video</dd></div>
+          <div><dt>Where it runs</dt><dd>Hosted service</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>Runway</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Prompt or reference media, per generation</dd></div>
+          <div><dt>Where it runs</dt><dd>Hosted service</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>HeyGen</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Script or prompt, avatar-led</dd></div>
+          <div><dt>Where it runs</dt><dd>Hosted service</dd></div>
+          <div><dt>Approval before spend</dt><dd>Stated on its enterprise tier</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>Stated on its enterprise tier</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>Kling</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Prompt or image, per clip</dd></div>
+          <div><dt>Where it runs</dt><dd>Hosted service</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>Pika</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Prompt or image, per tool</dd></div>
+          <div><dt>Where it runs</dt><dd>Hosted service</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>MoneyPrinterTurbo</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>A topic or keyword — auto-written copy over retrieved stock footage</dd></div>
+          <div><dt>Where it runs</dt><dd>Your own machine — open source (MIT)</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>ShortGPT</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>A topic — an automation framework: LLM script, sourced footage, voiceover, auto-edit</dd></div>
+          <div><dt>Where it runs</dt><dd>Your own machine — open source (MIT, Python framework)</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>NarratoAI</h3>
+        <dl>
+          <div><dt>What you feed it</dt><dd>Existing footage — AI writes the narration and auto-edits it into a video</dd></div>
+          <div><dt>Where it runs</dt><dd>Your own machine — open source, self-hosted</dd></div>
+          <div><dt>Approval before spend</dt><dd>—</dd></div>
+          <div><dt>Lineage per artifact</dt><dd>—</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <p class="note">How this was compiled: on 5 October 2026 we read the products' own public pages — LTX Studio's <em>/studio</em>, Runway's <em>/enterprise</em>, HeyGen's home and enterprise pages, Kling's and Pika's home pages, and the GitHub repositories of MoneyPrinterTurbo and ShortGPT (October 2026). A dash means the page did not state it, which is not a claim about the software. LTX does license open model weights for on-prem and air-gapped use; that is the model, not the studio. Inclusion criteria: this table lists products in the same job — turning text or footage into finished video automatically. Model-weight repositories (Wan, Open-Sora, CogVideoX, HunyuanVideo…), render-as-code frameworks (Remotion, Revideo…) and subtitle/translation pipelines (VideoLingo…) all rank high in stars — they are different trades and are deliberately left out. GitHub carries dozens of pipelines in this space; the table keeps the most representative of each path, and if one belongs here, an issue saying which row it should replace is welcome.</p>
+  </div>
+</section>
+
+<section id="workflow">
+  <div class="wrap">
+    <p class="tag">The chain</p>
+    <h2>Eight things happen, in this order.</h2>
+    <p class="sub">Each one is a place on the page, not a hidden API call. You can step through them one at a time or let the text stages relay themselves.</p>
+
+    <div class="chapters">
+      <div class="chapter reveal">
+        <div class="num">01</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-book-open"/></svg></span><h3>Script</h3></div>
+          <p>Paste or upload the source, approve it, and the platform writes the shooting script: scenes, dialogue, speakers — in the language you set for the content, budgeted against the episode's target runtime at 350 spoken characters a minute.</p>
+          <ul>
+            <li>A whole novel is split by chapter; two one-click presets propose the episode boundaries, and they stay editable afterwards.</li>
+            <li>Editing an approved script recomputes its checksum and returns it to draft, so a change cannot slip past a second approval.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">02</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-users"/></svg></span><h3>Cast, props and scenes</h3></div>
+          <p>The breakdown extracts who and what appears and builds one sheet per asset. Its reference image is drawn with the project's style preset, so the cast sheets, the frames and the master share one color DNA instead of every shot arguing with its own reference.</p>
+          <ul>
+            <li>You approve a likeness before it is used, and a voice can be registered on the character rather than on a line.</li>
+            <li>A shot whose text mentions people but names no cast gets those characters' approved appearance injected; a shot with no bound asset is blocked instead of burning quota on an unanchored frame.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">03</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-layers"/></svg></span><h3>Storyboard, shot by shot</h3></div>
+          <p>Every shot carries its own scene, space anchor, dialogue and speaker, the source sentence it came from, and its continuity in and out. Dialogue is data, not decoration: only the shots that speak owe a voice task.</p>
+          <ul>
+            <li>The Workbench opens on the shot, not the engine stage — a pacing strip draws the whole episode as one bar, each cell colored by who is holding that shot.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">04</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-film"/></svg></span><h3>First frames, then motion</h3></div>
+          <p>Frames come from the shot's own text and its bound references; clips are then driven from that frame when an image-to-video model is bound. Both are batch jobs with a planned count, so you know the size of the spend before you take it.</p>
+          <ul>
+            <li>A guard chain sits between the approved text and the call: prompts that never named a visual style get the project style appended, and a frame prompt describing a sequence of movements is warned about rather than rendered as a collage.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">05</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-mic"/></svg></span><h3>Voice and score</h3></div>
+          <p>A voice belongs to a character: upload a reference clip or record one in the browser, give the transcript of what is said in it, and every shot that character speaks draws from it — across this episode and the ones after. You can audition a bound voice before the first shot uses it.</p>
+          <ul>
+            <li><b>Local engines first.</b> When a speaking character has a bound voice, the worker tries the embedded Qwen3-TTS MLX engine, then a local Voicebox instance, then the cloud TTS you bound. Cloning runs on your own hardware and needs Apple Silicon or an NVIDIA GPU; the console detects the chip and says why when the check does not pass.</li>
+            <li><b>Four audio sources per shot</b>, recorded into the manifest: a synthesized voice line, the clip's own native audio, both, or an audio file you imported — plus an importable ambience bed under the voice and a score ducked beneath the dialogue rather than fighting it.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">06</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-eye"/></svg></span><h3>Review, and pick the take that ships</h3></div>
+          <p>Every stage's output stays editable and every re-run keeps the previous revision. For each shot you decide which first frame starts the video, which clip goes into the cut and which take of a line is heard — the composition reads your choice, not the newest file by luck.</p>
+          <ul>
+            <li>A quality gate scores each frame; a rejected artifact shows the failed attempts and the reviewer's deductions, and rework carries those reasons into the next prompt instead of re-rolling blind. The ceiling is a project setting: 1–3 attempts, 2 by default.</li>
+            <li>Attribution that does not lie: a task that died because a vendor ran out of free quota is reported as quota, not as "the review did not like it".</li>
+            <li><b>Pre-screen</b> plays a silent rough cut assembled in the browser from whatever already exists, so you can feel the pacing of the episode before paying for the missing pieces.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">07</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-package"/></svg></span><h3>Master, subtitles, handoff</h3></div>
+          <p>FFmpeg cuts one master per episode: each shot contributes its own succeeded clip, its voice line is padded or trimmed to the shot's measured duration, and the dialogue rides as a soft subtitle track so the picture is never re-encoded. Composition blocks a shot that speaks but has no voice line — but only once a voice model is bound, so an installation that never signed up for audio can still ship.</p>
+          <ul>
+            <li>Beyond the master: an <b>EDL and an FCP XML edit list</b> built from the same shot manifest, so the episode can be finished in a real editor instead of accepted as the pipeline cut it.</li>
+            <li>Delivery is acceptance-gated and versioned: a JSON manifest listing every shot's artifacts with checksums, beside the quality counts. Packaging is refused, with reasons, until composition has completed and every live shot has a succeeded clip.</li>
+            <li>The delivered file carries an AI-generated-content label, per China's GB 45438-2025 rule, and the manifest records whether the marks were written or why they were downgraded — never a silent pass.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">08</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-workflow"/></svg></span><h3>Nine model slots, and a readiness you can trust</h3></div>
+          <p>Script text, storyboard text, image generation, video (text-to-video, image-to-video, reference-to-video), voice, music and visual audit. Bind them in an ordered fallback chain per organization, and override per project.</p>
+          <ul>
+            <li>A slot turns ready only after the provider itself confirms it: <b>Probe</b> checks the credential, <b>Verify this model</b> checks one model by name, and a denial naming the model revokes its verified stamp. A key that cannot call a model never shows up as usable.</li>
+            <li>Bundled catalogs for Alibaba Cloud Bailian / DashScope, Volcano Ark Seedance, Kuaishou Kling, OpenAI, Google, Anthropic, an OpenAI-compatible gateway for private endpoints, and a mock provider. One DashScope connection covers all four required slots and the optional ones too.</li>
+            <li>The five optional slots cost you output rather than blocking it: no voice binding means a silent master, no music means no score bed, no visual audit means shots stay unaudited instead of passing unexamined.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <figure class="shot reveal">
+      <div class="shot-bar" aria-hidden="true">
+        <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
+        <span class="addr">localhost:3010 · Model center</span>
+      </div>
+      <img src="assets/model-center-en.png" width="2880" height="1800" loading="lazy" decoding="async" alt="The MakeMovie Model center, readiness tab: a four-step setup explainer above a list of capability slots each marked Ready, with a banner saying 4 of 4 required slots are usable.">
+      <figcaption>The Model center with keys bound. Every capability slot resolves to the models bound to it, and a slot only turns ready once the provider itself has confirmed the entitlement.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <p class="tag">Install</p>
+    <h2>Run it on your machine.</h2>
+    <p class="sub">One repository, three ways in. Everything below is copied from the README, which is the thing to read if a step here bites.</p>
+
+    <div class="channels">
+      <div class="channel reveal">
+        <h3>Everything in containers</h3>
+        <p>For evaluating it, or deploying it. Postgres, Redis, MinIO, the API, the worker and the console come up together.</p>
+        <div class="codeblock">
+<pre><code>git clone https://github.com/DreamOfXM/makemovie.git
+cd makemovie
+cp .env.example .env   # set STUDIO_MASTER_KEY:
+                       # openssl rand -hex 32
+docker compose --profile full up -d --build
+# database migrations run inside the api container at startup</code></pre>
+          <button class="copy" type="button" aria-label="Copy the Docker commands">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot">Console on <code class="inline">http://localhost:3010</code>, API on 4010.</p>
+      </div>
+
+      <div class="channel reveal">
+        <h3>Apps on the host</h3>
+        <p>The everyday development loop: dependencies in containers, the three apps running locally so hot reload stays yours.</p>
+        <div class="codeblock">
+<pre><code>pnpm install
+cp .env.example .env
+pnpm --filter @studio/db generate
+pnpm build
+docker compose up -d        # postgres, redis, minio
+pnpm db:migrate
+pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
+          <button class="copy" type="button" aria-label="Copy the source commands">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot">Postgres and Redis publish on host ports <b>5433</b> and <b>6380</b> so they do not collide with local installs.</p>
+      </div>
+
+      <div class="channel reveal">
+        <h3>Walk it with no keys</h3>
+        <p>The repository ships a mock provider. Bind a <code class="inline">mock-*</code> model to a slot and every stage completes with synthetic output — no network, no account, no spend.</p>
+        <div class="codeblock">
+<pre><code>Model center → bind:
+  mock-script      mock-storyboard
+  mock-image       mock-t2v   mock-i2v
+  mock-tts         mock-music mock-vlm</code></pre>
+          <button class="copy" type="button" aria-label="Copy the mock model names">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot"><code class="inline">mock-tts</code> and <code class="inline">mock-music</code> synthesize audible tones where FFmpeg is installed, so the voice, score and subtitle chain can be walked end to end offline. It is a test double, not a result.</p>
+      </div>
+    </div>
+
+    <div class="reqs">
+      <span class="req">Node.js 22.18+</span>
+      <span class="req">pnpm 9</span>
+      <span class="req">FFmpeg 6+ on PATH</span>
+      <span class="req">Docker (or any Compose runtime)</span>
+      <span class="req">English &amp; Chinese console</span>
+      <span class="req">Dark &amp; light theme</span>
+    </div>
+    <p class="note">The full quick start, the configuration reference and the two self-hosting modes are in the <a href="https://github.com/DreamOfXM/makemovie#quick-start" rel="nofollow">README</a>. FFmpeg is what composes the master and burns the label; the worker image already includes it.</p>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <p class="tag">FAQ</p>
+    <h2>Questions worth asking first.</h2>
+
+    <div class="faq">
+      <details>
+        <summary>How is this different from LTX Studio, Runway or HeyGen?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>Those products are built around a single generation: you describe a shot, they return it. <a href="https://ltx.io/studio">LTX Studio</a> is the closest to this in shape — it also narrates a concept-to-cut pipeline and offers a storyboard, a timeline and sound design — but the unit you buy is still the generation.</p>
+          <p>MakeMovie's unit is the episode. It starts from a piece of writing you own, keeps dialogue as structured data per shot, gates each stage behind your approval, and finishes with a master, a subtitle track, edit lists and a checksummed manifest. It is also self-hosted and Apache-2.0, which none of the ones above is. If you need one good clip today, use a generator. If you need forty of them to add up to a coherent episode someone can sign off, that is what this is for.</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>Do I need API keys to try it?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>No. Bind the bundled mock provider to every slot and the whole chain runs: script, breakdown, assets, frames, clips, voice, score, composition, delivery. The output is synthetic test media — <code class="inline">mock-tts</code> and <code class="inline">mock-music</code> generate audible tones rather than placeholder bytes — so it is for walking the workflow, not for shipping. Real output needs a model you bind, and that vendor bills you outside this app.</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>Will it tell me what something costs?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>It tells you what something <em>consumes</em>: billed calls, retries, prompt characters, artifact bytes, per stage and per model, for one episode or a whole project. There is deliberately no money field in the console or the API — the platform cannot see your vendor's pricing plan, and an estimate that looks like an invoice is worse than none.</p>
+          <p>What it does before you spend: the pre-run review names the task count and the shots still missing inputs, and one row of the usage board says how many free-quota calls the bound model has left.</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>Which parts are not there yet?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <ul>
+            <li>The reference-to-video slot is listed and bound like the others, but the chain does not consume it yet — clips are driven by a shot's own first frame, not by its cast.</li>
+            <li>The OpenAI, Google and Anthropic adapters are wired from published vendor documentation and covered by contract tests against stubbed HTTP. They have not been run against a live account, and each catalog entry says so on its own row.</li>
+            <li>Audio QC stops at a loudness floor: no per-shot loudness matching, and no option to burn subtitles into the picture instead of shipping them as a soft track.</li>
+            <li>The visual-audit pass mark is fixed at 0.7 and has not been calibrated against live vision-model scores.</li>
+            <li>Deep content audits — source coverage, cross-shot continuity verified after generation — are prompted for, not yet verified afterwards.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details>
+        <summary>Can more than one person use it?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>Yes. Multi-tenant organizations with five roles (owner, admin, editor, reviewer, viewer), database-backed sessions with Argon2id password hashing, member management with session revocation, and an audit trail of state transitions and privileged actions with every action code labelled in plain language rather than dumped as its internal identifier.</p>
+          <p>The console itself is available in English and Chinese, in a dark and a light theme. The language the content is written in is a project setting and is separate from the console's display language.</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>Does anything of mine leave the machine?
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>Only the calls you send to the model vendors you bind, and the artifact bytes if you point storage at an S3 endpoint. MakeMovie does not train models, and there is no analytics or telemetry code in the app. Provider credentials are encrypted at rest with AES-256-GCM and are never returned by a read endpoint.</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="close-cta">
+  <div class="wrap">
+    <h2>Install it — or help us build it.</h2>
+    <p>One repository, Apache-2.0, no paid tier and no hosted version. This is a production line that is still growing, and everyone who loves making videos or loves building software is welcome at the workbench: file an issue for a rough edge, send a pull request to sand it down, or describe the workflow you wish existed. The goal is one thing — a friendlier, more flexible video-making platform that serves more people.</p>
+    <p class="caveat">One thing we'll say plainly: funding limits how thoroughly this project can be tested. Real models, different combinations, edge cases — we've covered a fraction of them. So testing is exactly where help counts the most: run an episode end to end with your own book, swap in a different model, split something long — and when something breaks, file an issue, or send the PR that fixes it. Every one of those paves the road for the next person.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>Open an issue</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>Contribute · send a PR</a>
+    </div>
+    <div class="inline-links">
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md" rel="nofollow">Architecture</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow">Contributing</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.md" rel="nofollow">README</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="site">
+  <div class="wrap cols">
+    <p>MakeMovie is an independent open-source project. It is not affiliated with, endorsed by, or connected to Alibaba Cloud, ByteDance / Volcano Ark, Kuaishou, OpenAI, Google, Anthropic, LTX Studios, Runway, HeyGen, Pika, or the open-source projects mentioned alongside them (MoneyPrinterTurbo, ShortGPT, NarratoAI) — those names appear here only to say what this software does differently, and each cell in the comparison table was read from the vendor's own public page on 5 October 2026.</p>
+    <div class="legal">
+      <span>Interface screenshots: a local instance of this software.</span>
+      <span>Icons: <a href="https://lucide.dev" rel="nofollow">Lucide</a> (ISC).</span>
+      <span>License: <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

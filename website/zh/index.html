@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MakeMovie —— 从一页故事到一集可交付的成片</title>
+<meta name="description" content="MakeMovie 是可自托管的 AI 影视生产平台。喂给它一段小说节选、故事梗概或剧本，它交回一集成片：拍摄剧本、分镜清单、角色与道具参考图、首帧、视频片段、角色配音、配乐、字幕、母版与交付清单——每一个要花钱的阶段都挡在你的审批之后。">
+<meta name="theme-color" content="#07090e">
+<link rel="canonical" href="https://dreamofxm.github.io/makemovie/zh/">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="MakeMovie —— 从一页故事到一集可交付的成片">
+<meta property="og:description" content="可自托管的 AI 视频生产：原文进，可审计的成片出。花钱阶段前设审批闸门，每个产物带血缘，Apache-2.0。">
+<meta property="og:url" content="https://dreamofxm.github.io/makemovie/zh/">
+<meta property="og:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-zh.png">
+<meta property="og:image:alt" content="MakeMovie 制作台：左侧镜头列表，中间选中镜头的剧本，右侧它的首帧、片段与配音轨。">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-zh.png">
+<link rel="alternate" hreflang="en" href="../">
+<link rel="alternate" hreflang="zh-Hans" href="./">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+<symbol id="i-film" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/></symbol>
+<symbol id="i-book-open" viewBox="0 0 24 24"><path d="M12 5v16"/><path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+<symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+<symbol id="i-list-checks" viewBox="0 0 24 24"><path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/></symbol>
+<symbol id="i-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+<symbol id="i-workflow" viewBox="0 0 24 24"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
+<symbol id="i-package" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/></symbol>
+<symbol id="i-message-square" viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></symbol>
+</svg>
+<a href="#workflow" class="btn btn-sm btn-outline" style="position:absolute;left:-9999px;top:0">跳到生产流程</a>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="mark" href="./">
+      <span class="glyph"><svg aria-hidden="true"><use href="#i-film"/></svg></span>
+      MakeMovie
+    </a>
+    <nav class="nav-links" aria-label="页面分区">
+      <a class="hide-sm" href="#different">为什么</a>
+      <a class="hide-sm" href="#compare">对比</a>
+      <a href="#workflow">生产流程</a>
+      <a href="#install">安装</a>
+      <a class="hide-sm" href="#faq">常见问题</a>
+      <div class="lang" aria-open="false">
+        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="语言">
+          <svg class="ic" aria-hidden="true" style="width:15px;height:15px"><use href="#i-globe"/></svg>
+          简体中文
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+        </button>
+        <div class="lang-menu" role="listbox" aria-label="语言">
+          <a class="lang-opt" role="option" href="./" aria-selected="true">简体中文
+            <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
+          <a class="lang-opt" role="option" href="../" aria-selected="false">English
+            <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
+        </div>
+      </div>
+      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie" rel="nofollow">
+        <svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wash" aria-hidden="true"></div>
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot" aria-hidden="true"></span>免费 · 开源 · Apache-2.0</span>
+    <h1>从一页故事，<br>到一集<span class="nb"><span class="thin">可交付</span>的成片。</span></h1>
+    <p class="lead">MakeMovie 收取一段原文——小说节选、故事梗概或剧本——交回一集成片母版：拍摄剧本、分镜清单、角色与道具参考图、首帧、视频片段、角色配音、背景配乐床、字幕轨与交付清单。<strong>文字阶段自行接力。每一个要花钱的阶段都等一个按钮。</strong></p>
+
+    <p class="promise">
+      <svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg>
+      <span>看到真实计数之前，什么都不排队。批次启动前，控制台会写明它将创建多少任务、哪些分镜还缺输入——花费决策因此当场基于真实数字做一次，而不是事后在账单里发现。</span>
+    </p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#install"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-terminal"/></svg>本机跑起来</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
+    </div>
+
+    <div class="clone">
+      <code>git clone https://github.com/DreamOfXM/makemovie.git</code>
+      <button class="copy" type="button" aria-label="复制克隆命令">
+        <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+        <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+      </button>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b>7</b><span>个阶段，从原文到交付</span></div>
+      <div class="stat"><b>9</b><span>个模型槽位可绑定——其中 4 个必需</span></div>
+      <div class="stat"><b>8</b><span>份内置厂商目录，其中一份不需要密钥</span></div>
+      <div class="stat"><b>0</b><span>个 API Key 就能走完整条链</span></div>
+    </div>
+
+    <figure class="shot">
+      <div class="shot-bar" aria-hidden="true">
+        <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
+        <span class="addr">localhost:3010 · 制作台</span>
+      </div>
+      <img src="../assets/hero-workbench-zh.png" width="2880" height="1800" alt="MakeMovie 制作台：左侧镜头清单与每镜产物状态点，中间是选中镜头的剧本字段，右侧是它的首帧、视频片段与配音轨。">
+      <figcaption>每镜一张卡：左边读它的剧本，右边是它的首帧、片段与配音。截图来自本机实例上的一次真实生产——13 个镜头里 2 个产物齐了等审、1 个首帧失败，其余斜纹格还没开跑。</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="mission">
+  <div class="wrap">
+    <span class="eyebrow">为什么做它</span>
+    <p>我们相信，讲故事的门槛，不该由预算和团队规模决定。MakeMovie 想为每一位热爱视频制作的人提供一种新的可能：一个人、一台电脑，也能把心里的故事，做成一集拿得出手的成片。</p>
+  </div>
+</section>
+
+<section id="different">
+  <div class="wrap">
+    <p class="tag">提示框不给你的那部分</p>
+    <h2>决定权始终在你手上。</h2>
+    <p class="sub">生成是最容易的那一环。真正让一次生产散架的是没人做的那部分：这一刀谁批的、哪个版本进了剪辑、它消耗了你什么。</p>
+
+    <div class="cards">
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-list-checks"/></svg></span>
+        <h3>审批挡在花费前面</h3>
+        <p>原文、剧本与参考图各有自己的审批动作，生产线在每一个要计费的阶段停下。重跑某个阶段是你有意的决定，运行中的批次可以在控制台停止——取消的是还没开始的任务，而不是让一个错误跑完。</p>
+        <p class="proof">花钱的阶段等一次点击</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-scroll-text"/></svg></span>
+        <h3>每个产物自带履历</h3>
+        <p>每一版剧本、分镜、资产与媒体文件都记下产出它的任务、提示词、提供商、模型与质量检查。版本号按「分镜 + 阶段」保持一条连续序列，重跑给出 v2 而不是再铸一个 v1——被驳回的产物会写明它的理由。</p>
+        <p class="proof">任务 · 提示词 · 提供商 · 模型 · 评分</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg></span>
+        <h3>用量只报物理量，不报账单</h3>
+        <p>账本只报可核查的物理量——计费调用次数、重抽次数、提示词字符、产物字节——按阶段、按模型。控制台与 API 里刻意没有任何金额字段，因为平台看不见你的厂商实际向你收多少。</p>
+        <p class="proof">调用 · 重抽 · 字符 · 字节</p>
+      </div>
+      <div class="card reveal">
+        <span class="ico"><svg class="ic" aria-hidden="true"><use href="#i-server"/></svg></span>
+        <h3>它跑在你跑的地方</h3>
+        <p>你的 Postgres、你的 Redis、你的磁盘或 S3 桶、你的密钥——落盘加密，且任何读取接口都不会回传它。应用里没有埋点或遥测代码：唯一的外发调用只指向你绑定的模型厂商和你配置的存储端点。</p>
+        <p class="proof">docker compose up -d</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <p class="tag">对照同类</p>
+    <h2>生成器交给你片段，这里交给你一集。</h2>
+    <p class="sub">头部产品与高星开源工具都擅长用一句提示做出一段内容——一键出片的需求是真实的。MakeMovie 从一段文字开始，到母版加一份剪辑列表结束，中间由人签字放行。</p>
+
+    <div class="cmp-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th scope="col">产品</th>
+            <th scope="col">你喂给它什么</th>
+            <th scope="col">跑在哪里</th>
+            <th scope="col">花费前的人工审批</th>
+            <th scope="col">每个产物的血缘</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="us">MakeMovie</th>
+            <td class="us">小说节选、故事梗概或剧本</td>
+            <td class="us"><span class="yes">你自己的机器或服务器</span> —— Compose 栈，Apache-2.0</td>
+            <td class="us"><span class="yes">有</span> —— 内置在生产流程里</td>
+            <td class="us"><span class="yes">有</span> —— 任务、提示词、模型与评分</td>
+          </tr>
+          <tr>
+            <th scope="row">LTX Studio</th>
+            <td>剧本、概念、图像或视频</td>
+            <td>托管服务</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">Runway</th>
+            <td>每次生成一段提示或参考素材</td>
+            <td>托管服务</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">HeyGen</th>
+            <td>剧本或提示，数字人主导</td>
+            <td>托管服务</td>
+            <td>在其企业版页面写明</td>
+            <td>在其企业版页面写明</td>
+          </tr>
+          <tr>
+            <th scope="row">可灵</th>
+            <td>每个片段一段提示或图像</td>
+            <td>托管服务</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">Pika</th>
+            <td>每个工具一段提示或图像</td>
+            <td>托管服务</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">MoneyPrinterTurbo</th>
+            <td>一个主题或关键词——自动写文案、检索现成素材、配解说</td>
+            <td>你自己的机器——开源（MIT）</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">ShortGPT</th>
+            <td>一个主题——自动化框架：LLM 写脚本、找素材、配音、自动剪辑</td>
+            <td>你自己的机器——开源（MIT，Python 框架）</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+          <tr>
+            <th scope="row">NarratoAI</th>
+            <td>现成的视频素材——AI 写解说词并自动剪辑成片</td>
+            <td>你自己的机器——开源，本地部署</td>
+            <td class="no">—</td>
+            <td class="no">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cmp-cards">
+      <div class="cmp-card ours">
+        <h3>MakeMovie</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>小说节选、故事梗概或剧本</dd></div>
+          <div><dt>跑在哪里</dt><dd>你自己的机器或服务器 —— Compose 栈，Apache-2.0</dd></div>
+          <div><dt>花费前的审批</dt><dd>有 —— 内置在生产流程里</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>有 —— 任务、提示词、模型与评分</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>LTX Studio</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>剧本、概念、图像或视频</dd></div>
+          <div><dt>跑在哪里</dt><dd>托管服务</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>Runway</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>每次生成一段提示或参考素材</dd></div>
+          <div><dt>跑在哪里</dt><dd>托管服务</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>HeyGen</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>剧本或提示，数字人主导</dd></div>
+          <div><dt>跑在哪里</dt><dd>托管服务</dd></div>
+          <div><dt>花费前的审批</dt><dd>在其企业版页面写明</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>在其企业版页面写明</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>可灵</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>每个片段一段提示或图像</dd></div>
+          <div><dt>跑在哪里</dt><dd>托管服务</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>Pika</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>每个工具一段提示或图像</dd></div>
+          <div><dt>跑在哪里</dt><dd>托管服务</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>MoneyPrinterTurbo</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>一个主题或关键词——自动写文案、检索现成素材、配解说</dd></div>
+          <div><dt>跑在哪里</dt><dd>你自己的机器——开源（MIT）</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>ShortGPT</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>一个主题——自动化框架：LLM 写脚本、找素材、配音、自动剪辑</dd></div>
+          <div><dt>跑在哪里</dt><dd>你自己的机器——开源（MIT，Python 框架）</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+      <div class="cmp-card">
+        <h3>NarratoAI</h3>
+        <dl>
+          <div><dt>你喂给它什么</dt><dd>现成的视频素材——AI 写解说词并自动剪辑成片</dd></div>
+          <div><dt>跑在哪里</dt><dd>你自己的机器——开源，本地部署</dd></div>
+          <div><dt>花费前的审批</dt><dd>—</dd></div>
+          <div><dt>每个产物的血缘</dt><dd>—</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <p class="note">收录标准：这张表只收「把文字或素材自动变成成片」的同工种产品。模型权重仓库（Wan、Open-Sora、CogVideoX、HunyuanVideo……）、用代码写视频的渲染框架（Remotion、Revideo……）和字幕/翻译流水线（VideoLingo……）星数都不低，但它们是另外的工种，各有其强，不在同一张表里比。GitHub 上同类管线有几十个，这张表选的是各自路径上最有代表性的；想让某一个进来，提个 issue 说它该替换谁。</p>
+
+    <p class="note">这张表怎么来的：2026 年 10 月 5 日，我们逐条读了各家自己的公开页面——LTX Studio 的 <em>/studio</em>、Runway 的 <em>/enterprise</em>、HeyGen 的首页与企业页、可灵与 Pika 的首页。破折号表示那一页没有写明，不是对软件本身的断言。LTX 确实以社区许可开放模型权重供本地与隔离网络部署，那是模型权重，不是它的 Studio 平台。</p>
+  </div>
+</section>
+
+<section id="workflow">
+  <div class="wrap">
+    <p class="tag">生产流程</p>
+    <h2>八件事，按这个顺序发生。</h2>
+    <p class="sub">每一件都是页面上的一个位置，而不是藏在背后的接口调用。你可以逐阶段走，也可以让文字阶段自行接力。</p>
+
+    <div class="chapters">
+      <div class="chapter reveal">
+        <div class="num">01</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-book-open"/></svg></span><h3>剧本</h3></div>
+          <p>粘贴或上传原文、审批它，平台据此撰写拍摄剧本：场景、对白、说话人——用你为项目设定的内容语言，并按整集目标时长预算，口径是每分钟 350 个朗读字符。</p>
+          <ul>
+            <li>整本小说按章节拆开；两枚一键预设会提出分集边界，之后仍可原地编辑。</li>
+            <li>编辑已审批的剧本会重算校验和并退回草稿，于是一次改动不可能绕过第二次审批。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">02</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-users"/></svg></span><h3>角色、道具与场景</h3></div>
+          <p>拆解阶段抽出出场的人与物，为每个资产建一张档案。它的参考图按项目的风格预设绘制，于是定妆照、画面与母版共用同一套色彩 DNA，而不是每一镜都在跟自己的参考图唱反调。</p>
+          <ul>
+            <li>形象先由你审批才会被使用，声音绑定在角色身上而不是某句台词上。</li>
+            <li>文字里出现了人却没点名角色的分镜，会注入这些角色的已审批形象；没有绑定任何资产的分镜会被<b>拦下</b>，以免在一张没有形象锚点的画面上烧掉配额。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">03</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-layers"/></svg></span><h3>逐镜分镜</h3></div>
+          <p>每个分镜携带自己的场景、空间锚点、台词与说话人、它出自原文的哪一句，以及进与出的衔接。台词是数据而非装饰：只有真正开口说话的分镜才欠一条配音任务。</p>
+          <ul>
+            <li>制作台打开在「镜头」上而不是引擎阶段上——一条节奏条把整集画成一根横条，每一格按是谁在拿着这一镜上色。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">04</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-film"/></svg></span><h3>先首帧，再运动</h3></div>
+          <p>首帧由这一镜自己的文字与它绑定的参考图产出；绑定图生视频模型后，片段再从这张首帧出发。两者都是带计划任务数的批次，于是这一刀多大，你在按下之前就知道。</p>
+          <ul>
+            <li>已审批的文字与真正的调用之间站着一层守卫链：从未点名视觉风格的提示词会追加项目风格；描述一连串动作的首帧提示词只<b>告警</b>，而不是被渲染成一张拼贴。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">05</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-mic"/></svg></span><h3>配音与配乐</h3></div>
+          <p>声音属于角色：上传一段参考音频或直接在浏览器里录一段，给出其中所读的文本，此后该角色说的每一镜都从它取声——本集与后续各集都是。第一镜使用之前，绑定的声音可以当场试听。</p>
+          <ul>
+            <li><b>本机引擎优先。</b>说话角色已绑定声音时，worker 先试内嵌的 Qwen3-TTS MLX 引擎，再试本机 Voicebox，最后才回落到你绑定的云端 TTS。克隆跑在你自己的硬件上，需要 Apple Silicon 或 NVIDIA 显卡；控制台会检测芯片，检测不过时写明原因，而不是给你一个下载按钮。</li>
+            <li><b>每镜四种声音来源</b>，都写进交付清单：合成配音、片段原生音频、两者叠加、你导入的音频文件——外加配音下面一条可导入的环境音轨，以及在对白下方自动闪避而不是与它抢的配乐。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">06</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-eye"/></svg></span><h3>评审，并钦定进剪辑的那一版</h3></div>
+          <p>每个阶段的产出都保持可编辑，每次重跑都保留上一版。每一镜由你决定哪张首帧开场、哪个片段进剪辑、哪条配音被听见——合成读的是你的选择，而不是碰巧最新的那个文件。</p>
+          <ul>
+            <li>每帧过质量闸门评分；被驳回的产物会展示失败的几次尝试与评审的扣分点，返工时把这些理由带进下一条提示词，而不是无方向盲抽。重抽上限是项目设置：1 到 3 次，默认 2 次。</li>
+            <li>归因不说谎：因为厂商免费额度耗尽而死掉的任务报成额度，而不是报成「评审没看上」。</li>
+            <li><b>预映</b>在浏览器里用已有产物拼出一条静音粗剪，于是在为缺失部分花钱之前，你就能感觉到整集的节奏。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">07</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-package"/></svg></span><h3>母版、字幕与交接</h3></div>
+          <p>FFmpeg 剪出单集母版：每个分镜贡献自己成功的片段，台词音频按该镜实测时长补齐或裁齐，对白以软字幕轨承载，画面因此无需重编码。有台词却缺配音的分镜会挡住合成——但仅在已绑定语音模型之后，从未开通音频的部署仍可交付。</p>
+          <ul>
+            <li>母版之外的剪辑交接：由同一份分镜清单生成 <b>EDL 与 FCP XML 剪辑列表</b>，整集可以交给真正的剪辑师收尾，而不是按生产线的剪法直接接受。</li>
+            <li>交付由验收闸门把关并版本化：一份 JSON 清单列出每个分镜的产物与校验和，与质量统计并列。合成未完成或仍有在线分镜缺少成功片段时，打包会被拒绝并给出原因。</li>
+            <li>交付文件携带 AI 生成内容标识，依中国 GB 45438-2025 生成合成内容标识规范；清单记录标识是否写入，未写入时记录降级原因——绝不静默通过。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="chapter reveal">
+        <div class="num">08</div>
+        <div>
+          <div class="head"><span class="ico"><svg class="ic ic-lg" aria-hidden="true"><use href="#i-workflow"/></svg></span><h3>九个模型槽位，和可信的就绪度</h3></div>
+          <p>剧本文本、分镜文本、图像生成、视频（文生视频、图生视频、参考生视频）、语音、音乐与视觉审核。按组织绑成一条有序回退链，并可按项目覆盖。</p>
+          <ul>
+            <li>槽位只在厂商自己确认之后才变成就绪：<b>探测</b>校验凭据本身，<b>验证该模型</b>按名字单独校验一个模型，而被点名拒绝的模型会撤销它的就绪标记。调不通的密钥永远不会被算成可用。</li>
+            <li>内置目录：阿里云百炼 / DashScope、火山方舟 Seedance、快手可灵、OpenAI、Google、Anthropic、面向私有端点的 OpenAI 兼容网关，以及一个 mock 提供商。单个 DashScope 连接即可覆盖全部 4 个必需槽位与所有可选槽位。</li>
+            <li>另外五个可选槽位缺的是产出，不是闸门：不绑语音剪出的是静音母版，不绑音乐没有配乐床，不绑视觉审核的画面会标注为未审核，而不是未经审视地通过。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <figure class="shot reveal">
+      <div class="shot-bar" aria-hidden="true">
+        <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
+        <span class="addr">localhost:3010 · 模型中心</span>
+      </div>
+      <img src="../assets/model-center-zh.png" width="2880" height="1800" loading="lazy" decoding="async" alt="MakeMovie 模型中心的就绪度标签页：上方是四步配置流程说明，下方逐个能力槽位标为就绪，横幅显示必填 4/4 已配齐。">
+      <figcaption>配好密钥后的模型中心：每个能力槽位解析到绑定在它上面的模型，而一个槽位只有在厂商自己确认过权限后才会变成就绪。</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <p class="tag">安装</p>
+    <h2>在你自己的机器上跑起来。</h2>
+    <p class="sub">一个仓库，三条入口。下面每一条都抄自 README——如果这里某一步咬人，该读的是 README。</p>
+
+    <div class="channels">
+      <div class="channel reveal">
+        <h3>一切都进容器</h3>
+        <p>用于评估或部署。Postgres、Redis、MinIO、API、worker 与控制台一起起来。</p>
+        <div class="codeblock">
+<pre><code>git clone https://github.com/DreamOfXM/makemovie.git
+cd makemovie
+cp .env.example .env   # 然后设置 STUDIO_MASTER_KEY：
+                       # openssl rand -hex 32
+docker compose --profile full up -d --build
+# 数据库迁移在 api 容器启动时自动执行，起来即用</code></pre>
+          <button class="copy" type="button" aria-label="复制 Docker 命令">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot">控制台在 <code class="inline">http://localhost:3010</code>，API 在 4010。国内网络拉不动镜像或依赖时，前面加 <code class="inline">NPM_REGISTRY=https://registry.npmmirror.com</code>。</p>
+      </div>
+
+      <div class="channel reveal">
+        <h3>应用留在宿主机</h3>
+        <p>日常开发循环：依赖进容器，三个应用跑在本地，热重载还是你的。</p>
+        <div class="codeblock">
+<pre><code>pnpm install
+cp .env.example .env
+pnpm --filter @studio/db generate
+pnpm build
+docker compose up -d        # postgres, redis, minio
+pnpm db:migrate
+pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
+          <button class="copy" type="button" aria-label="复制源码安装命令">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot">Postgres 与 Redis 对外发布在宿主端口 <b>5433</b> 与 <b>6380</b>，以免撞上你本机已有的安装。</p>
+      </div>
+
+      <div class="channel reveal">
+        <h3>零密钥走完全链</h3>
+        <p>仓库自带 mock 提供商。把 <code class="inline">mock-*</code> 模型绑定到槽位，各阶段即以合成产物完成——不出网、不注册、不花钱。</p>
+        <div class="codeblock">
+<pre><code>模型中心 → 绑定：
+  mock-script      mock-storyboard
+  mock-image       mock-t2v   mock-i2v
+  mock-tts         mock-music mock-vlm</code></pre>
+          <button class="copy" type="button" aria-label="复制 mock 模型名">
+            <svg class="ic dupe" aria-hidden="true" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+            <svg class="ic tick" aria-hidden="true" style="width:13px;height:13px"><use href="#i-check"/></svg>
+          </button>
+        </div>
+        <p class="foot">装了 FFmpeg 的环境下，<code class="inline">mock-tts</code> 与 <code class="inline">mock-music</code> 生成真正可听的合成音而非占位文件，于是配音、配乐与字幕链路也能离线走完。它是测试替身，不是结果。</p>
+      </div>
+    </div>
+
+    <div class="reqs">
+      <span class="req">Node.js 22.18+</span>
+      <span class="req">pnpm 9</span>
+      <span class="req">PATH 中的 FFmpeg 6+</span>
+      <span class="req">Docker 或任意 Compose 运行时</span>
+      <span class="req">中英双语控制台</span>
+      <span class="req">深色与浅色主题</span>
+    </div>
+    <p class="note">完整快速开始、配置参考与两种自托管模式都在 <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md" rel="nofollow">README</a> 里。FFmpeg 负责剪出母版并写入标识，worker 镜像已经带了它。</p>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <p class="tag">常见问题</p>
+    <h2>值得先问的几件事。</h2>
+
+    <div class="faq">
+      <details>
+        <summary>这跟 LTX Studio、Runway、HeyGen 有什么区别？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>那些产品围绕一次生成构建：你描述一个镜头，它把它交回来。形状上最接近的是 <a href="https://ltx.io/studio">LTX Studio</a>——它同样讲述一条从概念到成片的路径，并提供分镜板、时间线与声音设计——但你购买的基本单位仍然是「一次生成」。</p>
+          <p>MakeMovie 的基本单位是一集。它从你拥有的一段文字开始，把台词按分镜保存为结构化数据，每个阶段挡在你的审批之后，结束时交出的是一份母版、一条字幕轨、剪辑列表与带校验和的清单。它还可自托管、Apache-2.0，上面几家都不是。今天只需要一个好片段，去用生成器；需要四十个片段凑成一集连贯的、有人能签字的内容，那是它的用途。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>体验它需要 API Key 吗？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>不需要。把内置的 mock 提供商绑到每个槽位，整条链就会跑完：剧本、拆解、资产、首帧、片段、配音、配乐、合成、交付。产出是合成的测试素材——<code class="inline">mock-tts</code> 与 <code class="inline">mock-music</code> 生成可听的声音而不是占位字节——所以它适合走通流程，不适合交出去。真实产出需要你绑定的模型，而那家厂商是在这个应用之外向你计费。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>它会告诉我某件事花多少钱吗？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>它会告诉你某件事<em>消耗</em>了什么：计费调用次数、重抽次数、提示词字符、产物字节，按阶段按模型，单集或整个项目。控制台与 API 里刻意没有金额字段——平台看不见你的厂商定价方案，而一个长得像账单的估算比没有更糟。</p>
+          <p>它在你花出去之前会做的：预审门写明任务数与仍缺输入的分镜，用量看板里有一行写着绑定的模型还剩多少次免费额度。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>哪些部分还没做？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <ul>
+            <li>参考生视频槽位会像其他槽位一样列出并绑定，但链路还没消费它——片段由这一镜自己的首帧驱动，而不是由它的班底驱动。</li>
+            <li>OpenAI、Google 与 Anthropic 三个适配器按厂商公开文档接线，并由对着桩化 HTTP 的契约测试覆盖。它们还没在真实账号上跑过，目录里每一条都这样写着。</li>
+            <li>音频质检停在响度地板：没有逐镜响度对齐，也没有把字幕烧进画面（而不是作为软字幕轨交付）的选项。</li>
+            <li>视觉审核的合格线固定在 70 分，尚未按真实视觉模型的评分校准。</li>
+            <li>深度内容审核——原文覆盖率、生成后的跨镜连续性——已被写进提示词，但还没有生成之后的验证环节。</li>
+          </ul>
+        </div>
+      </details>
+
+      <details>
+        <summary>可以多人一起用吗？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>可以。多租户组织，五种角色（OWNER / ADMIN / EDITOR / REVIEWER / VIEWER），基于数据库的会话与 Argon2id 密码哈希，成员管理并在移除时吊销会话，以及一条完整审计日志记录状态流转与特权操作——每条动作都以人话标签呈现，而不是把内部标识符直接甩在界面上。</p>
+          <p>控制台本身提供中文与英文、深色与浅色主题。内容用哪种语言撰写是项目设置，与控制台的显示语言无关。</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>我的东西会离开这台机器吗？
+          <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="faq-body">
+          <p>只有你发给你绑定的模型厂商的那些调用，以及你把存储指向 S3 端点时的产物字节。MakeMovie 不训练模型，应用里没有埋点或遥测代码。提供商凭据以 AES-256-GCM 落盘加密，任何读取接口都不会回传它。</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="close-cta">
+  <div class="wrap">
+    <h2>装起来，或者和我们一起建它。</h2>
+    <p>一个仓库，Apache-2.0，没有付费档位，也没有托管版。这是一套还在生长的开源生产线——无论你热爱视频制作，还是热爱技术，都欢迎加入建设：提一个 issue 指出毛边，投一个 PR 把它修掉，或者写下你想要的工作流。目标只有一个：把它建成一套更友好、更灵活、能服务更多人的视频制作平台。</p>
+    <p class="caveat">也要坦白一件事：受经费所限，本项目的测试还远谈不上彻底——真实模型、不同组合、各种边界，覆盖到的只是其中一部分。所以测试恰恰是最需要帮手的地方：用你自己的书跑一遍完整链路，换一个模型试试，拆一本长篇；撞见问题就提 issue，愿意的话顺手修掉再投个 PR。每一次这样的参与，都在替下一个人把路铺平。</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>提交 issue</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>参与贡献 · 提 PR</a>
+    </div>
+    <div class="inline-links">
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md" rel="nofollow">架构</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow">贡献</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md" rel="nofollow">README</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="site">
+  <div class="wrap cols">
+    <p>MakeMovie 是一个独立的开源项目。它与阿里云、字节跳动 / 火山方舟、快手、OpenAI、Google、Anthropic、LTX Studios、Runway、HeyGen、Pika，以及 MoneyPrinterTurbo、ShortGPT、NarratoAI 等被提及的开源项目之间没有任何隶属、背书或合作关系——这些名字出现在这里只是为了说明这套软件的不同之处，而对比表里的每一格都在 2026 年 10 月读过它们各自的公开页面。</p>
+    <div class="legal">
+      <span>界面截图：本软件的本机实例。</span>
+      <span>图标：<a href="https://lucide.dev" rel="nofollow">Lucide</a>（ISC）。</span>
+      <span>许可：<a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>。</span>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/site.js"></script>
+</body>
+</html>

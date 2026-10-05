@@ -1,0 +1,44 @@
+# Publish website/ to GitHub Pages on every push to main.
+# The enable step makes this self-service: if the repo's Pages site hasn't been
+# turned on yet, the first run creates it with build_type=workflow — no manual
+# Settings → Pages visit required.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['website/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable Pages (no-op if already on)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST repos/${{ github.repository }}/pages \
+            -f build_type=workflow 2>/dev/null \
+          || gh api --method PUT repos/${{ github.repository }}/pages \
+            -f build_type=workflow 2>/dev/null \
+          || echo "Pages already configured or not permitted; deploy step will tell."
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+      - id: deployment
+        uses: actions/deploy-pages@v4
