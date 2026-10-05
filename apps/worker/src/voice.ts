@@ -14,18 +14,22 @@ import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
 import { recordAssetVersion } from './asset-version.js'
 import { taskLog, type LogAnchor } from './execution-log.js'
 import { nextArtifactVersion, parseRequest, type TaskRow } from './run-task.js'
+import { embeddedEngineStatus, embeddedGenerateSpeech, modelLabel } from './tts-engine.js'
 import type { PipelineDeps } from './deps.js'
 
 /**
- * 角色声音路径（r10 音频体系，2026-09-30 定稿）：说话人绑定了声音且本机
- * Voicebox 在线时，配音走零成本本机克隆——云端 TTS 候选只作降级。
+ * 角色声音路径（r10 音频体系，2026-09-30 定稿）：说话人绑定了声音时，配音走本机
+ * 克隆引擎——云端 TTS 候选只作降级。
+ *
+ * 引擎优先级（2026-10-05 拍板：开源用户主路径=内嵌引擎）：
+ *   1. 内嵌 Qwen3-TTS MLX（引擎目录 venv+模型就绪）——MakeMovie 自己的推理，
+ *      ref_text 可控、无外部依赖
+ *   2. Voicebox 在线（17493）——装了的人白嫖，零额外下载
+ *   3. 都没有 → skip，任务回落云端 TTS 候选（下载引导由 API/UI 层负责提示）
  *
  * 解析链：镜头 speaker → 同集角色素材（同名）→ Asset.voiceArtifactId →
- * 参考音频 + transcript（上传时存进 artifact.metadata）→ Voicebox 克隆
- * profile（按素材 id 幂等创建）→ /generate 异步出声。
- *
- * 任何一步不成立都返回 skip，任务回落到原有云端候选——这条路径的价值在于
- * 「有就用、没有不挡路」。
+ * 参考音频 + transcript（上传时存进 artifact.metadata）。
+ * 任何一步不成立都返回 skip——「有就用、没有不挡路」。
  */
 
 export type VoiceOutcome =
@@ -67,33 +71,47 @@ export async function runCharacterVoice(
     transcript = typeof meta.transcript === 'string' ? meta.transcript : ''
   } catch { /* 旧样本没有 metadata，按空 transcript 走 */ }
 
-  const request = parseRequest(task.requestSnapshot, 'voicebox-clone')
+  const request = parseRequest(task.requestSnapshot, 'qwen3-tts-clone')
   const text = typeof request.input.prompt === 'string' ? request.input.prompt : ''
   if (!text) return { kind: 'next', error: 'voice task has no dialogue text' }
 
+  const refBytes = new Uint8Array(await deps.storage.read(artifact.objectKey))
+
   try {
-    const profileId = await ensureProfile(deps, asset.id, asset.name, artifact.objectKey, artifact.mimeType, transcript)
-    await taskLog(deps.db, anchor, 'info', 'voice.profile', `cloned voice profile ${profileId} for ${speaker}`, { assetId: asset.id })
+    // 引擎 1：内嵌 Qwen3-TTS（产品主路径）。
+    const embedded = embeddedEngineStatus()
+    if (embedded.venvReady && embedded.modelReady) {
+      const speech = await embeddedGenerateSpeech({ text, refBytes, refMimeType: artifact.mimeType, refText: transcript })
+      const label = modelLabel(embedded.modelPath)
+      await taskLog(deps.db, anchor, 'info', 'voice.engine', `embedded ${label} generated in ${speech.generationMs}ms`)
+      return await persistVoiceArtifact(task, payload, deps, anchor, speech.bytes, 'audio/wav', null, {
+        engine: 'embedded', model: label, assetId: asset.id,
+      })
+    }
 
-    const speech = await generateVoiceboxSpeech({
-      profileId,
-      text,
-      language: 'zh',
-      baseUrl: deps.voiceboxBaseUrl,
-      timeoutMs: VOICEBOX_TIMEOUT_MS,
-      onStatus: (status, job) => {
-        // loading_model = 首次下载引擎（~1GB），必须让用户在执行日志里看见进度，否则像卡死。
-        void taskLog(deps.db, anchor, 'info', 'voice.status', `voicebox job ${job.id}: ${status}`, { status })
-      },
-    })
+    // 引擎 2：Voicebox 在线（装了就白嫖）。
+    if (await isVoiceboxRunning(deps.voiceboxBaseUrl)) {
+      const profileId = await ensureProfile(deps, asset.id, artifact.objectKey, artifact.mimeType, transcript)
+      await taskLog(deps.db, anchor, 'info', 'voice.profile', `cloned voice profile ${profileId} for ${speaker}`, { assetId: asset.id })
+      const speech = await generateVoiceboxSpeech({
+        profileId,
+        text,
+        language: 'zh',
+        baseUrl: deps.voiceboxBaseUrl,
+        timeoutMs: VOICEBOX_TIMEOUT_MS,
+        onStatus: (status, job) => {
+          // loading_model = 首次下载引擎（~1GB），必须让用户在执行日志里看见进度，否则像卡死。
+          void taskLog(deps.db, anchor, 'info', 'voice.status', `voicebox job ${job.id}: ${status}`, { status })
+        },
+      })
+      return await persistVoiceArtifact(task, payload, deps, anchor, speech.bytes, speech.mimeType, speech.durationMs, {
+        engine: 'voicebox', model: 'voicebox-clone', profileId, jobId: speech.job.id, assetId: asset.id,
+      })
+    }
 
-    return await persistVoiceArtifact(task, payload, deps, anchor, speech.bytes, speech.mimeType, speech.durationMs, {
-      profileId,
-      jobId: speech.job.id,
-      assetId: asset.id,
-    })
+    return { kind: 'skip', reason: 'no local voice engine (embedded not installed, Voicebox offline) — falling back to cloud TTS' }
   } catch (error) {
-    return { kind: 'next', error: `voicebox clone: ${error instanceof Error ? error.message : String(error)}` }
+    return { kind: 'next', error: `local voice clone: ${error instanceof Error ? error.message : String(error)}` }
   }
 }
 
@@ -101,7 +119,6 @@ export async function runCharacterVoice(
 async function ensureProfile(
   deps: PipelineDeps,
   assetId: string,
-  assetName: string,
   objectKey: string,
   mimeType: string,
   transcript: string,
@@ -132,7 +149,7 @@ async function persistVoiceArtifact(
   bytes: Uint8Array,
   mimeType: string,
   durationMs: number | null,
-  voiceMeta: { profileId: string; jobId: string; assetId: string },
+  voiceMeta: { engine: 'embedded' | 'voicebox'; model: string; assetId: string; profileId?: string; jobId?: string },
 ): Promise<VoiceOutcome> {
   const workdir = await mkdtemp(path.join(tmpdir(), 'studio-voice-'))
   try {
@@ -163,7 +180,7 @@ async function persistVoiceArtifact(
         mimeType: stored.mimeType,
         version,
         durationMs: probedMs,
-        metadata: JSON.stringify({ engine: 'voicebox', ...voiceMeta }),
+        metadata: JSON.stringify({ voice: voiceMeta }),
       },
     })
 
@@ -188,7 +205,7 @@ async function persistVoiceArtifact(
           kind: verdict.kind,
           threshold: QC_THRESHOLD,
           mode: deps.qcMode,
-          candidate: { provider: 'voicebox', model: 'voicebox-clone' },
+          candidate: { provider: voiceMeta.engine, model: voiceMeta.model },
           reasons: verdict.decision === 'pass' ? [] : verdict.reasons,
         }),
         artifactId: artifact.id,
@@ -198,10 +215,10 @@ async function persistVoiceArtifact(
       // 本机克隆零成本：重抽不需要预算权衡，直接再排一抽。
       const maxAttempts = task.batch.episode.project.qcMaxAttempts ?? 3
       if (payload.attempt >= maxAttempts) {
-        await taskLog(deps.db, anchor, 'error', 'task.fail', `voicebox voice: ${verdict.kind} not met after ${maxAttempts} attempts`)
+        await taskLog(deps.db, anchor, 'error', 'task.fail', `${voiceMeta.model}: ${verdict.kind} not met after ${maxAttempts} attempts`)
         await deps.db.generationTask.update({
           where: { id: task.id },
-          data: { status: 'FAILED', errorSnapshot: `voicebox voice: threshold not met after ${maxAttempts} attempts`, provider: 'voicebox', model: 'voicebox-clone' },
+          data: { status: 'FAILED', errorSnapshot: `${voiceMeta.model}: threshold not met after ${maxAttempts} attempts`, provider: voiceMeta.engine, model: voiceMeta.model },
         })
         return { kind: 'exhausted' }
       }
@@ -214,21 +231,21 @@ async function persistVoiceArtifact(
       data: {
         organizationId: task.organizationId,
         taskId: task.id,
-        provider: 'voicebox',
-        model: 'voicebox-clone',
+        provider: voiceMeta.engine,
+        model: voiceMeta.model,
         modality: 'tts',
         inputUnits: 0,
         outputUnits: stored.sizeBytes,
       },
     })
-    await taskLog(deps.db, anchor, 'info', 'candidate.success', `voicebox-clone produced tts artifact via character voice (QC ${verdict.decision})`, { artifactId: artifact.id })
+    await taskLog(deps.db, anchor, 'info', 'candidate.success', `${voiceMeta.model} produced tts artifact via character voice (QC ${verdict.decision})`, { artifactId: artifact.id })
     await deps.db.generationTask.update({
       where: { id: task.id },
       data: {
         status: 'SUCCEEDED',
-        provider: 'voicebox',
-        model: 'voicebox-clone',
-        responseSnapshot: JSON.stringify({ attempt: payload.attempt, engine: 'voicebox', ...voiceMeta, artifactId: artifact.id }),
+        provider: voiceMeta.engine,
+        model: voiceMeta.model,
+        responseSnapshot: JSON.stringify({ attempt: payload.attempt, ...voiceMeta, artifactId: artifact.id }),
       },
     })
     await recordAssetVersion(deps.db, task, artifact.id, '')
