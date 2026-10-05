@@ -61,6 +61,8 @@ interface AssetDto {
   projectAssetId: string | null
   /** 角色绑定的声音 artifact ID（r10 音频体系）。null = 未绑定。 */
   voiceArtifactId: string | null
+  /** 绑定声音的试听信息（未绑定为 null）。 */
+  voiceArtifact: VoiceArtifactDto | null
   /** How many live shots bind this asset — the reach its approval (or edit) has. */
   usageCount: number
   /** 最近一次定妆照任务的实况：界面据此画"生成中/失败"，不靠点击之后的本地回声。 */
@@ -145,7 +147,21 @@ function toVersionDto(version: AssetVersionRow): AssetVersionDto {
   }
 }
 
-function toAssetDto(asset: AssetRow, usageCount = 0, run: AssetRunDto | null = null): AssetDto {
+/** 绑定声音的可试听摘要（无 ArtifactDto 全量——声音行只要能播出来）。 */
+export interface VoiceArtifactDto {
+  id: string
+  downloadUrl: string
+  mimeType: string
+  durationMs: number | null
+  version: number
+}
+
+function toAssetDto(
+  asset: AssetRow,
+  usageCount = 0,
+  run: AssetRunDto | null = null,
+  voice: { id: string; mimeType: string; durationMs: number | null; version: number } | null = null,
+): AssetDto {
   return {
     id: asset.id,
     kind: asset.kind,
@@ -155,6 +171,7 @@ function toAssetDto(asset: AssetRow, usageCount = 0, run: AssetRunDto | null = n
     generationTaskId: asset.generationTaskId,
     projectAssetId: asset.projectAssetId,
     voiceArtifactId: asset.voiceArtifactId,
+    voiceArtifact: voice ? { id: voice.id, downloadUrl: `/artifacts/${voice.id}/content`, mimeType: voice.mimeType, durationMs: voice.durationMs, version: voice.version } satisfies VoiceArtifactDto : null,
     usageCount,
     run,
     versions: asset.versions.map(toVersionDto),
@@ -218,7 +235,16 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
       })
       const usage = await assetUsage(app.db, episode.id)
       const runs = await assetRuns(app.db, episode.id)
-      return { assets: assets.map(asset => toAssetDto(asset, usage.get(asset.id) ?? 0, runs.get(asset.id) ?? null)) }
+      // 绑定的声音素材单独取（Asset↔MediaArtifact 没建 Prisma 关系，避免一次
+      // schema 迁移）：试听按钮需要 downloadUrl/durationMs。
+      const voiceIds = assets.map(asset => asset.voiceArtifactId).filter((id): id is string => id !== null)
+      const voiceArtifacts = voiceIds.length > 0
+        ? new Map((await app.db.mediaArtifact.findMany({
+            where: { id: { in: voiceIds } },
+                            select: { id: true, mimeType: true, durationMs: true, version: true },
+                          })).map(artifact => [artifact.id, artifact]))
+        : new Map<string, { id: string; mimeType: string; durationMs: number | null; version: number }>()
+      return { assets: assets.map(asset => toAssetDto(asset, usage.get(asset.id) ?? 0, runs.get(asset.id) ?? null, asset.voiceArtifactId ? voiceArtifacts.get(asset.voiceArtifactId) ?? null : null)) }
     },
   )
 

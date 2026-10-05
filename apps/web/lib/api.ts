@@ -819,6 +819,8 @@ export interface Asset {
   projectAssetId: string | null
   /** 角色绑定的声音 artifact ID（r10 音频体系）；null = 未绑定。 */
   voiceArtifactId: string | null
+  /** 绑定声音的试听信息（未绑定为 null；episode 级列表才带）。 */
+  voiceArtifact?: { id: string; downloadUrl: string; mimeType: string; durationMs: number | null; version: number } | null
   /** The generation task that extracted this asset from the script; null means a human created it. */
   generationTaskId: string | null
   /** Live shots binding this asset — the reach of its approval (absent when listed outside an episode). */

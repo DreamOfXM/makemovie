@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react'
 import { LoaderCircleIcon, MicIcon, UploadIcon } from 'lucide-react'
 import type { Asset } from '@/lib/api'
+import { artifactHref } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
@@ -129,15 +130,24 @@ export function AssetVoiceTrack({ asset, episodeId, onChanged }: { asset: Asset;
           </div>
         </div>
       ) : asset.voiceArtifactId ? (
-        /* 已绑定 */
+        /* 已绑定：名字 + 试听（绑定的是什么声音，当场能听到）+ 解绑 */
         <div className="flex items-center gap-2">
-          <span className="bg-primary/20 text-primary flex size-7 items-center justify-center rounded">
+          <span className="bg-primary/20 text-primary flex size-7 shrink-0 items-center justify-center rounded">
             <MicIcon className="size-3.5" />
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[11px] font-medium">{asset.name}{t('assets.voiceSuffix')}</p>
             <p className="text-subtle-foreground text-[10px]">{t('assets.voiceBound')}</p>
           </div>
+          {asset.voiceArtifact ? (
+            <audio
+              src={artifactHref(asset.voiceArtifact.downloadUrl)}
+              controls
+              preload="metadata"
+              aria-label={t('assets.voicePreview')}
+              className="h-8 w-40 shrink-0"
+            />
+          ) : null}
           <Button variant="ghost" size="sm" className="text-muted-foreground h-6 px-1.5 text-[10px]" onClick={() => void setVoice(null)}>
             {t('assets.voiceUnbind')}
           </Button>
