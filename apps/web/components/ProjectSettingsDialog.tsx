@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Settings2Icon, VideoIcon, MicIcon } from 'lucide-react'
+import { Settings2Icon, VideoIcon, MicIcon, LanguagesIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -21,6 +21,8 @@ interface ProjectSettingsDialogProps {
   qcMaxAttempts: number | null
   /** 语音模式：video_native=视频自带（默认），voice_clone=用角色绑定音色。null=video_native。 */
   audioMode: 'video_native' | 'voice_clone' | null
+  /** 内容语言（建项时确定，只读展示——界面语言不影响生成内容）。null=尚未取到。 */
+  contentLocale: 'zh' | 'en' | null
   onOpenChange: (open: boolean) => void
   onStyleChanged: () => void
 }
@@ -31,6 +33,7 @@ export function ProjectSettingsDialog({
   currentStyleId,
   qcMaxAttempts,
   audioMode,
+  contentLocale,
   onOpenChange,
   onStyleChanged,
 }: ProjectSettingsDialogProps) {
@@ -82,6 +85,21 @@ export function ProjectSettingsDialog({
         </DialogHeader>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto py-4">
+          {/* 内容语言（只读）：建项时确定。展示在这里，堵住「切了英文界面，
+              生成的怎么还是中文」的误会——界面语言与内容语言是两回事。 */}
+          {contentLocale ? (
+            <section>
+              <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+                {t('settings.contentLocale')}
+                <HelpHint text={t('settings.contentLocaleHint')} />
+              </h3>
+              <p className="text-muted-foreground flex items-center gap-2 text-[13px]">
+                <LanguagesIcon className="size-4" />
+                {contentLocale === 'zh' ? t('settings.localeZh') : t('settings.localeEn')}
+                <span className="text-subtle-foreground text-[11px]">{t('settings.contentLocaleLocked')}</span>
+              </p>
+            </section>
+          ) : null}
           {/* 语音设置（r10 音频体系） */}
           <section>
             <h3 className="mb-2 flex items-center gap-1.5 text-sm font-medium">

@@ -529,6 +529,7 @@ export default function ProjectPage() {
         currentStyleId={project?.stylePresetId ?? null}
         qcMaxAttempts={project?.qcMaxAttempts ?? null}
         audioMode={project?.audioMode ?? null}
+        contentLocale={project?.contentLocale ?? null}
         onOpenChange={setSettingsOpen}
         onStyleChanged={projects.reload}
       />
