@@ -55,10 +55,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+  # ── 应用栈（profile: full）──
+  # `docker compose up -d` 仍只起基础设施（本机开发树自己跑 pnpm dev）；
+  # `docker compose --profile full up -d` 一条命令起整套：迁移内置在 api 的
+  # 启动命令里，起来即用。web 的 /api 代理在构建期指向服务名 api。
   api:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: infra/api.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
@@ -76,9 +83,12 @@ services:
       redis:
         condition: service_healthy
   worker:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: infra/worker.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
@@ -93,11 +103,15 @@ services:
       postgres:
         condition: service_healthy
   web:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: infra/web.Dockerfile
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:4010
+      args:
+        # 反代目标=compose 服务名；浏览器端走相对 /api，两侧一致。
+        API_ORIGIN: http://api:4010
+        NEXT_PUBLIC_API_URL: /api
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     ports: ["3010:3010"]
     depends_on: [api]
 volumes:

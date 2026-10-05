@@ -12,9 +12,11 @@ Self-hostable · One pipeline for short dramas, films, and long-form video:
 
 MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a screenplay — into a finished episode master through an automated, traceable pipeline. Upload the source and approve it; the platform writes the shooting script, breaks it into shots, extracts the cast, props and scenes, generates reference images, first frames and clips, voices the shots that speak, scores them under a background bed, composes the master with a subtitle track, and packages a delivery manifest. Every step is viewable, editable and traceable to the model run that produced it, and a human approval is the checkpoint between spending and shipping.
 
-<p align="center"><img src="./docs/assets/readme/hero-workbench-en.png" width="838" alt="The MakeMovie Workbench: a three-shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right."></p>
+<p align="center"><img src="./docs/assets/readme/hero-workbench-en.png" width="838" alt="The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right."></p>
 
-**Figure 1:** The Workbench, organized by shot: the shot list and its artifact dots on the left, the selected shot's script in the middle, its frame / clip / voice on the right. Captured on a local instance running the built-in mock provider, so the media is locally synthesized test patterns and no API key was involved.
+**Figure 1:** The Workbench, organized by shot: the shot list and its artifact dots on the left, the selected shot's script in the middle, its frame / clip / voice on the right. Captured mid-production on a local instance — of the 13 shots, two have all their artifacts in and await review, one failed its first frame, and the hatched cells have not run yet.
+
+> **Why this exists** — we believe the barrier to telling a story shouldn't be the size of your budget or your crew. MakeMovie is being built in the open, by and for people who love making things: whether your craft is stories or code, you're welcome at the workbench — [file an issue](https://github.com/DreamOfXM/makemovie/issues) for a rough edge, send a pull request ([contributing guide](./CONTRIBUTING.md)) to sand it down, and help shape a friendlier, more flexible video-making platform that serves more people. One honest caveat: funding limits how thoroughly this project can be tested — real models, combinations and edge cases are only fractionally covered — so running your own episode and reporting what breaks (or sending the PR that fixes it) is exactly the help that counts.
 
 ## Features
 
@@ -126,6 +128,18 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Outbound HTTPS to whichever model vendors you bind; the mock provider is the only one that needs no network or key
 
 ## Quick start
+
+**Everything in Docker** (one command, no local Node toolchain; images build from this repo):
+
+```bash
+git clone https://github.com/DreamOfXM/makemovie.git && cd makemovie
+cp .env.example .env
+docker compose --profile full up -d --build      # postgres, redis, minio, api, worker, web
+```
+
+Migrations run inside the api container before it serves; open http://localhost:3010. For a self-hosted deployment set a real `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` — the all-zero key is dev-only and refused nowhere, but it should not survive past your own machine. Prebuilt images on a version tag live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}`; point the compose `build:` blocks at `image:` to use them without building.
+
+**From source** (development tree, hot reload):
 
 ```bash
 pnpm install

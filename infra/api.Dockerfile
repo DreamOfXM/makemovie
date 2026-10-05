@@ -1,23 +1,30 @@
-FROM node:22-alpine
+# MakeMovie API。bookworm-slim 而非 alpine：Prisma 引擎在 musl 上要另配 openssl，
+# slim 上 apt 一步到位。运行时依赖 @studio/* 的 TS 源（Node ≥22.18 原生类型剥离），
+# 镜像带整个 workspace。启动前先跑迁移——单容器部署不需要额外的 migrate 步骤。
+FROM node:22-bookworm-slim AS build
+ARG NPM_REGISTRY=https://registry.npmjs.org/
 WORKDIR /app
-RUN corepack enable
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY apps/api/package.json apps/api/package.json
-COPY packages/config/package.json packages/config/package.json
-COPY packages/db/package.json packages/db/package.json
-COPY packages/domain/package.json packages/domain/package.json
-COPY packages/jobs/package.json packages/jobs/package.json
-COPY packages/media/package.json packages/media/package.json
-COPY packages/providers/package.json packages/providers/package.json
-COPY packages/security/package.json packages/security/package.json
-RUN pnpm install --frozen-lockfile
-COPY . .
-RUN pnpm --filter @studio/db generate \
+RUN corepack enable \
+  && pnpm config set registry ${NPM_REGISTRY} \
+  && corepack prepare pnpm@9.15.0 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY packages packages
+COPY apps/api apps/api
+RUN pnpm install --frozen-lockfile \
+  && pnpm --filter @studio/db generate \
   && pnpm --filter @studio/providers build \
   && pnpm --filter @studio/api build
-ENV NODE_ENV=production \
-    STUDIO_ARTIFACTS_DIR=/var/lib/studio/artifacts
+
+FROM node:22-bookworm-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable
+COPY --from=build /root/.cache/prisma /root/.cache/prisma
+COPY --from=build /root/.cache/node/corepack /root/.cache/node/corepack
+COPY --from=build /app /app
+ENV NODE_ENV=production STUDIO_ARTIFACTS_DIR=/var/lib/studio/artifacts
 RUN mkdir -p /var/lib/studio/artifacts
-VOLUME /var/lib/studio/artifacts
 EXPOSE 4010
-CMD ["sh", "-c", "pnpm --filter @studio/db exec prisma migrate deploy && node apps/api/dist/main.js"]
+# 启动三步：生成 Prisma 客户端（层间路径解析不承诺保留生成物）→ 迁移 → 起 API。
+CMD ["sh", "-c", "pnpm --filter @studio/db generate && pnpm --filter @studio/db exec prisma migrate deploy && pnpm --filter @studio/api exec tsx src/main.ts"]
