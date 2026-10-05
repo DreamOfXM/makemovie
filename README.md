@@ -295,9 +295,9 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 ## Roadmap
 
 - Reference-to-video conditioning: the chain attributes cast and prop assets to each shot, so a clip can be driven by the characters in it and not only by its own first frame
-- Audio quality control beyond the current loudness floor: per-shot loudness matching, and an option to burn subtitles into the picture
-- Deep content audits: source coverage, script coverage, cross-shot continuity verified after generation rather than only prompted for, audio sync
-- Visual-audit threshold calibrated against live vision-model scores
+- Per-shot loudness matching, and an option to burn subtitles into the picture
+- Post-generation content audits: source coverage, script coverage, cross-shot continuity verification, audio sync
+- Audit thresholds calibrated against live vision-model scores
 - Edit cascade from an individual shot to its media
 - Per-edit wording history for hand-edited shots
 

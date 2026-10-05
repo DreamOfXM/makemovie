@@ -32,7 +32,7 @@ Shipped:
 - Episode assets: extracted from the script by the `STORYBOARD` stage or authored by hand with a kind, name, and description; reference-image generation through the image slot; versioning; approval; and binding an asset to the storyboard shots that use it
 - Acceptance-gated delivery packaging with versioned JSON manifests, acceptance, and reasoned rejection
 - Artifact storage behind one `Storage` interface with two backends — local disk (the default) and S3-compatible object storage — injected into the API and the worker and streamed over an authenticated endpoint
-- Docker Compose deployment (compose file and API/worker/web Dockerfiles present; end-to-end startup not yet verified)
+- Docker Compose deployment (compose file and API/worker/web Dockerfiles; `docker compose --profile full up -d --build` brings up the whole stack against a fresh database)
 - Apache-2.0 licensing
 
 Planned:
@@ -332,17 +332,6 @@ What `mode=model` has not been shown to do:
 - **Audio is never heard.** A video artifact is judged on a silent frame.
 - **Base64 payload limits are untested.** A 1024 px JPEG inlined into a request body may exceed a provider's cap.
 - **The failure is loud but not free.** `mode=model` pays for generation before it discovers that no auditor is bound.
-
-Designed, not yet built:
-
-- Source audit: event order, time, location, characters, props, dialogue, required beats, ending
-- Script audit: source coverage and prohibited additions
-- Asset audit: identity references, deduplication, ownership, version
-- Storyboard audit: duration budget, source excerpt, continuity in/out, asset bindings
-- Generation audit: request capability compatibility, reference inputs, artifact ownership
-- Visual audit beyond a single frame: identity across shots, scene, action, prop, lighting, continuity — the slot is bound and one frame is really judged, but nothing yet compares two shots or two attempts
-- Audio audit: dialogue presence, duration, loudness, sync, music and effects tracks
-- Delivery audit: normalized media and reproducible export (complete coverage, the manifest, and checksums ship with delivery packaging)
 
 A stage may be marked complete only with recorded check results. Partial output is explicitly reported as partial.
 

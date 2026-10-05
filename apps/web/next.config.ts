@@ -12,9 +12,15 @@ const nextConfig: NextConfig = {
 
   // Dev-only origin allow-list (Next >= 15.2 answers 404 to any dev request
   // whose origin is not localhost). LAN teammates open the console via
-  // the machine IP, so it must be allowed explicitly; production builds ignore
+  // the machine IP, so extra origins come from the environment
+  // (ALLOWED_DEV_ORIGINS, comma-separated) instead of hard-coding any
+  // machine's address into a public repository; production builds ignore
   // this key entirely.
-  allowedDevOrigins: ['localhost', '127.0.0.1', '192.168.5.99'],
+  allowedDevOrigins: [
+    'localhost',
+    '127.0.0.1',
+    ...(process.env.ALLOWED_DEV_ORIGINS ? process.env.ALLOWED_DEV_ORIGINS.split(',').map(host => host.trim()).filter(Boolean) : []),
+  ],
 
   // Proxy requests to backend API
   async rewrites() {
