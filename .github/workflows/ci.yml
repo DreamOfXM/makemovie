@@ -46,6 +46,11 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @studio/db generate
 
+      # @studio/providers is the one workspace package whose exports point at
+      # dist, so every tsc that imports it fails module resolution without this.
+      - name: Build the providers package
+        run: pnpm --filter @studio/providers build
+
       - name: Typecheck
         run: pnpm typecheck
 
