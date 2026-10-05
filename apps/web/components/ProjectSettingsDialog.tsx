@@ -11,6 +11,7 @@ import { StyleSelector } from '@/components/StyleSelector'
 import { apiErrorMessage } from '@/lib/api-error'
 import { cn } from '@/lib/utils'
 import { HelpHint } from '@/components/ui/help-hint'
+import { VoiceEngineStatus } from '@/components/settings/voice-engine-status'
 
 interface ProjectSettingsDialogProps {
   open: boolean
@@ -130,6 +131,10 @@ export function ProjectSettingsDialog({
                   {t('settings.audioRecommended')}
                 </span>
               </button>
+            </div>
+            {/* 引擎状态条：选了角色声音模式的人在这里看见引擎就绪/可下载/降级原因 */}
+            <div className="mt-2">
+              <VoiceEngineStatus />
             </div>
           </section>
 

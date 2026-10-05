@@ -6,6 +6,7 @@ import type { Asset } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
+import { VoiceEngineStatus } from '@/components/settings/voice-engine-status'
 
 /**
  * 素材面板角色卡下方的"声音"行（r10 音频体系）。
@@ -146,6 +147,7 @@ export function AssetVoiceTrack({ asset, episodeId, onChanged }: { asset: Asset;
         <div className="space-y-1.5">
           <p className="text-subtle-foreground text-[10px]">{t('assets.voiceEmpty')}</p>
           {error ? <p className="text-destructive text-[10px]">{error}</p> : null}
+          <VoiceEngineStatus compact />
           <div className="flex gap-1">
             <Button variant="outline" size="sm" className="h-6 flex-1 text-[10px]" disabled={busy} onClick={() => void recordVoice()}>
               <MicIcon className="size-3" />
