@@ -2,7 +2,7 @@
 
 **AI 影视生产平台 —— 从一段原文到一份可审计、可交付的成片。**
 
-![许可证：Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg) ![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-blue.svg)
+![许可证：Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg) ![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-blue.svg) [![产品主页](https://img.shields.io/badge/%E4%BA%A7%E5%93%81-%E4%B8%BB%E9%A1%B5-blue.svg)](https://dreamofxm.github.io/makemovie/zh/)
 
 [English](./README.md) | 中文
 

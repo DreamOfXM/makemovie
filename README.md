@@ -2,7 +2,7 @@
 
 **AI film & video production platform — from source text to an audited, delivered master.**
 
-![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg) ![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-blue.svg)
+![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg) ![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9-blue.svg) [![Product page](https://img.shields.io/badge/product-page-blue.svg)](https://dreamofxm.github.io/makemovie/)
 
 English | [中文](./README.zh-CN.md)
 
