@@ -53,6 +53,12 @@ export {
 } from './storyboard.js'
 export type { ExtractedAsset, ParsedStoryboard, StoryboardSegment } from './storyboard.js'
 
+// 文字产物的确定性体检:剧本与分镜的结构契约,零成本、不调模型、不会 unjudged。
+// worker 在落库前用它判定这一抽算不算数——不过关就换下一个候选,而不是把一份
+// 分镜切不动的剧本或空描述的分镜写进库里。判据见 prompts.ts 的成文要求。
+export { auditScriptText, auditStoryboardShots, describeFindings } from './content-audit.js'
+export type { ContentFinding } from './content-audit.js'
+
 // 风格预设系统:影响 STORYBOARD/IMAGE/VIDEO 阶段的 prompt。自定义风格走 DB 的
 // StylePreset 表,进程内没有第二条注册路(2026-10-06 撤掉零消费者的 customStyles 注册表)。
 export {

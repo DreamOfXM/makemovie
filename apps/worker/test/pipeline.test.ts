@@ -1469,6 +1469,19 @@ describe('storyboard content contract', () => {
     expect(assets[0]).toMatchObject({ name: 'Lin Wan', description: 'hand authored by the art director', generationTaskId: null })
   })
 
+  it('拒收空描述或有场次缺口的分镜，且一个镜头都不写', async () => {
+    const seed = await seedStoryboard()
+    await expect(
+      recordGeneratedContent(env.db, contentTask(seed), JSON.stringify({
+        shots: [
+          { title: 'A', description: '（全景·平视）屋内', scene: 1 },
+          { title: 'B', description: '   ', scene: 3 },
+        ],
+      })),
+    ).rejects.toThrow('storyboard content rejected')
+    expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
+  })
+
   it('still accepts a bare shot array, which carries no assets', async () => {
     const seed = await seedStoryboard()
     await recordGeneratedContent(env.db, contentTask(seed), '```json\n[{"title":"Rainy street","description":"neon"},{"description":"no title given"}]\n```')
@@ -1526,6 +1539,13 @@ describe('script content contract', () => {
   it('still throws when the script content is empty', async () => {
     const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'SCRIPT', storyboards: 0 })
     await expect(recordGeneratedContent(env.db, scriptTask(seed), '   \n ')).rejects.toThrow('script generation returned empty content')
+    expect(await env.db.scriptVersion.count({ where: { episodeId: seed.episodeId } })).toBe(0)
+  })
+
+  it('拒收没有场景标记的剧本——分镜按场景切块，缺了它长剧本会退化成一次整篇请求', async () => {
+    const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'SCRIPT', storyboards: 0 })
+    await expect(recordGeneratedContent(env.db, scriptTask(seed), '许知意推开门，风灌进来。\n她没说第二句话。'))
+      .rejects.toThrow('script:noSceneMarker')
     expect(await env.db.scriptVersion.count({ where: { episodeId: seed.episodeId } })).toBe(0)
   })
 })

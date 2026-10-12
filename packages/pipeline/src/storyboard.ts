@@ -145,7 +145,11 @@ function totalShotBudget(totalChars: number, targetDurationMs: number | undefine
 
 // 「场景 1」「场景一」「SCENE 1」「Scene 12」都算标记;中文数字兼容历史剧本
 // (mock 与人工稿常用"场景一")。必须以行首出现,对白里提到"场景"不会被误切。
-const SCENE_MARKER = /^[ \t]*(?:场景|SCENE)[ \t]*[0-9０-９〇零一二两三四五六七八九十百]+/
+// 「场景 1」「场景一」「SCENE 1」「Scene 12」都算标记;中文数字兼容历史剧本。
+// 英文标记区分大小写是错的:模型按输出语言自然写作,英文剧本里 `Scene 1:` 才是常态,
+// 只认全大写会让英文剧本既切不开场次、也过不了 content-audit 的剧本体检。
+// 导出供 content-audit.ts 复用:剧本体检与分镜切块必须认同一套标记,改这里两处同核。
+export const SCENE_MARKER = /^[ \t]*(?:场景|scene)[ \t]*[0-9０-９〇零一二两三四五六七八九十百]+/i
 
 function splitSceneUnits(text: string): string[] {
   const units: string[] = []

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { PrismaClient } from '@studio/db'
-import { parseStoryboardJson, type ExtractedAsset } from '@studio/pipeline'
+import { auditScriptText, auditStoryboardShots, describeFindings, parseStoryboardJson, type ExtractedAsset } from '@studio/pipeline'
 
 interface ContentTask {
   id: string
@@ -29,6 +29,10 @@ async function recordScriptVersion(db: PrismaClient, task: ContentTask, text: st
   const episodeId = task.batch.episodeId
   const content = text.trim()
   if (!content) throw new Error('script generation returned empty content')
+  // 结构体检:prompt 的成文契约没被满足时这一抽不算数——换下一个候选,而不是把
+  // 一份分镜切不动的剧本写进库里。零成本,不调模型。
+  const scriptFindings = auditScriptText(content)
+  if (scriptFindings.length > 0) throw new Error(`script content rejected — ${describeFindings(scriptFindings)}`)
 
   const checksum = checksumOf(content)
   const existing = await db.scriptVersion.findFirst({ where: { episodeId, checksum } })
@@ -61,6 +65,10 @@ async function recordStoryboards(db: PrismaClient, task: ContentTask, text: stri
   const episodeId = task.batch.episodeId
   const parsed = parseStoryboardJson(text)
   if (!parsed) throw new Error('storyboard generation returned no parseable shot list')
+  // 结构体检:空描述的分镜首帧没有可生成的画面,素材绑定也会整片失效;场次号要么
+  // 整集不带(旧模型),要么从 1 起连续。不过关即换候选。
+  const shotFindings = auditStoryboardShots(parsed.shots)
+  if (shotFindings.length > 0) throw new Error(`storyboard content rejected — ${describeFindings(shotFindings)}`)
 
   let scriptVersionId: string | null = null
   try {
