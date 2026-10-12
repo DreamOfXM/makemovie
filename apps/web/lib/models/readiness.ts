@@ -205,42 +205,121 @@ export function unwiredSlots(readiness: SlotReadiness[]): SlotReadiness[] {
   return readiness.filter(item => item.usage.stages.length === 0 && !item.usage.qcOnly)
 }
 
-export interface CatalogCoverage {
+/** One vendor's reach over the required slots, in catalog order; never surfaces in the UI on its own. */
+interface ProviderSlotCoverage {
   provider: string
   label: string
   covered: CapabilitySlot[]
-  missing: CapabilitySlot[]
 }
 
 /**
- * How far one provider's brochure gets you, measured with the same `canBind` rule
- * the binding endpoint enforces. The console quotes the best one so "how many
- * vendors do I have to buy" is answered from the catalog rather than from memory.
+ * How far each vendor's brochure gets you, measured with the same `canBind` rule the
+ * binding endpoint enforces. Deduplicated by provider id. Mock is excluded because it
+ * needs no key, so counting it would win every comparison and say nothing.
  */
-function catalogCoverage(catalogs: Catalog[]): CatalogCoverage[] {
+function providerCoverage(catalogs: Catalog[]): ProviderSlotCoverage[] {
   const required = wiredRequiredSlots()
-  return catalogs
-    // Mock needs no key, so counting it would win every comparison and say nothing.
-    .filter(catalog => catalog.provider !== 'mock')
-    .map(catalog => {
-      const pool: BindableCapability[] = catalog.models.map(model => ({
-        capabilityId: `${catalog.provider}:${model.model}`,
-        model: model.model,
-        displayName: model.displayName,
-        modality: model.modality,
-        connectionId: '',
-        connectionName: '',
-        provider: catalog.provider,
-        acceptsFirstFrame: !!model.acceptsFirstFrame,
-        acceptsReferenceImages: !!model.acceptsReferenceImages,
-        maxReferenceImages: model.maxReferenceImages ?? 0,
-      }))
-      const covered = required.filter(slot => candidatesForSlot(pool, slot).length > 0)
-      return { provider: catalog.provider, label: catalog.label, covered, missing: required.filter(slot => !covered.includes(slot)) }
+  const seen = new Set<string>()
+  const result: ProviderSlotCoverage[] = []
+  for (const catalog of catalogs) {
+    if (catalog.provider === 'mock' || seen.has(catalog.provider)) continue
+    seen.add(catalog.provider)
+    const pool: BindableCapability[] = catalog.models.map(model => ({
+      capabilityId: `${catalog.provider}:${model.model}`,
+      model: model.model,
+      displayName: model.displayName,
+      modality: model.modality,
+      connectionId: '',
+      connectionName: '',
+      provider: catalog.provider,
+      acceptsFirstFrame: !!model.acceptsFirstFrame,
+      acceptsReferenceImages: !!model.acceptsReferenceImages,
+      maxReferenceImages: model.maxReferenceImages ?? 0,
+    }))
+    result.push({
+      provider: catalog.provider,
+      label: catalog.label,
+      covered: required.filter(slot => candidatesForSlot(pool, slot).length > 0),
     })
+  }
+  return result
 }
 
-export function bestCatalogCoverage(catalogs: Catalog[]): CatalogCoverage | null {
-  const ranked = catalogCoverage(catalogs).sort((left, right) => right.covered.length - left.covered.length)
-  return ranked[0] ?? null
+export interface SlotCandidateProviders {
+  slot: CapabilitySlot
+  providers: { provider: string; label: string }[]
+}
+
+/** Which vendors could serve each required slot — the "do I need another vendor for this step" answer. */
+export function requiredSlotCoverage(catalogs: Catalog[]): { perSlot: SlotCandidateProviders[]; total: number } {
+  const required = wiredRequiredSlots()
+  const coverage = providerCoverage(catalogs)
+  return {
+    perSlot: required.map(slot => ({
+      slot,
+      providers: coverage
+        .filter(entry => entry.covered.includes(slot))
+        .map(entry => ({ provider: entry.provider, label: entry.label })),
+    })),
+    total: required.length,
+  }
+}
+
+export interface MinimumConnectionsResult {
+  /** Least number of vendors whose union covers every required slot; null when some slot has no candidate at all. */
+  count: number | null
+  /** Minimal combinations in catalog order; only the first `renderLimit` are carried. */
+  combinations: { provider: string; label: string }[][]
+  /** How many minimal combinations exist in total — `combinations` is a prefix of that list. */
+  total: number
+  truncated: boolean
+}
+
+/**
+ * The question a buyer actually asks — "how many connections do I have to open" — answered
+ * by exact set cover over the required slots. Subsets are enumerated by ascending size, and
+ * *all* ties at the minimum are reported: picking one of them would be a recommendation,
+ * which this product does not make. Combinatorial is fine while the catalog stays small
+ * (127 subsets at today's 7 vendors); past ~20 vendors this needs a greedy approximation
+ * with weaker semantics — revisit then, not now.
+ */
+export function minimumConnections(catalogs: Catalog[], renderLimit = 3): MinimumConnectionsResult {
+  const required = wiredRequiredSlots()
+  const coverage = providerCoverage(catalogs)
+  if (required.some(slot => !coverage.some(entry => entry.covered.includes(slot)))) {
+    return { count: null, combinations: [], total: 0, truncated: false }
+  }
+  for (let size = 1; size <= coverage.length; size++) {
+    const found: ProviderSlotCoverage[][] = []
+    eachCombination(coverage, size, combo => {
+      if (required.every(slot => combo.some(entry => entry.covered.includes(slot)))) found.push(combo)
+    })
+    if (found.length > 0) {
+      return {
+        count: size,
+        combinations: found
+          .slice(0, renderLimit)
+          .map(combo => combo.map(({ provider, label }) => ({ provider, label }))),
+        total: found.length,
+        truncated: found.length > renderLimit,
+      }
+    }
+  }
+  return { count: null, combinations: [], total: 0, truncated: false }
+}
+
+function eachCombination<T>(items: readonly T[], size: number, visit: (combo: T[]) => void): void {
+  const pick: T[] = []
+  const walk = (start: number): void => {
+    if (pick.length === size) {
+      visit([...pick])
+      return
+    }
+    for (let index = start; index <= items.length - (size - pick.length); index++) {
+      pick.push(items[index])
+      walk(index + 1)
+      pick.pop()
+    }
+  }
+  walk(0)
 }

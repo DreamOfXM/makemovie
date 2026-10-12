@@ -22,14 +22,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ErrorState } from '@/components/error-state'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
-  bestCatalogCoverage,
   bindableCapabilities,
   candidatesForSlot,
   isHeldUp,
+  minimumConnections,
   readyCount,
+  requiredSlotCoverage,
   slotReadiness,
   unwiredSlots,
   wiredRequiredSlots,
+  type MinimumConnectionsResult,
   type SlotCallBlock,
   type SlotReadiness,
 } from '@/lib/models/readiness'
@@ -96,7 +98,8 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
   const hiddenCount = Math.max(ranked.length - VISIBLE_ROWS, 0)
   const ready = readyCount(readiness)
   const requiredTotal = wiredRequiredSlots().length
-  const coverage = bestCatalogCoverage(catalogs)
+  const slotCoverage = requiredSlotCoverage(catalogs)
+  const minimum = minimumConnections(catalogs)
   const unwired = unwiredSlots(readiness)
   const canWireMock = can('providers:manage') && can('bindings:manage')
 
@@ -190,7 +193,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
         )}
         {list}
         {foldButton}
-        <Footnotes coverage={coverage} coverageTotal={requiredTotal} unwired={unwired} t={t} />
+        <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} t={t} />
       </div>
     )
   }
@@ -216,7 +219,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
           {foldButton}
         </CardContent>
       </Card>
-      <Footnotes coverage={coverage} coverageTotal={requiredTotal} unwired={unwired} t={t} />
+      <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} t={t} />
     </div>
   )
 }
@@ -361,28 +364,47 @@ function consequenceCopy(t: TranslateFn, slot: SlotReadiness['slot']): string {
 }
 
 function Footnotes({
-  coverage,
-  coverageTotal,
+  slotCoverage,
+  minimum,
   unwired,
   t,
 }: {
-  coverage: ReturnType<typeof bestCatalogCoverage>
-  coverageTotal: number
+  slotCoverage: ReturnType<typeof requiredSlotCoverage>
+  minimum: MinimumConnectionsResult
   unwired: SlotReadiness[]
   t: TranslateFn
 }) {
+  const combinations = minimum.combinations
+    .map(combo => combo.map(entry => entry.label).join(t('common.listJoin')))
+    .join(' · ')
   return (
     <>
-      {coverage && (
+      {minimum.count !== null && (
         <p className="text-muted-foreground text-xs leading-relaxed">
-          {coverage.missing.length === 0
-            ? t('models.readiness.coverAll', { label: coverage.label, total: coverageTotal })
-            : t('models.readiness.coverSome', {
-                label: coverage.label,
-                covered: coverage.covered.length,
-                total: coverageTotal,
-                slots: coverage.missing.map(slot => translateEnum(t, 'slots', slot)).join(t('common.listJoin')),
+          {t('models.readiness.coverageMinimum', { count: minimum.count, total: slotCoverage.total, combinations })}
+          {minimum.truncated && (
+            <>
+              {' '}
+              {t('models.readiness.coverageMore', {
+                rest: minimum.total - minimum.combinations.length,
+                count: minimum.count,
               })}
+            </>
+          )}
+        </p>
+      )}
+      {slotCoverage.total > 0 && (
+        <p className="text-muted-foreground text-xs leading-relaxed">
+          {t('models.readiness.coveragePerSlot', {
+            slots: slotCoverage.perSlot
+              .map(entry =>
+                t('models.readiness.coverageSlotCount', {
+                  slot: translateEnum(t, 'slots', entry.slot),
+                  count: entry.providers.length,
+                }),
+              )
+              .join(t('common.listJoin')),
+          })}
         </p>
       )}
       {unwired.length > 0 && (

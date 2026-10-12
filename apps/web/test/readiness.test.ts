@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import type { Binding, CallEvidenceMap, Capability } from '@/lib/api'
-import { isHeldUp, readyCount, slotReadiness, wiredRequiredSlots } from '@/lib/models/readiness'
+import type { Binding, CallEvidenceMap, Capability, Catalog } from '@/lib/api'
+import {
+  isHeldUp,
+  minimumConnections,
+  readyCount,
+  requiredSlotCoverage,
+  slotReadiness,
+  wiredRequiredSlots,
+} from '@/lib/models/readiness'
+import { listCatalogs } from '../../../packages/providers/src/catalog'
 
 /**
  * 就绪度的绿勾不许只凭探测时间戳亮着：额度用尽、权限被收回之后那个时间戳不会自己变红，
@@ -103,5 +111,69 @@ describe('slotReadiness 的真实调用兜底', () => {
     // 两条绑定都活着，但整档跑不通：得分必须诚实，探测时间戳不参与。
     expect(readyCount(blocked)).toBe(0)
     expect(blocked.filter(isHeldUp).map(item => item.slot)).toContain('image_gen')
+  })
+})
+
+/**
+ * 覆盖率脚注的中立性：并列不得只报一家（旧 bestCatalogCoverage 在 dashscope 与
+ * google 同为 4/4 时，稳定排序永远取注册序第一家），用户真问的问题是
+ * 「覆盖必填槽最少要开几家连接」——按集合覆盖算，并列组合全部列出。
+ */
+function realCatalogs(): Catalog[] {
+  return listCatalogs().map(catalog => ({
+    provider: catalog.provider,
+    label: catalog.label,
+    defaultBaseUrl: catalog.defaultBaseUrl,
+    catalogVersion: catalog.catalogVersion,
+    requiresAccessKey: catalog.requiresAccessKey,
+    models: catalog.models,
+  }))
+}
+
+function withoutT2vRows(catalogs: Catalog[], providers: string[]): Catalog[] {
+  return catalogs.map(catalog =>
+    providers.includes(catalog.provider)
+      ? { ...catalog, models: catalog.models.filter(model => model.modality !== 't2v') }
+      : catalog,
+  )
+}
+
+describe('目录覆盖：最少连接数与并列组合', () => {
+  it('真实目录上 dashscope 与 google 并列 4/4，两组都要出现在最小组合里', () => {
+    const result = minimumConnections(realCatalogs())
+    expect(result.count).toBe(1)
+    const combos = result.combinations.map(combo => combo.map(entry => entry.provider))
+    expect(combos).toContainEqual(['dashscope'])
+    expect(combos).toContainEqual(['google'])
+    expect(result.truncated).toBe(false)
+  })
+
+  it('砍掉所有 t2v 行后最小值变 2，组合按目录序枚举且并列全收（超 K 截断）', () => {
+    const catalogs = withoutT2vRows(realCatalogs(), ['dashscope', 'google'])
+    const result = minimumConnections(catalogs)
+    expect(result.count).toBe(2)
+    expect(result.total).toBe(6)
+    expect(result.combinations).toHaveLength(3)
+    expect(result.truncated).toBe(true)
+    expect(result.combinations.some(combo => combo.some(entry => entry.provider === 'dashscope'))).toBe(true)
+  })
+
+  it('某个必填槽没有任何候选厂商时报「无解」，不许显示 0 家', () => {
+    const all = realCatalogs().map(catalog => catalog.provider)
+    expect(minimumConnections(withoutT2vRows(realCatalogs(), all)).count).toBeNull()
+  })
+
+  it('mock 不需要密钥，永不进入组合——哪怕只剩它一家全包', () => {
+    const onlyMock = realCatalogs().filter(catalog => catalog.provider === 'mock')
+    expect(minimumConnections(onlyMock).count).toBeNull()
+    const real = minimumConnections(realCatalogs())
+    expect(real.combinations.every(combo => combo.every(entry => entry.provider !== 'mock'))).toBe(true)
+  })
+
+  it('逐槽候选家数：video_t2v 今天四家可选，顺序跟目录注册序', () => {
+    const { perSlot, total } = requiredSlotCoverage(realCatalogs())
+    expect(total).toBe(4)
+    const video = perSlot.find(entry => entry.slot === 'video_t2v')
+    expect(video?.providers.map(entry => entry.provider)).toEqual(['dashscope', 'seedance', 'kling', 'google'])
   })
 })
