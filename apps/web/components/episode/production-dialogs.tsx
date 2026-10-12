@@ -19,6 +19,7 @@ import { createEpisode, createProject, toWorkflowStatus, type Project, type Stor
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { cn } from '@/lib/utils'
+import { AutomationTierSelector, defaultAutomationTier, type AutomationTierValue } from '@/components/AutomationTierSelector'
 import { Badge } from '@/components/ui/badge'
 import {
   AlertDialog,
@@ -63,6 +64,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const [styleOptions, setStyleOptions] = useState<Array<{ id: string; name: string; nameEn?: string | null }>>([])
   const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [format, setFormat] = useState<ProjectFormat>('short_drama')
+  const [tier, setTier] = useState<AutomationTierValue>(defaultAutomationTier)
   // Minutes in the box, ms on the wire — kept as text so the field can be emptied
   // while typing; the verdict happens on save, not on every keystroke. Switching
   // formats re-seeds the box with that format's default.
@@ -94,6 +96,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     // is a hint the field below can overrule — never a decision made for the user.
     setContentLocale(state.mode === 'rename' ? state.project.contentLocale : locale)
     setFormat('short_drama')
+    setTier(defaultAutomationTier)
     setDurationText(String(formatDefaults.short_drama.targetDurationMs / 60_000))
     setDurationError('')
     setError('')
@@ -115,7 +118,14 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
     setError('')
     try {
       if (state.mode === 'create') {
-        const created = await createProject(api, { name, contentLocale, format, targetDurationMs: Math.round(durationMinutes * 60_000), styleId })
+        const created = await createProject(api, {
+          name,
+          contentLocale,
+          format,
+          targetDurationMs: Math.round(durationMinutes * 60_000),
+          styleId,
+          automationGate: tier,
+        })
         onDone('create', created.name)
       } else {
         await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
@@ -176,6 +186,9 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
                 </SelectContent>
               </Select>
             </Field>
+          )}
+          {state?.mode === 'create' && (
+            <AutomationTierSelector value={tier} onChange={setTier} disabled={busy} />
           )}
           {state?.mode === 'create' && (
             <div className="space-y-1.5">

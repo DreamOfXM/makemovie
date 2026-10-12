@@ -1,12 +1,14 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { defaultAutomationGate, type AutomationGate } from '@studio/domain'
 import { Settings2Icon, VideoIcon, MicIcon, LanguagesIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { AutomationTierSelector, type AutomationTierValue } from '@/components/AutomationTierSelector'
 import { StyleSelector } from '@/components/StyleSelector'
 import { apiErrorMessage } from '@/lib/api-error'
 import { cn } from '@/lib/utils'
@@ -23,6 +25,8 @@ interface ProjectSettingsDialogProps {
   audioMode: 'video_native' | 'voice_clone' | null
   /** 内容语言（建项时确定，只读展示——界面语言不影响生成内容）。null=尚未取到。 */
   contentLocale: 'zh' | 'en' | null
+  /** 制作档位：自动推进时停在哪里等人；null = beforeSpend。 */
+  automationGate: AutomationGate | null
   onOpenChange: (open: boolean) => void
   onStyleChanged: () => void
 }
@@ -34,6 +38,7 @@ export function ProjectSettingsDialog({
   qcMaxAttempts,
   audioMode,
   contentLocale,
+  automationGate,
   onOpenChange,
   onStyleChanged,
 }: ProjectSettingsDialogProps) {
@@ -42,13 +47,15 @@ export function ProjectSettingsDialog({
   const [selectedStyleId, setSelectedStyleId] = useState<string | undefined>(currentStyleId ?? undefined)
   const [attempts, setAttempts] = useState<number>(qcMaxAttempts ?? 2)
   const [mode, setMode] = useState<'video_native' | 'voice_clone'>(audioMode ?? 'video_native')
+  const [gate, setGate] = useState<AutomationGate>(automationGate ?? defaultAutomationGate)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     setSelectedStyleId(currentStyleId ?? undefined)
     setAttempts(qcMaxAttempts ?? 2)
     setMode(audioMode ?? 'video_native')
-  }, [currentStyleId, qcMaxAttempts, audioMode, open])
+    setGate(automationGate ?? defaultAutomationGate)
+  }, [currentStyleId, qcMaxAttempts, audioMode, automationGate, open])
 
   async function handleSave() {
     setSaving(true)
@@ -59,7 +66,11 @@ export function ProjectSettingsDialog({
       })
       await api(`/projects/${projectId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ qcMaxAttempts: attempts, audioMode: mode }),
+        body: JSON.stringify({
+          qcMaxAttempts: attempts,
+          audioMode: mode,
+          automationGate: gate,
+        }),
       })
       toast.success(t('settings.saved'))
       onStyleChanged()
@@ -74,7 +85,8 @@ export function ProjectSettingsDialog({
   const dirty =
     selectedStyleId !== (currentStyleId ?? undefined) ||
     attempts !== (qcMaxAttempts ?? 2) ||
-    mode !== (audioMode ?? 'video_native')
+    mode !== (audioMode ?? 'video_native') ||
+    gate !== (automationGate ?? defaultAutomationGate)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -179,6 +191,11 @@ export function ProjectSettingsDialog({
                 </button>
               ))}
             </div>
+          </section>
+
+          {/* 制作档位：三档节奏，与建项时同一个控件 */}
+          <section>
+            <AutomationTierSelector value={gate} onChange={setGate} disabled={saving} />
           </section>
 
           {/* 视觉风格 */}

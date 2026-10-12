@@ -530,6 +530,7 @@ export default function ProjectPage() {
         qcMaxAttempts={project?.qcMaxAttempts ?? null}
         audioMode={project?.audioMode ?? null}
         contentLocale={project?.contentLocale ?? null}
+        automationGate={project?.automationGate ?? null}
         onOpenChange={setSettingsOpen}
         onStyleChanged={projects.reload}
       />

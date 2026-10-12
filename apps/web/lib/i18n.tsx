@@ -1559,15 +1559,24 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'style.fantasy': 'Fantasy',
     'style.fantasy.desc': 'Magical and surreal imagery with ethereal effects',
 
-    // Pipeline translations
-    'pipeline.select': 'Select pipeline',
-    'pipeline.selectHint': 'Choose the production workflow for your project',
-    'pipeline.standard': 'Standard',
-    'pipeline.standard.desc': 'Full production pipeline with asset generation',
-    'pipeline.quick': 'Quick',
-    'pipeline.quick.desc': 'Fast track without detailed asset creation',
-    'pipeline.audio_focused': 'Audio Focused',
-    'pipeline.audio_focused.desc': 'Enhanced audio production with music and voice',
+    // 制作档位：只有一件事——自动推进在中途哪几处停下来等人，取值见 @studio/domain 的
+    // automationGates。卡片只说结果（什么时候停、钱花在哪一边），不出现流程内部名词。
+    'automation.label': 'Production mode',
+    'automation.hint': 'Where the pipeline stops and waits for you. Asset sign-off and final acceptance always come back to you either way.',
+    'automation.recommended': 'Recommended',
+    'automation.gate.auto.name': 'Tell me when it is done',
+    'automation.gate.auto.desc': 'No interruptions; one stop before delivery, for your acceptance.',
+    'automation.gate.beforeSpend.name': 'Pause before spending',
+    'automation.gate.beforeSpend.desc': 'Script and storyboard run on their own; it stops before the first stage that costs money.',
+    'automation.gate.everyStage.name': 'Ask me every step',
+    'automation.gate.everyStage.desc': 'Script, storyboard, every shot — each one waits for your word.',
+    'automation.invariants': 'Asset sign-off (the character\u2019s face) and final acceptance are always yours to confirm, whatever is set above.',
+    'automation.notice.auto': 'no interruptions — generation runs straight through and stops once before delivery for your acceptance',
+    'automation.notice.beforeSpend': 'text stages (script, storyboard) run on their own; it stops before the first stage that spends money',
+    'automation.notice.everyStage': 'every step stops and waits for your word before continuing',
+    'automation.notice.change': 'Change',
+
+    // Pipeline stage names for the flow rail.
     'pipeline.node.source.desc': 'Upload and approve source material',
     'pipeline.node.script.desc': 'Generate script from approved source',
     'pipeline.node.assets.desc': 'Create characters, props, and scene references',
@@ -3284,15 +3293,24 @@ export const dictionaries: Record<Locale, Record<string, string>> = {
     'style.fantasy': '奇幻',
     'style.fantasy.desc': '魔法与超现实意象，呈现空灵效果',
 
-    // Pipeline translations
-    'pipeline.select': '选择流水线',
-    'pipeline.selectHint': '为项目选择制作流程',
-    'pipeline.standard': '标准流程',
-    'pipeline.standard.desc': '完整制作流水线，含素材生成',
-    'pipeline.quick': '快速流程',
-    'pipeline.quick.desc': '跳过详细素材创建的快速通道',
-    'pipeline.audio_focused': '音频优先',
-    'pipeline.audio_focused.desc': '增强型音频制作，含配乐与配音',
+    // 制作档位：只有一件事——自动推进在中途哪几处停下来等人，取值见 @studio/domain 的
+    // automationGates。卡片只说结果（什么时候停、钱花在哪一边），不出现流程内部名词。
+    'automation.label': '制作方式',
+    'automation.hint': '流水线在哪里停下来等你。无论选哪一档，素材定稿和交付验收都回到你手上。',
+    'automation.recommended': '推荐',
+    'automation.gate.auto.name': '跑完再叫我',
+    'automation.gate.auto.desc': '全程不打扰，只在交付前停一次等你验收。',
+    'automation.gate.beforeSpend.name': '花钱前问',
+    'automation.gate.beforeSpend.desc': '剧本和分镜自动跑完，到第一个要花钱的阶段前停下来等你。',
+    'automation.gate.everyStage.name': '每步都问',
+    'automation.gate.everyStage.desc': '剧本、分镜、每个镜头都停下来等你确认。',
+    'automation.invariants': '素材定稿（角色的脸）与交付验收永远由你确认，不受上面任何设置影响。',
+    'automation.notice.auto': '全程不打扰——生成会一路跑下去，只在交付前停一次等你验收',
+    'automation.notice.beforeSpend': '文字部分（剧本、分镜）会自动跑完，到开始花钱的阶段前停下来等你',
+    'automation.notice.everyStage': '每一步都会停下来等你确认后再继续',
+    'automation.notice.change': '更改',
+
+    // 流程条上的阶段名。
     'pipeline.node.source.desc': '上传并审批源材料',
     'pipeline.node.script.desc': '从已审批源文档生成剧本',
     'pipeline.node.assets.desc': '创建角色、道具和场景参考',

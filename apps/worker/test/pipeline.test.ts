@@ -1587,6 +1587,29 @@ describe('auto-advance', () => {
     expect(queued.every(payload => payload.candidates[0]?.model === 'mock-image')).toBe(true)
   })
 
+  it('auto 档越过花钱阶段自己跑下去——同一起手，差别只在档位', async () => {
+    // 与上一条完全相同的起手（分镜跑完、剧本已批、素材已提，ASSET 是下一个可跑阶段），
+    // 只把项目的 automationGate 设成 auto：默认档停下来等人的那一步，这一档自己排上队。
+    // 两条测试并排放在一起，就是「档位只改了停/走，没改别的」的证明。
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await env.db.scriptVersion.create({ data: { episodeId: seed.episodeId, version: 1, content: 'the approved script', checksum: 'advance-auto-script', status: 'APPROVED' } })
+    await bindImageGen(seed)
+    await env.db.project.updateMany({ where: { organizationId: seed.organizationId }, data: { automationGate: 'auto' } })
+
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const assets = await env.db.asset.findMany({ where: { episodeId: seed.episodeId } })
+    const assetBatch = await env.db.generationBatch.findFirstOrThrow({ where: { episodeId: seed.episodeId, stage: 'ASSET' } })
+    expect(assetBatch.plannedCount).toBe(assets.length)
+    const queued = await env.takeWaitingRunTasks()
+    expect(queued).toHaveLength(assets.length)
+    expect(queued.every(payload => payload.candidates[0]?.model === 'mock-image')).toBe(true)
+
+    // 再往下仍然会停在素材定稿：首帧按素材外观生成，素材还在草稿就该停在这里让人定稿。
+    // 这一条与档位无关，是 nextRunnableStage 的结构保证——auto 不是无护栏的。
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
+  })
+
   it('does not advance when the next stage is gated or has no candidate', async () => {
     // No approved script and no image_gen binding: the extracted assets make ASSET the
     // next runnable stage but it has no verified candidate to resolve, and IMAGE/VIDEO

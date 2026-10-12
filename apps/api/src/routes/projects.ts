@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { ProjectFormat } from '@studio/db'
-import { contentLocales, durationOutOfRange, formatDefaults, formatDurationRange, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
+import { automationGates, contentLocales, durationOutOfRange, formatDefaults, formatDurationRange, isAutomationGate, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -43,7 +43,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
-  app.post<{ Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; styleId?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
+  app.post<{ Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; styleId?: string; automationGate?: string } }>('/projects', { preHandler: requirePermission('project:create') }, async (request, reply) => {
     const auth = request.auth!
     const name = request.body?.name?.trim()
     if (!name) return reply.code(400).send({ error: 'name is required' })
@@ -68,6 +68,12 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (request.body?.targetDurationMs !== undefined && durationOutOfRange(format, request.body.targetDurationMs)) {
       return reply.code(400).send({ error: `targetDurationMs must be between ${range.minMs} and ${range.maxMs} for format ${format}` })
     }
+    // 制作档位可选。缺省即 null，读侧按 beforeSpend 解释——与引入档位之前的行为一致，
+    // 所以「不填」就是「维持现状」，不需要默认值兜底。
+    const automationGate = request.body?.automationGate
+    if (automationGate !== undefined && automationGate !== null && !isAutomationGate(automationGate)) {
+      return reply.code(400).send({ error: `automationGate must be one of ${automationGates.join(', ')} (null restores the default)` })
+    }
     const prismaFormat = ProjectFormat[format.toUpperCase() as keyof typeof ProjectFormat]
     const project = await app.db.$transaction(async tx => {
       const created = await tx.project.create({
@@ -78,6 +84,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           format: prismaFormat,
           stylePresetId: style.id,
           ...(request.body?.targetDurationMs === undefined ? {} : { targetDurationMs: request.body?.targetDurationMs }),
+          ...(automationGate === undefined ? {} : { automationGate }),
         },
       })
       // A film is a one-episode project, so its single episode exists from the
@@ -89,11 +96,11 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       }
       return created
     })
-    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale, format: project.format, targetDurationMs: project.targetDurationMs } })
+    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.create', entityType: 'Project', entityId: project.id, payload: { name, contentLocale: project.contentLocale, format: project.format, targetDurationMs: project.targetDurationMs, automationGate: project.automationGate } })
     return reply.code(201).send(project)
   })
 
-  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; qcMaxAttempts?: number | null; audioMode?: 'video_native' | 'voice_clone' | null } }>(
+  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; qcMaxAttempts?: number | null; audioMode?: 'video_native' | 'voice_clone' | null; automationGate?: string | null } }>(
     '/projects/:projectId',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
@@ -105,9 +112,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (request.body?.format !== undefined || request.body?.targetDurationMs !== undefined) {
         return reply.code(400).send({ error: 'format and targetDurationMs are set at project creation and cannot be changed here' })
       }
-      const { name, contentLocale, qcMaxAttempts, audioMode } = request.body ?? {}
-      if (name === undefined && contentLocale === undefined && qcMaxAttempts === undefined && audioMode === undefined) {
-        return reply.code(400).send({ error: 'name, contentLocale, qcMaxAttempts or audioMode is required' })
+      const { name, contentLocale, qcMaxAttempts, audioMode, automationGate } = request.body ?? {}
+      if (name === undefined && contentLocale === undefined && qcMaxAttempts === undefined && audioMode === undefined && automationGate === undefined) {
+        return reply.code(400).send({ error: 'name, contentLocale, qcMaxAttempts, audioMode or automationGate is required' })
       }
       if (name !== undefined && !name.trim()) return reply.code(400).send({ error: 'name is required' })
       if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
@@ -120,6 +127,10 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (qcMaxAttempts !== undefined && qcMaxAttempts !== null && ![1, 2, 3].includes(qcMaxAttempts)) {
         return reply.code(400).send({ error: 'qcMaxAttempts must be 1, 2 or 3 (null restores the default)' })
       }
+      // 制作档位：null 回到默认（beforeSpend），即引入档位之前的行为。
+      if (automationGate !== undefined && automationGate !== null && !isAutomationGate(automationGate)) {
+        return reply.code(400).send({ error: `automationGate must be one of ${automationGates.join(', ')} (null restores the default)` })
+      }
       const updated = await app.db.project.update({
         where: { id: project.id },
         data: {
@@ -127,6 +138,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           ...(contentLocale === undefined ? {} : { contentLocale }),
           ...(qcMaxAttempts === undefined ? {} : { qcMaxAttempts }),
           ...(audioMode === undefined ? {} : { audioMode }),
+          ...(automationGate === undefined ? {} : { automationGate }),
         },
       })
       await recordAudit(app.db, {
@@ -135,7 +147,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         action: 'project.update',
         entityType: 'Project',
         entityId: project.id,
-        payload: { from: { name: project.name, contentLocale: project.contentLocale, qcMaxAttempts: project.qcMaxAttempts }, to: { name: updated.name, contentLocale: updated.contentLocale, qcMaxAttempts: updated.qcMaxAttempts, audioMode: updated.audioMode } },
+        payload: { from: { name: project.name, contentLocale: project.contentLocale, qcMaxAttempts: project.qcMaxAttempts, automationGate: project.automationGate }, to: { name: updated.name, contentLocale: updated.contentLocale, qcMaxAttempts: updated.qcMaxAttempts, audioMode: updated.audioMode, automationGate: updated.automationGate } },
       })
       return updated
     },

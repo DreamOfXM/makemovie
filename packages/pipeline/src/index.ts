@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { AudioSource, PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
-import type { CapabilitySlot, ContentLocale, GenerationStage } from '@studio/domain'
-import { generationStages, isContentLocale, needsImportedVoice, needsTtsVoice, planVideoModels, recordedAudioMode, stageSlot } from '@studio/domain'
+import type { AutomationGate, CapabilitySlot, ContentLocale, GenerationStage } from '@studio/domain'
+import { defaultAutomationGate, generationStages, isAutomationGate, isContentLocale, needsImportedVoice, needsTtsVoice, planVideoModels, recordedAudioMode, stageSlot } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
 import { buildFilmScriptPrompt, buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
 import { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE, type GuardCharacterInfo, type GuardFinding } from './guards.js'
@@ -1331,6 +1331,37 @@ export async function buildGenerationPlan(
 }
 
 /**
+ * 自动推进时，这个阶段该直接跑（true）还是停下来等人（false）。
+ *
+ * - `everyStage`：一律停，每一步由人按。
+ * - `beforeSpend`：只放行文字阶段（SCRIPT / STORYBOARD，一次文本调用的量级）。首帧、
+ *   视频、配音、配乐是花钱大户，必须由人按下按钮。这是引入档位之前的行为，也是默认
+ *   值——旧版那行硬编码的 `stage !== 'SCRIPT' && stage !== 'STORYBOARD'` 就是这一条，
+ *   改造后逐阶段等价，回归靠这条不变式守住。
+ * - `auto`：除「素材定稿」与「交付验收」外全放行。那两处不在本表里，也管不着本表：
+ *   素材定稿是 nextRunnableStage 的 IMAGE 闸门（素材未 APPROVED 就 blocked），交付
+ *   验收根本不在自动推进链上。它们由结构保证，所以这里全放行是安全的。
+ */
+export function stageProceedsUnder(gate: AutomationGate, stage: PipelineStage): boolean {
+  if (gate === 'everyStage') return false
+  if (gate === 'auto') return true
+  return stage === 'SCRIPT' || stage === 'STORYBOARD'
+}
+
+/**
+ * 项目级制作档位。字段可空，null 按 beforeSpend 解释——那是引入档位之前的行为。
+ * 未知取值同样走保守分支：多问一次只是多一句打扰，少问一次可能悄悄花掉用户的钱。
+ */
+async function resolveAutomationGate(db: PrismaClient, episodeId: string, organizationId: string): Promise<AutomationGate> {
+  const episode = await db.episode.findFirst({
+    where: { id: episodeId, project: { organizationId } },
+    select: { project: { select: { automationGate: true } } },
+  })
+  const raw = episode?.project.automationGate
+  return isAutomationGate(raw) ? raw : defaultAutomationGate
+}
+
+/**
  * Advances the pipeline one step: triggers the next stage whose prerequisites are
  * met and which has not run yet, and once every stage has run, takes the terminal
  * step of composing the episode. Composition is not a generation stage — no slot,
@@ -1350,6 +1381,9 @@ export async function advancePipeline(
   options: { auto?: boolean } = {},
 ): Promise<AdvanceResult> {
   const action = options.auto ? 'pipeline.autoAdvance' : 'pipeline.advance'
+  // 档位是项目级属性，一次 advance 内不变，所以循环外读一次而不是每阶段往返。
+  // 人工推进（options.auto 为假）不查档位：人按下的按钮就是要它跑的那一步。
+  const gate = options.auto ? await resolveAutomationGate(store.db, episodeId, organizationId) : null
   // A stage whose slot has no verified candidates cannot run here at all — the
   // chain must walk past it, not stall on a capability the installation never
   // bound. The skip set lives only inside this call: every advance re-derives it,
@@ -1363,11 +1397,11 @@ export async function advancePipeline(
     if (!next) break
     if ('blocked' in next) return { ok: false, code: 409, error: next.error, ...(next.reasons ? { reasons: next.reasons } : {}) }
     const stage = next.stage
-    // 自动推进只接力文字阶段（源→剧本→分镜，一次文本调用的量级）；首帧/视频/配音/
-    // 配乐是花钱大户，必须由人按下按钮——用户实测「只点了重新分镜，13 个首帧自己
-    // 排上队」（2026-09-29），与重抽上限同一条原则：花钱的节奏归人。
-    if (options.auto && stage !== 'SCRIPT' && stage !== 'STORYBOARD') {
-      return { ok: false, code: 409, error: 'pipeline:autoAdvanceStoppedBeforeMedia', reasons: [stage] }
+    // 自动推进的边界交给项目的制作档位，判定见 stageProceedsUnder。默认档（beforeSpend）
+    // 与引入档位之前逐阶段一致：只接力文字阶段，花钱的节奏归人——用户实测「只点了
+    // 重新分镜，13 个首帧自己排上队」（2026-09-29），与重抽上限同一条原则。
+    if (gate !== null && !stageProceedsUnder(gate, stage)) {
+      return { ok: false, code: 409, error: 'pipeline:autoAdvanceStopped', reasons: [stage] }
     }
     const result = await triggerStage(store, organizationId, userId, episodeId, stage)
     if (result.ok) {

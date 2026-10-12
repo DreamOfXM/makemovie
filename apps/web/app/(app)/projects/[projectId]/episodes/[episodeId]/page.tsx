@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { defaultAutomationGate } from '@studio/domain'
 import { toast } from 'sonner'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
@@ -36,6 +37,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
+import { AutomationNotice } from '@/components/AutomationTierSelector'
 import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog'
 import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
@@ -115,6 +117,7 @@ function EpisodeWorkspace() {
   const [qcMaxAttempts, setQcMaxAttempts] = useState<number | null>(null)
   const [audioMode, setAudioMode] = useState<'video_native' | 'voice_clone' | null>(null)
   const [contentLocale, setContentLocale] = useState<'zh' | 'en' | null>(null)
+  const [automationGate, setAutomationGate] = useState<Project['automationGate']>(null)
   const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
   const [regenStoryboardOpen, setRegenStoryboardOpen] = useState(false)
   const [regenStoryboardBusy, setRegenStoryboardBusy] = useState(false)
@@ -152,6 +155,7 @@ function EpisodeWorkspace() {
         setQcMaxAttempts(typeof row?.qcMaxAttempts === 'number' ? row.qcMaxAttempts : null)
         setAudioMode(row?.audioMode === 'voice_clone' ? 'voice_clone' : 'video_native')
         setContentLocale(row?.contentLocale === 'en' ? 'en' : row?.contentLocale === 'zh' ? 'zh' : null)
+        setAutomationGate(row?.automationGate ?? null)
       })
       .catch(() => setStylePresetId(null))
   }, [api, projectId])
@@ -415,6 +419,12 @@ function EpisodeWorkspace() {
         <EpisodeTabs value={view} onChange={setView} />
       </div>
 
+      {/* 档位预告：在任何按钮按下之前先说清楚接下来会自动跑还是等人。 */}
+      <AutomationNotice
+        value={automationGate ?? defaultAutomationGate}
+        onChangeClick={() => setStyleSettingsOpen(true)}
+      />
+
       {episodes.error && <ErrorState message={episodes.error} onRetry={episodes.reload} />}
 
       {view === 'board' ? (
@@ -617,6 +627,7 @@ function EpisodeWorkspace() {
         qcMaxAttempts={qcMaxAttempts}
         audioMode={audioMode}
         contentLocale={contentLocale}
+        automationGate={automationGate}
         onOpenChange={setStyleSettingsOpen}
         onStyleChanged={loadProjectStyle}
       />

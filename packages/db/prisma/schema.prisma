@@ -269,6 +269,10 @@ model Project {
   qcMaxAttempts        Int?
   /// 语音模式（r10 音频体系）：video_native = 视频模型自带声音（默认），voice_clone = 用角色绑定音色。
   audioMode            String?
+  /// 制作档位：auto = 跑完再叫，beforeSpend = 花钱前停（默认），everyStage = 每步都停。
+  /// null 按 beforeSpend 解释，即引入档位之前的行为。素材定稿与交付验收不受它影响，
+  /// 那两处由 nextRunnableStage 的结构保证。取值见 @studio/domain 的 automationGates。
+  automationGate       String?
   capabilityBindings   CapabilityBinding[]
   episodes             Episode[]
   organization         Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)

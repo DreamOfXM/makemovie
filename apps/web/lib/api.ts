@@ -1,4 +1,4 @@
-import type { ContentLocale, FailureKind, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
+import type { AudioSource, AutomationGate, ContentLocale, FailureKind, GenerationStage, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
 
 function resolveApiBase(): string {
   const configured = process.env.NEXT_PUBLIC_API_URL
@@ -232,6 +232,8 @@ export interface Project {
   qcMaxAttempts: number | null
   /** 语音模式（r10）：video_native = 视频自带声音（默认），voice_clone = 用角色绑定音色。 */
   audioMode: 'video_native' | 'voice_clone' | null
+  /** 制作档位：auto / beforeSpend / everyStage；null = beforeSpend（引入档位之前的行为）。 */
+  automationGate: AutomationGate | null
   createdAt: string
   updatedAt: string
   /** Episode status summary, carried so the lifecycle bar renders without a drill-down. */
@@ -281,9 +283,10 @@ export interface StoryboardAssetDto {
 
 /**
  * 这一镜成片里听到什么。null = 未选，按镜型默认（有台词=只用配音，无台词=只用原声）。
- * 与 packages/db 的 AudioSource 枚举同名同集，改名要两处一起改。
+ * 事实源是 @studio/domain 的 AudioSource（与 packages/db 的枚举同名同集），此处只是
+ * 前端别名；改名跟着 domain 走。
  */
-export type ShotAudioSource = 'VOICE' | 'NATIVE' | 'VOICE_NATIVE' | 'IMPORTED'
+export type ShotAudioSource = AudioSource
 
 export interface Storyboard {
   id: string
@@ -359,6 +362,8 @@ export interface CreateProjectInput {
   targetDurationMs?: number
   /** Project style preset from birth; the API defaults to 写实风 (realistic). */
   styleId?: string
+  /** 制作档位；缺省即 null = 维持现状（beforeSpend）。 */
+  automationGate?: AutomationGate
 }
 
 export function createProject(api: ApiClient, input: CreateProjectInput): Promise<Project> {
@@ -570,8 +575,10 @@ export interface Membership {
 /* Generation pipeline                                                         */
 /* -------------------------------------------------------------------------- */
 
-export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
-export type GenerationStage = (typeof generationStages)[number]
+// The stage vocabulary is owned by @studio/domain (the pipeline and the console
+// share one list); re-exported here so DTO sections below read like the API.
+export { generationStages } from '@studio/domain'
+export type { GenerationStage } from '@studio/domain'
 
 export type GenerationTaskStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED'
 

@@ -55,6 +55,30 @@ export function durationOutOfRange(format: ProjectFormat, targetDurationMs: numb
   return !Number.isInteger(targetDurationMs) || targetDurationMs < range.minMs || targetDurationMs > range.maxMs
 }
 
+/**
+ * 制作档位：自动推进时停在哪里等人。只回答一个问题——中途在哪几处停下来。
+ *
+ * 「跑到哪一步为止」刻意不在这里。曾经设计过第二条轴（scope: lean/full，跳过素材
+ * 细化），流水线却没有任何一行读它：选了「精简」跑出来的东西和完整档一模一样。
+ * 一个说了不做、也不影响账单的开关比没有开关更坏，所以撤掉了。
+ */
+export const automationGates = ['auto', 'beforeSpend', 'everyStage'] as const
+export type AutomationGate = typeof automationGates[number]
+
+export function isAutomationGate(value: unknown): value is AutomationGate {
+  return (automationGates as readonly string[]).includes(value as string)
+}
+
+/**
+ * 字段为 null 时的解释。它必须与引入档位之前的行为逐阶段一致——改造不改变任何
+ * 既有项目的运行结果，新增的只是此前够不着的能力（auto 与 everyStage）。
+ *
+ * `auto` 不是无护栏的：素材定稿是 nextRunnableStage 里的硬闸门（素材未 APPROVED
+ * 就不放行 IMAGE），交付验收也不在这条自动链上，所以「角色的脸」和「交付」这两处
+ * 永远由人确认，与档位无关。
+ */
+export const defaultAutomationGate: AutomationGate = 'beforeSpend'
+
 /** Whole-book uploads get their own ceiling; the 200k per-version limit stays episode-level. */
 export const PROJECT_SOURCE_CHAR_LIMIT = 1_000_000
 
