@@ -10,6 +10,8 @@ Self-hostable · One pipeline for short dramas, films, and long-form video:
 
 `source audit → script → assets → storyboards → first frames → videos → voice & score → composition → acceptance → delivery`
 
+**It finishes where you work.** The pipeline cuts the master — and every delivery also builds an **EDL and an FCP XML edit list** from the same shot manifest, so the episode opens in Premiere Pro or DaVinci Resolve instead of being locked inside our console.
+
 MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a screenplay — into a finished episode master through an automated, traceable pipeline. Upload the source and approve it; the platform writes the shooting script, breaks it into shots, extracts the cast, props and scenes, generates reference images, first frames and clips, voices the shots that speak, scores them under a background bed, composes the master with a subtitle track, and packages a delivery manifest. Every step is viewable, editable and traceable to the model run that produced it, and a human approval is the checkpoint between spending and shipping.
 
 <p align="center"><img src="./docs/assets/readme/hero-workbench-en.png" width="838" alt="The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right."></p>
@@ -305,6 +307,8 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, model readiness and content language, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow, testing, pull-request checklist
+- [AGENT-EDITING.md](./AGENT-EDITING.md) — the four concurrency rules for an agent editing a file a human may also be editing
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — the one-command entry point for coding agents: `npx -y makemovie@latest`
 - [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — the production methodology the pipeline encodes
 
 ## License

@@ -10,6 +10,8 @@
 
 `原文审计 → 剧本 → 资产 → 分镜 → 首帧 → 视频 → 配音与配乐 → 合成 → 验收 → 交付`
 
+**成片落到你自己的剪辑台上。** 生产线负责剪出母版——每次交付还会用同一份分镜清单另出一份 **EDL 与 FCP XML 剪辑表**，于是整集可以直接进 Premiere Pro 或达芬奇（DaVinci Resolve）继续精修，而不是被困在我们的控制台里。
+
 MakeMovie 把一段原文——小说节选、故事梗概或剧本——通过自动化、可追溯的生产线变成一集成片。上传原文并审批后，平台自动撰写拍摄剧本、拆解分镜、提取角色/道具/场景、生成参考图、首帧与视频片段、为有台词的分镜逐镜配音、在画面下方铺垫背景配乐，并连同字幕轨合成整集母版、打包交付清单。每一步都可查看、可修改，并可追溯到产出它的模型任务；人工审批是"花钱生成"与"上线交付"之间的检查点。
 
 **图 1：** 制作台，按镜头组织：左边是镜头列表与每镜的产物状态点，中间是选中镜头的剧本字段，右边是它的首帧 / 片段 / 配音。截图来自本机实例上的一次真实生产——13 个镜头里 2 个产物齐了等审、1 个首帧失败，其余斜纹格还没开跑。
@@ -293,6 +295,8 @@ API 集成测试启动内嵌 PostgreSQL、应用真实迁移，端到端覆盖�
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 领域模型、能力策略、模型就绪度与内容语言、状态机、编排、队列设计、质量闸门、控制台信息架构、存储、安全
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发流程、测试、Pull Request 检查清单
+- [AGENT-EDITING.md](./AGENT-EDITING.md) — 当人与 agent 同时编辑同一份文件时的四条并发规则
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — 面向 coding agent 的一条命令入口：`npx -y makemovie@latest`
 - [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — 生产线所编码的制作方法论
 
 ## 许可证

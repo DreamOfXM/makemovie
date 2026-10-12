@@ -36,3 +36,36 @@ packages/db/shot-audio-session.cjs
 
 # Agent tooling local config (same category as .qoder/ above)
 .zcodeignore
+
+# AOCI agent host integration (machine-bound; do not commit)
+.mcp.json
+.mcp.json.backup.*
+.codex/config.toml
+.codex/config.toml.backup.*
+.zcode/config.json
+.zcode/config.json.backup.*
+.agents/mcp.json
+.agents/mcp.json.backup.*
+
+# AOCI wire (aoci-wire.sh) — machine-bound, do not commit
+.cursor/mcp.json
+.cursor/mcp.json.backup.*
+opencode.json
+opencode.json.backup.*
+AGENTS.md.backup.*
+
+# The AOCI cognition layer itself: baseline ledger, governance records and the
+# generated index are bound to this machine and this working copy. Published,
+# they would claim a repo-wide understanding that only exists locally.
+.aoci/
+aoci*.txt
+AGENTS.md
+
+# AOCI forces eol=lf so its byte baselines survive a checkout. Kept out with the
+# layer above: `* text=auto eol=lf` rewrites line endings across the whole tree,
+# which is a repo-wide decision to make deliberately, not to pick up in passing.
+.gitattributes
+
+# Outbound promo material (Xiaohongshu notes and their rendered previews).
+xhs-promo/
+xhs-preview/

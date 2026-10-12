@@ -2,6 +2,9 @@
   "name": "makemovie",
   "private": true,
   "license": "Apache-2.0",
+  "bin": {
+    "makemovie": "bin/makemovie.mjs"
+  },
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=22.18.0",
