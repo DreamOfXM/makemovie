@@ -9,16 +9,13 @@
  * - 获取风格氛围语气
  */
 
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import {
   getOfficialStyles,
   getStyleById,
   isValidStyleId,
   getStyleVisualDirective,
   getStyleToneDirective,
-  registerCustomStyle,
-  unregisterCustomStyle,
-  getAllStyles,
   StylePreset,
 } from '../../src/styles/index.js'
 
@@ -117,29 +114,6 @@ describe('StylePreset', () => {
       expect(isValidStyleId('')).toBe(false)
       expect(isValidStyleId('REALISTIC')).toBe(false) // case sensitive
     })
-
-    it('should return false for custom style before registration', () => {
-      // 确保测试隔离：先清理可能存在的自定义风格
-      unregisterCustomStyle('test-custom-style')
-      expect(isValidStyleId('test-custom-style')).toBe(false)
-    })
-
-    it('should return true for registered custom style', () => {
-      const customStyle: StylePreset = {
-        id: 'test-custom-style',
-        name: '测试风格',
-        description: '用于测试的自定义风格',
-        isOfficial: false,
-        visualStyle: 'test style',
-        tone: '测试氛围',
-      }
-
-      registerCustomStyle(customStyle)
-      expect(isValidStyleId('test-custom-style')).toBe(true)
-
-      // 清理
-      unregisterCustomStyle('test-custom-style')
-    })
   })
 
   describe('getStyleVisualDirective', () => {
@@ -192,60 +166,6 @@ describe('StylePreset', () => {
 
       const animation = getStyleById('animation')!
       expect(getStyleToneDirective(animation)).toContain('活泼')
-    })
-  })
-
-  describe('Custom Style Registration', () => {
-    const testStyle: StylePreset = {
-      id: 'test-register-style',
-      name: '测试注册',
-      description: '测试用风格',
-      isOfficial: false,
-      visualStyle: 'test visual',
-      tone: 'test tone',
-      colorPalette: 'test colors',
-    }
-
-    afterEach(() => {
-      // 清理测试数据
-      unregisterCustomStyle('test-register-style')
-    })
-
-    it('should register custom style', () => {
-      registerCustomStyle(testStyle)
-      const style = getStyleById('test-register-style')
-      expect(style).toBeDefined()
-      expect(style?.name).toBe('测试注册')
-    })
-
-    it('should get custom style via getAllStyles', () => {
-      registerCustomStyle(testStyle)
-      const allStyles = getAllStyles()
-      const customStyle = allStyles.find(s => s.id === 'test-register-style')
-      expect(customStyle).toBeDefined()
-    })
-
-    it('should throw when registering duplicate ID', () => {
-      registerCustomStyle(testStyle)
-      expect(() => registerCustomStyle(testStyle)).toThrow('already exists')
-    })
-
-    it('should unregister custom style', () => {
-      registerCustomStyle(testStyle)
-      const result = unregisterCustomStyle('test-register-style')
-      expect(result).toBe(true)
-      expect(getStyleById('test-register-style')).toBeUndefined()
-    })
-
-    it('should return false when unregistering non-existent style', () => {
-      const result = unregisterCustomStyle('non-existent')
-      expect(result).toBe(false)
-    })
-
-    it('should allow re-registering after unregister', () => {
-      registerCustomStyle(testStyle)
-      unregisterCustomStyle('test-register-style')
-      expect(() => registerCustomStyle(testStyle)).not.toThrow()
     })
   })
 

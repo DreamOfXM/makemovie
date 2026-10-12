@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AudioSource, MediaArtifact, PrismaClient } from '@studio/db'
+import { masterNeedsVoice, recordedAudioMode } from '@studio/domain'
 import type { ComposeEpisodePayload } from '@studio/jobs'
 import { buildObjectKey, buildSrt, probeDuration, type ShotAudioMode, type SubtitleEntry } from '@studio/media'
 import { manifestStoryboardIds } from '@studio/pipeline'
@@ -241,7 +242,9 @@ async function resolveShotAudio(
 ): Promise<ShotAudio> {
   const dialogue = shot?.dialogue ?? ''
   const stored = shot?.audioSource ?? null
-  const needsVoice = stored === null ? dialogue !== '' : stored === 'VOICE' || stored === 'VOICE_NATIVE' || stored === 'IMPORTED'
+  // 母带要不要等一条人声轨——规则在 @studio/domain（masterNeedsVoice），
+  // 与 pipeline 的 TTS/导入门、控制台的欠账判定同一口径。
+  const needsVoice = masterNeedsVoice(dialogue, stored)
   let voiceFile: string | null = null
   let voiceArtifactId: string | null = null
   if (needsVoice) {
@@ -272,7 +275,7 @@ async function resolveShotAudio(
     case 'VOICE':
       return { mode: 'voice', voiceFile, voiceArtifactId, recordedAs: 'voice' }
     default:
-      return { mode: null, voiceFile, voiceArtifactId, recordedAs: dialogue === '' ? 'native' : 'voice' }
+      return { mode: null, voiceFile, voiceArtifactId, recordedAs: recordedAudioMode(dialogue, null) }
   }
 }
 

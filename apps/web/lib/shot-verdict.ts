@@ -1,12 +1,12 @@
-import { classifyFailure, isTerminalFailure, type FailureKind } from '@studio/domain'
+import { audioSourceInEffect, classifyFailure, isTerminalFailure, recordedAudioMode, type FailureKind } from '@studio/domain'
 import type { GenerationArtifact, ShotAudioSource, ShotboardShot } from './api'
 import { FAILURE_CAUSE_KEY } from './failure-cause'
 import type { TranslateFn } from './i18n'
 
 /**
- * 这一镜成片里听到什么。四种真相与 `apps/worker/src/compose.ts` 的 resolveShotAudio
- * 一一对应：人没选过就按镜型默认（有台词=只用配音，无台词=只用原声），
- * 默认规则翻档时两处一起改，否则界面说的和剪出来的是两回事。
+ * 这一镜成片里听到什么。四种真相的判定在 @studio/domain（audioSourceInEffect /
+ * recordedAudioMode）——pipeline 的合成门、worker 的 resolveShotAudio 与这里
+ * 读同一份规则；本文件只负责把档位翻成界面词根与配色。
  */
 export type ResolvedAudioMode = 'voice' | 'native' | 'voice_native' | 'imported'
 
@@ -20,16 +20,15 @@ export interface ShotAudioFields {
 
 /**
  * 这一镜「生效」的声音来源档：人钦定过就是那一档，没钦定就按镜型默认
- * （有台词=只用配音，无台词=只用原声）。分段控件拿它决定亮哪一格，
- * 否则没人点过的镜头四格全灭，而下面那行却说在走默认——两处说的不是一件事。
+ * （有台词=只用配音，无台词=只用原声）——判定在 @studio/domain。分段控件拿它
+ * 决定亮哪一格，否则没人点过的镜头四格全灭，而下面那行却说在走默认。
  */
 export function shotAudioSourceInEffect(shot: ShotAudioFields): ShotAudioSource {
-  if (shot.audioSource) return shot.audioSource
-  return shot.dialogue !== '' ? 'VOICE' : 'NATIVE'
+  return audioSourceInEffect(shot.dialogue, shot.audioSource)
 }
 
 export function shotAudioMode(shot: ShotAudioFields): ResolvedAudioMode {
-  return shotAudioSourceInEffect(shot).toLowerCase() as ResolvedAudioMode
+  return recordedAudioMode(shot.dialogue, shot.audioSource)
 }
 
 /** 这一档要不要等一条配音轨：只有「只用原声」不等，其余三档都等。 */

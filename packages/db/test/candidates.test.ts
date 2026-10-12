@@ -6,6 +6,8 @@ interface BindingRow {
   id: string
   projectId: string | null
   priority: number
+  /** The where clause asks for enabled=true, so every row PostgreSQL returns carries it. */
+  enabled: boolean
   capabilityId: string
   capability: {
     id: string
@@ -38,6 +40,7 @@ function binding(
     id,
     projectId: overrides.projectId ?? null,
     priority: overrides.priority ?? 0,
+    enabled: true,
     capabilityId,
     capability: {
       id: capabilityId,

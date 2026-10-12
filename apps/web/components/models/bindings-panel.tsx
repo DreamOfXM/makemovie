@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { CircleAlertIcon, CircleHelpIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
-import { capabilitySlots, slotModality, type CapabilitySlot } from '@studio/domain'
+import { capabilitySlots, compareSlotFallbacks, slotModality, type CapabilitySlot } from '@studio/domain'
 import type { Binding, Connection, Project, ResolveResponse } from '@/lib/api'
 import { bindableCapabilities, candidatesForSlot, type BindableCapability } from '@/lib/models/readiness'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -145,9 +145,10 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
     }
   }
 
-  // "槽位:全部" overview — a client-side mirror of resolveSlotCandidates' ordering
-  // (project scope first, then priority desc), so every chain is visible without
-  // picking a slot one at a time. The server resolve stays authoritative for detail.
+  // "槽位:全部" overview — sorted by the same comparator the server's
+  // resolveSlotCandidates ends with (@studio/domain's compareSlotFallbacks: project
+  // scope first, then priority desc), so every chain is visible without picking a
+  // slot one at a time. The server resolve stays authoritative for detail.
   const overview = useMemo(
     () =>
       slotFilter !== ALL
@@ -161,7 +162,12 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
                   if (projectFilter !== ALL) return binding.projectId === projectFilter
                   return true
                 })
-                .sort((a, b) => (a.projectId === b.projectId ? b.priority - a.priority : a.projectId ? 1 : -1))
+                .sort((a, b) =>
+                  compareSlotFallbacks(
+                    { scope: a.projectId ? 'project' : 'organization', priority: a.priority },
+                    { scope: b.projectId ? 'project' : 'organization', priority: b.priority },
+                  ),
+                )
                 .map(binding => ({
                   model: binding.capability?.model ?? binding.capabilityId,
                   priority: binding.priority,

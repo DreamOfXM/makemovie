@@ -147,12 +147,13 @@ export function getOfficialStyles(): readonly StylePreset[] {
 }
 
 /**
- * 根据 ID 获取风格预设
+ * 根据 ID 获取风格预设。组织级自定义风格走 DB 的 StylePreset 表
+ * （apps/api/src/routes/styles.ts 的 CRUD），进程内没有第二条注册路。
  * @param id 风格 ID
  * @returns 风格预设，不存在返回 undefined
  */
 export function getStyleById(id: string): StylePreset | undefined {
-  return OFFICIAL_STYLES.find(s => s.id === id) ?? customStyles.get(id)
+  return OFFICIAL_STYLES.find(s => s.id === id)
 }
 
 /**
@@ -161,7 +162,7 @@ export function getStyleById(id: string): StylePreset | undefined {
  * @returns 是否有效
  */
 export function isValidStyleId(id: string): boolean {
-  return OFFICIAL_STYLES.some(s => s.id === id) || customStyles.has(id)
+  return OFFICIAL_STYLES.some(s => s.id === id)
 }
 
 /**
@@ -214,51 +215,4 @@ export function getStyleAssetDirective(style: StylePreset): string {
  */
 export function getStyleToneDirective(style: StylePreset): string {
   return style.tone
-}
-
-/**
- * 风格预设不存在错误
- */
-export class StyleNotFoundError extends Error {
-  constructor(styleId: string) {
-    super(`Style not found: ${styleId}`)
-    this.name = 'StyleNotFoundError'
-  }
-}
-
-/**
- * 自定义风格注册表
- * 用户可以通过 registry 注册自定义风格
- */
-export const customStyles = new Map<string, StylePreset>()
-
-/**
- * 注册自定义风格
- * @param style 风格预设
- * @throws 如果风格 ID 已存在
- */
-export function registerCustomStyle(style: StylePreset): void {
-  if (isValidStyleId(style.id)) {
-    throw new Error(`Style already exists: ${style.id}`)
-  }
-  customStyles.set(style.id, style)
-}
-
-/**
- * 注销自定义风格
- * @param id 风格 ID
- * @returns 是否成功注销（如果不存在返回 false）
- */
-export function unregisterCustomStyle(id: string): boolean {
-  if (!customStyles.has(id)) {
-    return false
-  }
-  return customStyles.delete(id)
-}
-
-/**
- * 获取所有可用风格（包括官方和自定义）
- */
-export function getAllStyles(): StylePreset[] {
-  return [...OFFICIAL_STYLES, ...customStyles.values()]
 }

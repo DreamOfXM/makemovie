@@ -1,4 +1,5 @@
 import type { CapabilitySlot, PrismaClient, TaskStatus, WorkflowStatus } from '@prisma/client'
+import { compareSlotFallbacks, servesSlot } from '@studio/domain'
 import type { CapabilitySlot as DomainCapabilitySlot } from '@studio/domain'
 
 export { PrismaClient } from '@prisma/client'
@@ -88,8 +89,10 @@ export async function resolveSlotCandidates(
   const candidates: SlotCandidate[] = []
   for (const binding of [...projectScoped, ...orgScoped]) {
     if (seen.has(binding.capabilityId)) continue
-    if (!binding.capability.entitlementVerifiedAt && !binding.capability.credentialVerifiedAt) continue
-    if (!binding.capability.connection.enabled) continue
+    // The usability rule lives in @studio/domain (servesSlot) and is shared with the
+    // console's readiness panel, so neither side can drift. The slot itself was
+    // already filtered in the query's where clause, so the row field is not re-read.
+    if (!servesSlot({ slot, enabled: binding.enabled, capability: binding.capability }, slot)) continue
     seen.add(binding.capabilityId)
     candidates.push({
       bindingId: binding.id,
@@ -106,5 +109,5 @@ export async function resolveSlotCandidates(
       spec: binding.capability.spec,
     })
   }
-  return candidates
+  return candidates.sort(compareSlotFallbacks)
 }

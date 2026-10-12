@@ -98,6 +98,68 @@ export const slotModality: Record<CapabilitySlot, ModelModality> = {
   visual_audit: 'vlm',
 }
 
+/**
+ * The seven stages a generation runs through, in planning order — the API/console
+ * vocabulary. The DB stores first frames as FIRST_FRAME; the pipeline's
+ * `stageDbValues` does that mapping, this list never spells it that way.
+ */
+export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
+export type GenerationStage = (typeof generationStages)[number]
+
+export function isGenerationStage(value: unknown): value is GenerationStage {
+  return (generationStages as readonly string[]).includes(value as string)
+}
+
+export interface SlotStageUsage {
+  /**
+   * The stages that actually resolve this slot. An empty list means no code path
+   * reads the slot, so nothing is waiting on it.
+   */
+  stages: readonly GenerationStage[]
+  /** The slot only ever serves the worker quality gate, which is off unless `STUDIO_QC_MODE=model`. */
+  qcOnly: boolean
+  /** Without a usable binding the chain cannot finish, rather than finishing with less. */
+  required: boolean
+}
+
+/**
+ * 槽位↔阶段接线表，单一事实源：pipeline 按它为每个阶段选槽排任务（`stageSlot`），
+ * 控制台按它算九个槽的就绪度与缺口。加槽、改接线只改这一张表。
+ */
+export const slotStageUsage: Record<CapabilitySlot, SlotStageUsage> = {
+  script_text: { stages: ['SCRIPT'], qcOnly: false, required: true },
+  storyboard_text: { stages: ['STORYBOARD'], qcOnly: false, required: true },
+  image_gen: { stages: ['ASSET', 'IMAGE'], qcOnly: false, required: true },
+  video_t2v: { stages: ['VIDEO'], qcOnly: false, required: true },
+  // The optional half of VIDEO: when a model is bound here, each shot's own newest first
+  // frame — the one no review sent back — conditions its clip. With nothing bound the stage
+  // runs on `video_t2v` alone, exactly as it did before conditioning existed.
+  video_i2v: { stages: ['VIDEO'], qcOnly: false, required: false },
+  // Unwired because of our own upstream data, not the contract: the reference type exists
+  // and binds, but the pipeline attributes no asset to a shot, so the only
+  // `StoryboardAsset` rows that exist are the ones a human routed by hand.
+  video_r2v: { stages: [], qcOnly: false, required: false },
+  tts_voice: { stages: ['AUDIO'], qcOnly: false, required: false },
+  music_gen: { stages: ['MUSIC'], qcOnly: false, required: false },
+  visual_audit: { stages: [], qcOnly: true, required: false },
+}
+
+/**
+ * The one slot a stage plans its fallback chain against. Required-ness is about
+ * whether a missing binding blocks the chain, not about whether the stage queries
+ * the slot — so the rule is: the required slot when the stage has one (VIDEO's
+ * optional i2v conditioning never claims the stage), otherwise the sole wired slot
+ * (AUDIO plans against tts_voice even though audio is optional).
+ */
+export function stageSlot(stage: GenerationStage): CapabilitySlot {
+  const wired = (Object.keys(slotStageUsage) as CapabilitySlot[]).filter(
+    candidate => slotStageUsage[candidate].stages.includes(stage),
+  )
+  const primary = wired.find(candidate => slotStageUsage[candidate].required) ?? wired[0]
+  if (!primary) throw new Error(`no slot wired for stage ${stage}`)
+  return primary
+}
+
 export interface ModelCapability {
   provider: string
   model: string
@@ -125,6 +187,54 @@ export function canBind(slot: CapabilitySlot, capability: ModelCapability): Bind
     return { ok: false, reason: `slot "video_r2v" requires a model that accepts reference images` }
   }
   return { ok: true }
+}
+
+/**
+ * What the usability rule reads off a binding. Deliberately structural: the Prisma
+ * row in `resolveSlotCandidates` (slot lower-cased first — the enum is uppercase)
+ * and the console's Binding DTO both satisfy it without mapping, so the rule
+ * cannot drift between server and client.
+ */
+export interface SlotResolvableBinding {
+  /** Lowercase domain vocabulary ('video_t2v'), not the uppercase DB enum. */
+  slot: string
+  enabled: boolean
+  capability?: {
+    entitlementVerifiedAt?: Date | string | null
+    credentialVerifiedAt?: Date | string | null
+    connection?: { enabled: boolean } | null
+  } | null
+}
+
+/**
+ * A binding serves a slot's fallback chain only while it is enabled, its capability
+ * was verified against the vendor (entitlement, or at least the key), and its
+ * connection is still enabled. The one rule `resolveSlotCandidates` filters by and
+ * the console's readiness panel counts by.
+ */
+export function servesSlot(binding: SlotResolvableBinding, slot: CapabilitySlot): boolean {
+  if (binding.slot !== slot || !binding.enabled) return false
+  const capability = binding.capability
+  if (!capability) return false
+  if (!capability.entitlementVerifiedAt && !capability.credentialVerifiedAt) return false
+  return !!capability.connection?.enabled
+}
+
+export type FallbackScope = 'project' | 'organization'
+
+export interface SlotFallbackOrder {
+  scope: FallbackScope
+  priority: number
+}
+
+/**
+ * 候选链排序规则，单一事实源：项目作用域无条件压过组织作用域，同作用域内
+ * priority 降序。`resolveSlotCandidates` 排服务端链、模型中心的「槽位:全部」
+ * 总览排客户端链，都用这一个比较器——改规则只改这里。
+ */
+export function compareSlotFallbacks<T extends SlotFallbackOrder>(a: T, b: T): number {
+  if (a.scope !== b.scope) return a.scope === 'project' ? -1 : 1
+  return b.priority - a.priority
 }
 
 /**
@@ -325,5 +435,55 @@ export function reduceCallEvidence(rows: Iterable<CallEvidenceRow>): Map<string,
     }
   }
   return byModel
+}
+
+/**
+ * 一镜的人声来源档。与 DB 的 AudioSource 枚举、web 的 ShotAudioSource 同名同集
+ * ——本处是事实源，另两处只是别名；改名要一起改。
+ */
+export type AudioSource = 'VOICE' | 'NATIVE' | 'VOICE_NATIVE' | 'IMPORTED'
+
+/** 混音层与界面词根共用的小写档名。 */
+export type RecordedAudioMode = 'voice' | 'native' | 'voice_native' | 'imported'
+
+/** 镜型默认：有台词只用配音，无台词只用原声。规则只有这一份。 */
+export function defaultAudioSource(dialogue: string): AudioSource {
+  return dialogue !== '' ? 'VOICE' : 'NATIVE'
+}
+
+/** 这一镜「生效」的声音来源档：人钦定过就是那一档，否则按镜型默认。 */
+export function audioSourceInEffect(dialogue: string, audioSource: AudioSource | null | undefined): AudioSource {
+  return audioSource ?? defaultAudioSource(dialogue)
+}
+
+/**
+ * 母带里这一镜的声音是怎么来的——生效档的小写形态。compose 写 manifest、
+ * pipeline 判母带是否过时、界面读档亮格，都用这一口径。
+ */
+export function recordedAudioMode(dialogue: string, audioSource: AudioSource | null | undefined): RecordedAudioMode {
+  return audioSourceInEffect(dialogue, audioSource).toLowerCase() as RecordedAudioMode
+}
+
+/**
+ * 这一镜是否还欠一条 TTS 人声：没人钦定、或钦定的是含配音的档位才算欠。
+ * 「只用原声」的镜头本来就不出人声，「导入音频」由导入门单独验。
+ */
+export function needsTtsVoice(dialogue: string, audioSource: AudioSource | null | undefined): boolean {
+  if (dialogue === '') return false
+  return audioSource == null || audioSource === 'VOICE' || audioSource === 'VOICE_NATIVE'
+}
+
+/**
+ * 这一镜的人声只能来自导入件：要么明选了「导入音频」，要么档里含配音却没有台词
+ * ——无台词镜不排 TTS，它的「配音」只有导入这一条路。
+ */
+export function needsImportedVoice(dialogue: string, audioSource: AudioSource | null | undefined): boolean {
+  if (audioSource === 'IMPORTED') return true
+  return dialogue === '' && (audioSource === 'VOICE' || audioSource === 'VOICE_NATIVE')
+}
+
+/** 母带要不要等一条人声轨：除「只用原声」外都等（含钦定导入）。 */
+export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | null | undefined): boolean {
+  return audioSource == null ? dialogue !== '' : audioSource !== 'NATIVE'
 }
 

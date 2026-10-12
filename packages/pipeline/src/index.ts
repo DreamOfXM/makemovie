@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { AudioSource, PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
-import type { CapabilitySlot, ContentLocale } from '@studio/domain'
-import { isContentLocale, planVideoModels } from '@studio/domain'
+import type { CapabilitySlot, ContentLocale, GenerationStage } from '@studio/domain'
+import { generationStages, isContentLocale, needsImportedVoice, needsTtsVoice, planVideoModels, recordedAudioMode, stageSlot } from '@studio/domain'
 import type { PipelinePayload, RunTaskCandidate } from '@studio/jobs'
 import { buildFilmScriptPrompt, buildMusicPrompt, buildScriptPrompt, buildStoryboardPrompt, voiceLine } from './prompts.js'
 import { DEFAULT_PROMPT_GUARDS, runPromptGuards, VISUAL_STYLE_DIRECTIVE, type GuardCharacterInfo, type GuardFinding } from './guards.js'
@@ -15,8 +15,10 @@ import { applyStyleToPrompt, getStyleById, isVisualStyleStage, type StylePreset 
  * behaves the same whether a person or the worker pushed it forward.
  */
 
-export const generationStages = ['SCRIPT', 'ASSET', 'STORYBOARD', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
-export type GenerationStage = (typeof generationStages)[number]
+// The stage vocabulary and its slot wiring live in @studio/domain — the console's
+// readiness panel reads the same table, so neither side keeps a private copy.
+export { generationStages, isGenerationStage } from '@studio/domain'
+export type { GenerationStage } from '@studio/domain'
 
 /**
  * The quality floor and the retry ceiling, in one place on purpose: the worker gates on
@@ -51,7 +53,8 @@ export {
 } from './storyboard.js'
 export type { ExtractedAsset, ParsedStoryboard, StoryboardSegment } from './storyboard.js'
 
-// 风格预设系统:影响 STORYBOARD/IMAGE/VIDEO 阶段的 prompt
+// 风格预设系统:影响 STORYBOARD/IMAGE/VIDEO 阶段的 prompt。自定义风格走 DB 的
+// StylePreset 表,进程内没有第二条注册路(2026-10-06 撤掉零消费者的 customStyles 注册表)。
 export {
   OFFICIAL_STYLES,
   getOfficialStyles,
@@ -60,9 +63,6 @@ export {
   getStyleVisualDirective,
   getStyleAssetDirective,
   getStyleToneDirective,
-  registerCustomStyle,
-  unregisterCustomStyle,
-  getAllStyles,
 } from './styles/index.js'
 export type { StylePreset } from './styles/index.js'
 export { applyStyleToPrompt, isStageAffectedByStyle, isVisualStyleStage } from './styles/index.js'
@@ -74,15 +74,12 @@ export { seedOfficialStyles } from './seed-official-styles.js'
 export const PIPELINE_STAGES = ['SCRIPT', 'STORYBOARD', 'ASSET', 'IMAGE', 'VIDEO', 'AUDIO', 'MUSIC'] as const
 export type PipelineStage = (typeof PIPELINE_STAGES)[number]
 
-const stageSlots: Record<GenerationStage, CapabilitySlot> = {
-  SCRIPT: 'script_text',
-  ASSET: 'image_gen',
-  STORYBOARD: 'storyboard_text',
-  IMAGE: 'image_gen',
-  VIDEO: 'video_t2v',
-  AUDIO: 'tts_voice',
-  MUSIC: 'music_gen',
-}
+// The slot a stage plans against: the required entry for that stage in the shared
+// `slotStageUsage` table (@studio/domain). IMAGE and ASSET share image_gen; VIDEO's
+// optional video_i2v conditioning is not required, so it never claims the stage.
+const stageSlots = Object.fromEntries(
+  generationStages.map(stage => [stage, stageSlot(stage)] as const),
+) as Record<GenerationStage, CapabilitySlot>
 
 // Storyboard imagery is modelled as FIRST_FRAME in the schema; the pipeline API
 // and the console both call that stage IMAGE.
@@ -97,10 +94,6 @@ export const stageDbValues: Record<GenerationStage, Stage> = {
 }
 
 const apiStageByDbStage: Partial<Record<Stage, GenerationStage>> = { FIRST_FRAME: 'IMAGE' }
-
-export function isGenerationStage(value: unknown): value is GenerationStage {
-  return (generationStages as readonly string[]).includes(value as string)
-}
 
 export function toApiStage(stage: Stage): GenerationStage {
   return apiStageByDbStage[stage] ?? (stage as GenerationStage)
@@ -266,7 +259,7 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
   const voiced = await voicedStoryboardIds(db, episodeId)
   // 只有真需要 TTS 人声的镜头才受这道门管：钦定「只用原声」的镜头本来就不出人声，
   // 钦定「导入音频」的镜头由下面那道门单独验（导入件不来自任何生成任务）。
-  const ttsNeeded = storyboards.filter(storyboard => needsTtsVoice(storyboard))
+  const ttsNeeded = storyboards.filter(storyboard => needsTtsVoice(storyboard.dialogue, storyboard.audioSource))
   if (ttsNeeded.length > 0) {
     const episode = await db.episode.findUnique({ where: { id: episodeId }, select: { projectId: true, project: { select: { organizationId: true } } } })
     const candidates = episode
@@ -276,7 +269,7 @@ export async function planComposition(db: PrismaClient, episodeId: string): Prom
       return { ready: false, reason: 'composition:missingVoice' }
     }
   }
-  const importedNeeded = storyboards.filter(storyboard => needsImportedVoice(storyboard))
+  const importedNeeded = storyboards.filter(storyboard => needsImportedVoice(storyboard.dialogue, storyboard.audioSource))
   if (importedNeeded.length > 0) {
     const landed = await importedVoiceStoryboardIds(db, importedNeeded.map(storyboard => storyboard.id))
     if (importedNeeded.some(storyboard => !landed.has(storyboard.id))) {
@@ -319,26 +312,11 @@ async function selectionChanged(db: PrismaClient, episodeId: string, manifest: s
 }
 
 /**
- * 这一镜是否还欠一条 TTS 人声：没人钦定、或钦定的是含配音的档位才算欠。
- * 「只用原声」的镜头本来就不出人声，「导入音频」由导入门单独验。
+ * 这一镜是否还欠一条 TTS 人声 / 只能来自导入件：判定在 @studio/domain
+ * （needsTtsVoice / needsImportedVoice），compose 的合成门与这里同一口径。
  */
-function needsTtsVoice(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): boolean {
-  if (storyboard.dialogue === '') return false
-  return storyboard.audioSource === null || storyboard.audioSource === 'VOICE' || storyboard.audioSource === 'VOICE_NATIVE'
-}
 
-/**
- * 这一镜的人声只能来自导入件：要么明选了「导入音频」，要么档里含配音却没有台词
- * ——无台词镜不排 TTS，它的「配音」只有导入这一条路。缺文件时母带会静默变成没有
- * 人声，所以这道门必须拦住，而不是让 compose 交出一条空轨。
- */
-function needsImportedVoice(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): boolean {
-  if (storyboard.audioSource === 'IMPORTED') return true
-  return storyboard.dialogue === '' && (storyboard.audioSource === 'VOICE' || storyboard.audioSource === 'VOICE_NATIVE')
-}
-
-/**
- * 导入音频已落地的镜头。导入件不挂任何生成任务，所以 `voicedStoryboardIds` 那条
+/** 导入音频已落地的镜头。导入件不挂任何生成任务，所以 `voicedStoryboardIds` 那条
  * 按任务算的路永远看不见它——只能顺着镜头上的指针查文件行还在不在。
  */
 export async function importedVoiceStoryboardIds(db: PrismaClient, storyboardIds: string[]): Promise<Set<string>> {
@@ -353,22 +331,6 @@ export async function importedVoiceStoryboardIds(db: PrismaClient, storyboardIds
     (await db.mediaArtifact.findMany({ where: { id: { in: artifactIds }, stage: 'AUDIO' }, select: { id: true } })).map(artifact => artifact.id),
   )
   return new Set(shots.filter(shot => shot.importedVoiceArtifactId && present.has(shot.importedVoiceArtifactId)).map(shot => shot.id))
-}
-
-/** 母带里这一镜的声音是怎么来的——与 compose 写进 manifest 的口径一致。 */
-export function recordedAudioMode(storyboard: Pick<LiveStoryboard, 'dialogue' | 'audioSource'>): 'voice' | 'native' | 'voice_native' | 'imported' {
-  switch (storyboard.audioSource) {
-    case 'NATIVE':
-      return 'native'
-    case 'VOICE_NATIVE':
-      return 'voice_native'
-    case 'IMPORTED':
-      return 'imported'
-    case 'VOICE':
-      return 'voice'
-    default:
-      return storyboard.dialogue === '' ? 'native' : 'voice'
-  }
 }
 
 /** What the composer recorded per shot for audio: which source fed the master. */
@@ -400,7 +362,7 @@ async function audioChanged(db: PrismaClient, episodeId: string, manifest: strin
   })
   const recorded = manifestAudio(manifest)
   if (!recorded) return shots.some(shot => shot.audioSource !== null || shot.importedAmbienceArtifactId !== null)
-  return shots.some(shot => recorded[shot.id]?.mode !== recordedAudioMode(shot)
+  return shots.some(shot => recorded[shot.id]?.mode !== recordedAudioMode(shot.dialogue, shot.audioSource)
     || (recorded[shot.id]?.ambienceArtifactId ?? null) !== shot.importedAmbienceArtifactId)
 }
 

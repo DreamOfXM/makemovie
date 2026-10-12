@@ -25,10 +25,6 @@ export {
   getStyleVisualDirective,
   getStyleAssetDirective,
   getStyleToneDirective,
-  registerCustomStyle,
-  unregisterCustomStyle,
-  getAllStyles,
-  StyleNotFoundError,
 } from './presets.js'
 
 export type { StylePreset } from './presets.js'
