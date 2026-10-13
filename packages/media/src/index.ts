@@ -583,6 +583,15 @@ export async function aigcBadgeCapability(): Promise<{ canBurn: boolean; drawtex
   return { canBurn: drawtext && fontFile !== undefined, drawtext, ...(fontFile ? { fontFile } : {}) }
 }
 
+/**
+ * 供体检与运营探活:这台机器能不能把字幕硬烧进画面(libass 的 subtitles 滤镜)。
+ * 与 drawtext 同类——有没有是「谁装的 ffmpeg」决定的,不是配置项。缺了它 auto
+ * 会静默降级成 mov_text 软轨,显式 burn 则直接报错,两种都该在开跑前知道。
+ */
+export async function subtitleBurnCapability(): Promise<{ canBurn: boolean }> {
+  return { canBurn: await detectSubtitlesFilter() }
+}
+
 export class FfmpegComposer implements Composer {
   async compose(input: ComposeInput, output: string): Promise<ComposeResult> {
     const { clips, voices, audioSources, ambiences, bgm, srt, label } = input

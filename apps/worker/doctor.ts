@@ -11,7 +11,7 @@ import {
   type CallEvidence,
   type FailureKind,
 } from '@studio/domain'
-import { aigcBadgeCapability } from '@studio/media'
+import { aigcBadgeCapability, subtitleBurnCapability, subtitleModeFromEnv } from '@studio/media'
 import { listCatalogs } from '@studio/providers'
 import { usableFirstFrames } from '@studio/pipeline'
 
@@ -229,6 +229,32 @@ async function checkCompliance(): Promise<void> {
   }
 }
 
+/**
+ * 字幕交付:硬烧要 libass 的 subtitles 滤镜,软轨谁都有。缺了它 auto 会静默降级成
+ * 软轨、显式 burn 会直接报错——两种都该在开跑前说清楚,而不是等到交付清单里
+ * 发现交付形态变了。和角标同一类问题:取决于谁装的 ffmpeg,不取决于配置写没写。
+ */
+async function checkSubtitleDelivery(): Promise<void> {
+  process.stdout.write('\n【字幕交付】\n')
+  try {
+    const mode = subtitleModeFromEnv()
+    if (mode === 'soft') {
+      ok('按软轨交付（mov_text;STUDIO_SUBTITLE_MODE=soft）')
+      return
+    }
+    const capability = await subtitleBurnCapability()
+    if (capability.canBurn) {
+      ok('可硬烧进画面（libass 的 subtitles 滤镜在位）')
+    } else if (mode === 'burn') {
+      fail('STUDIO_SUBTITLE_MODE=burn 但本机 ffmpeg 没有 subtitles 滤镜（libass）:一合成就会直接报错。装完整构建(如 brew install ffmpeg-full)并把 STUDIO_FFMPEG_DIR 指向其 bin 目录,或改回 auto/soft')
+    } else {
+      warn('本机 ffmpeg 没有 subtitles 滤镜（libass）:auto 会把字幕降级成 mov_text 软轨,而不是烧进画面。要硬字幕就装完整构建并把 STUDIO_FFMPEG_DIR 指向其 bin 目录')
+    }
+  } catch (error) {
+    fail(`字幕交付探测失败:${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 async function main() {
   process.stdout.write(`== 链路体检 ${new Date().toISOString()}\n`)
   const episodes = await db.episode.findMany({
@@ -240,6 +266,7 @@ async function main() {
   }
   await checkModelConfig()
   await checkCompliance()
+  await checkSubtitleDelivery()
   process.stdout.write(`\n== 结果: ${failures} 个必须修复, ${warnings} 个提醒\n`)
   if (failures > 0) process.exitCode = 1
 }
