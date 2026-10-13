@@ -1,9 +1,17 @@
 # Publish the one-command manual to npm on version tags.
 # A stranger then reads the whole project without cloning:
 #   npx -y makemovie@latest
-# Needs one repository secret: NPM_TOKEN — a granular access token with publish
-# permission for `makemovie` and "bypass 2FA" enabled. The tag is the single
-# trigger, exactly as docker.yml does for the images.
+#
+# Authentication is OIDC only — there is no npm token anywhere in this repository.
+# One-time setup, once the package exists on npm (npmjs.com -> the package ->
+# Settings -> Trusted Publisher -> GitHub Actions):
+#   Organization or user: DreamOfXM
+#   Repository:           makemovie
+#   Workflow filename:    npm.yml
+#   Environment name:     (leave empty)
+#   Allowed actions:      npm publish        <-- pick this one, not stage-only
+# After that binding exists, a tag is the whole release: images to ghcr via
+# docker.yml, package to npm here.
 name: npm
 
 on:
@@ -12,7 +20,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance: links the tarball to this commit and workflow
+  id-token: write # OIDC, for both trusted publishing and the provenance attestation
 
 jobs:
   publish:
@@ -23,7 +31,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing landed in npm CLI 11.5.1, which is newer than the npm
+      # bundled with Node 22 — without this the publish falls back to looking for
+      # a token, finds none, and fails with a 401 that says nothing about OIDC.
+      - name: Ensure npm CLI supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       # package.json is the source of truth for the version, so a tag and the
       # manifest can only disagree by mistake — and that mistake would hand
@@ -45,22 +60,16 @@ jobs:
             echo "已发布过，跳过。"
           fi
 
-      - name: Require NPM_TOKEN
-        if: steps.probe.outputs.published != 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "仓库缺 NPM_TOKEN secret，无法发布。"
-            exit 1
-          fi
-
       - name: Pack guard
         if: steps.probe.outputs.published != 'true'
         run: node scripts/pack-check.mjs
 
       - name: Publish
         if: steps.probe.outputs.published != 'true'
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -o pipefail
+          if npm publish --provenance 2>&1 | tee /tmp/npm-publish.log; then
+            exit 0
+          fi
+          echo "::error::发布失败。若本仓库还不是该包的 Trusted Publisher，先在 npmjs.com 的包设置里加上它（字段见本文件开头）；包在 npm 上还不存在时无法配置，那种情况先手动发一次。"
+          exit 1
