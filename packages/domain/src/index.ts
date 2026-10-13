@@ -512,7 +512,9 @@ export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | nu
 }
 
 
-// Readiness rules (slot states, catalog coverage, auto-bind planning). Imported at the
-// end on purpose: readiness.ts reads `slotStageUsage` at module scope, which the lines
-// above have initialized by the time this export runs.
+// Readiness rules (slot states, catalog coverage, auto-bind planning). readiness.ts
+// imports this file back for `slotStageUsage` and the bind rules, so this is a cycle —
+// and it stays safe only because readiness.ts touches those bindings inside functions.
+// ESM evaluates a module's dependencies before its own body, so a module-scope read in
+// readiness.ts would see them uninitialised no matter where this line sits.
 export * from './readiness.js'

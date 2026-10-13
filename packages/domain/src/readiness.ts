@@ -135,7 +135,15 @@ export function candidatesForSlot(pool: BindableCapability[], slot: CapabilitySl
  * conditioning beside the required slot; that nuance is documented on the table.
  */
 export type SlotUsage = SlotStageUsage
-const slotUsage = slotStageUsage
+
+/**
+ * `slotStageUsage` 只能在**函数体内**读。index.ts 把本模块放在文件末尾转出，但 ESM
+ * 的求值顺序是先跑完所有依赖再跑自身——无论那行写在哪里，本模块的模块级代码都一定
+ * 早于 index.ts 里的 `const slotStageUsage` 求值。曾经在这里写过一句模块级的
+ * `const slotUsage = slotStageUsage`，结果是任何以 `import '@studio/domain'` 打头的
+ * 入口都会在启动时 TDZ 崩掉，只有先 import 本模块的路径才侥幸能跑（`pnpm check` 就是
+ * 崩在这一条上）。要复用这张表，就在用到它的函数里直接读。
+ */
 
 export type SlotReadinessState = 'ready' | 'needsBinding' | 'missing'
 
@@ -172,8 +180,8 @@ export interface SlotReadiness {
  */
 export function slotReadiness(connections: ConnectionLike[], bindings: BindingLike[], evidence: CallEvidenceMapLike = {}): SlotReadiness[] {
   const pool = bindableCapabilities(connections)
-  return (Object.keys(slotUsage) as CapabilitySlot[]).map(slot => {
-    const usage = slotUsage[slot]
+  return (Object.keys(slotStageUsage) as CapabilitySlot[]).map(slot => {
+    const usage = slotStageUsage[slot]
     const usable = bindings.filter(binding => servesSlot(binding, slot))
     const capabilityIds = new Set(usable.map(binding => binding.capabilityId))
     const usableCount = capabilityIds.size
@@ -214,8 +222,8 @@ function callBlock(usable: BindingLike[], evidence: CallEvidenceMapLike): SlotCa
 
 /** Required slots the pipeline resolves today; anything unwired is excluded by construction. */
 export function wiredRequiredSlots(): CapabilitySlot[] {
-  return (Object.keys(slotUsage) as CapabilitySlot[]).filter(slot => {
-    const usage = slotUsage[slot]
+  return (Object.keys(slotStageUsage) as CapabilitySlot[]).filter(slot => {
+    const usage = slotStageUsage[slot]
     return usage.required && usage.stages.length > 0
   })
 }
