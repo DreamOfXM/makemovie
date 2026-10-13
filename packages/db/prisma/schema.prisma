@@ -1,5 +1,11 @@
 generator client {
   provider = "prisma-client-js"
+  // 引擎目标显式钉住，不留给构建宿主去猜。镜像按 linux/amd64 与 linux/arm64 两个
+  // 平台发布，两边都跑 Debian bookworm（OpenSSL 3）；`native` 保住本地开发。
+  // 为什么要写死：目标一旦和运行时不符，容器启动时那次 `prisma generate` 就得去
+  // binaries.prisma.sh 补下载，拉不到就静默沿用旧引擎、容器直接起不来——而这个
+  // 错配是由「谁在什么环境下构建的」决定的，不该让发布产物承担这个变量。
+  binaryTargets = ["native", "linux-x64-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
 }
 
 datasource db {
