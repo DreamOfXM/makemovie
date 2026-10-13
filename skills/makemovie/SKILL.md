@@ -4,6 +4,6 @@ description: MakeMovie — AI film and video production platform, from source te
 license: Apache-2.0
 ---
 
-Run `npx -y makemovie@latest` and follow the manual it prints: it is the whole of MakeMovie, about a thousand words.
+Run `npx -y makemovie@latest` and follow the manual it prints: it is the whole of MakeMovie, about a thousand words. Run it again whenever you need it.
 
-Nothing is installed, no state is written, and no network call is made — the command only prints.
+The command itself installs nothing, writes nothing and calls no API — it only prints.
