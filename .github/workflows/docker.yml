@@ -1,6 +1,7 @@
-# Publish the three app images to ghcr.io on version tags.
-# A stranger's install then needs no local build:
-#   curl -O docker-compose.yml (or clone) → docker compose --profile full up -d
+# Publish the three app images (amd64 + arm64) to ghcr.io on version tags.
+# A stranger's install then needs no local build — the Release attaches
+# docker-compose.yml and example.env, so the whole install is:
+#   wget ×2 → docker compose --profile full up -d
 # Images: ghcr.io/<owner>/makemovie/{api,worker,web}:{version,latest}
 name: docker
 
@@ -44,6 +45,10 @@ jobs:
         with:
           context: .
           file: infra/${{ matrix.app }}.Dockerfile
+          # Native arm64 matters: Apple Silicon hosts otherwise run the amd64 image
+          # under Rosetta, and ffmpeg video composition is exactly the workload
+          # where that tax hurts. Both platforms must come out of every tag.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

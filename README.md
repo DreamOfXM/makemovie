@@ -131,15 +131,24 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 ## Quick start
 
-**Everything in Docker** (one command, no local Node toolchain; images build from this repo):
+**Everything in Docker** (no clone, no local Node toolchain, no build — the Release attaches the compose file and a ready `.env`):
+
+```bash
+mkdir makemovie && cd makemovie
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/docker-compose.yml
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env -O .env
+docker compose --profile full up -d                  # postgres, redis, api, worker, web
+```
+
+Migrations run inside the api container before it serves; open http://localhost:3010. For a self-hosted deployment set a real `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` — the all-zero key is dev-only and refused nowhere, but it should not survive past your own machine. Pin a version with `VERSION=0.2.0` in `.env` (default is `latest`); images live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}` for amd64 and arm64.
+
+**Building the images yourself** (from a checkout):
 
 ```bash
 git clone https://github.com/DreamOfXM/makemovie.git && cd makemovie
 cp .env.example .env
-docker compose --profile full up -d --build      # postgres, redis, minio, api, worker, web
+docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --build
 ```
-
-Migrations run inside the api container before it serves; open http://localhost:3010. For a self-hosted deployment set a real `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` — the all-zero key is dev-only and refused nowhere, but it should not survive past your own machine. Prebuilt images on a version tag live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}`; point the compose `build:` blocks at `image:` to use them without building.
 
 **From source** (development tree, hot reload):
 
@@ -148,7 +157,7 @@ pnpm install
 cp .env.example .env                                  # defaults match the compose stack
 pnpm --filter @studio/db generate
 pnpm build
-docker compose up -d                                  # postgres, redis, minio
+docker compose up -d                                  # postgres, redis (minio behind --profile s3)
 pnpm db:migrate                                       # prisma migrate deploy, with .env loaded
 pnpm dev                                              # api :4010 · web :3010 · worker
 ```

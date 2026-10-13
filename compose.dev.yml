@@ -1,0 +1,29 @@
+# Development override: builds the three app images from this repo instead of pulling
+# the published ones from ghcr. docker-compose.yml alone is the deployable file (image:
+# only, attachable to a Release for the two-wget install); the build blocks live here
+# so a stranger's `up` can never fall back into building.
+#
+# Usage from the repo root:
+#   docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --build
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+  worker:
+    build:
+      context: .
+      dockerfile: infra/worker.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      args:
+        # 反代目标=compose 服务名；浏览器端走相对 /api，两侧一致。
+        API_ORIGIN: http://api:4010
+        NEXT_PUBLIC_API_URL: /api
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}

@@ -136,7 +136,7 @@ pnpm install
 cp .env.example .env                                  # 默认值与 compose 栈一致
 pnpm --filter @studio/db generate
 pnpm build
-docker compose up -d                                  # postgres, redis, minio
+docker compose up -d                                  # postgres, redis（minio 走 --profile s3）
 pnpm db:migrate                                       # 载入 .env 后执行 prisma migrate deploy
 pnpm dev                                              # api :4010 · web :3010 · worker
 ```
@@ -256,12 +256,20 @@ docker compose up -d postgres redis   # STORAGE_BACKEND=s3 时再加 minio
 pnpm db:migrate && pnpm dev
 ```
 
-**一切都进容器**（评估与部署）：
+**一切都进容器**（评估与部署）——两条 wget 一条 up，无需 clone、无需本地构建；Release 附件就是仓库里的 `docker-compose.yml` 与 `.env.example`：
 
 ```bash
-cp .env.example .env                  # 然后设置 STUDIO_MASTER_KEY（openssl rand -hex 32）
-docker compose up -d --build          # postgres, redis, minio, api, worker, web
-docker compose exec api pnpm --filter @studio/db exec prisma migrate deploy
+mkdir makemovie && cd makemovie
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/docker-compose.yml
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env -O .env
+# 然后设置 STUDIO_MASTER_KEY（openssl rand -hex 32）；需要固定版本就加 VERSION=0.2.0
+docker compose --profile full up -d   # postgres, redis, api, worker, web（minio 走 --profile s3）
+```
+
+迁移内置在 api 容器的启动命令里，起来即可用。要从本仓库源码自行构建镜像时，叠加开发覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --build
 ```
 
 会咬人的几点：postgres 与 redis 对外发布在宿主端口 **5433** 与 **6380**，以免撞上你本机已有的安装——`.env.example` 已经指向那里；api 与 worker 共用同一个 artifacts 卷（或用 `STORAGE_BACKEND=s3` 走同一个 S3 桶，MinIO 即可提供）；生产环境要把 `STUDIO_MASTER_KEY`、`CORS_ORIGIN` 与 `NEXT_PUBLIC_API_URL` 设成你的真实来源。

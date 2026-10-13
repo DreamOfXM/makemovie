@@ -35,15 +35,19 @@ MakeMovie $version
 
 npx -y makemovie@latest          # 读整份手册，无需 clone
 
-docker compose --profile full up -d --build
-# 或使用预构建镜像 ghcr.io/dreamofxm/makemovie/{api,worker,web}:$version
+# 两条 wget 一条 up（附件就是本仓库的 docker-compose.yml / .env.example）：
+mkdir makemovie && cd makemovie
+wget https://github.com/DreamOfXM/makemovie/releases/download/$version/docker-compose.yml
+wget https://github.com/DreamOfXM/makemovie/releases/download/$version/example.env -O .env
+VERSION=${version#v} docker compose --profile full up -d
 EOF
   "${EDITOR:-vi}" "$notes"
 fi
 
 git tag -a "$version" -m "$version"
 git push origin "$version"
-gh release create "$version" --title "$version" --notes-file "$notes"
+gh release create "$version" --title "$version" --notes-file "$notes" \
+  docker-compose.yml ".env.example#example.env"
 echo
 echo "完成：标签已推（CI 正在发布镜像与 npm 包），Release 已建。"
 echo "  https://github.com/$repo/releases/tag/$version"

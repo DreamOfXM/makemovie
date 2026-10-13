@@ -31,17 +31,26 @@ services:
       retries: 12
   redis:
     image: redis:7-alpine
+    # AOF on + a named volume: a container restart must not drop queued jobs —
+    # losing them means generation tasks the DB says exist but nothing will ever
+    # pick up again.
+    command: ["redis-server", "--appendonly", "yes"]
     ports: ["6380:6379"]
+    volumes: ["redis_data:/data"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 12
-  # Only used when STORAGE_BACKEND=s3. Nothing here creates the `studio` bucket, so an
-  # s3 run needs `mc mb local/studio` first. api and worker deliberately do not gate on
-  # this service's health: on the default disk backend they never talk to it, and a
-  # dependency would refuse to start them for a service they are not using.
+  # Only used when STORAGE_BACKEND=s3, which is why it sits behind the s3 profile:
+  # the default disk backend never talks to it, and a plain `up` should not make
+  # anyone download 227 MB they cannot use. Nothing here creates the `studio`
+  # bucket, so an s3 run needs `mc mb local/studio` first. api and worker
+  # deliberately do not gate on this service's health: on the default disk
+  # backend they never talk to it, and a dependency would refuse to start them
+  # for a service they are not using.
   minio:
+    profiles: ["s3"]
     # MinIO left Docker Hub in 2025; quay.io is the official registry now.
     image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
@@ -57,15 +66,14 @@ services:
       retries: 6
   # ── 应用栈（profile: full）──
   # `docker compose up -d` 仍只起基础设施（本机开发树自己跑 pnpm dev）；
-  # `docker compose --profile full up -d` 一条命令起整套：迁移内置在 api 的
-  # 启动命令里，起来即用。web 的 /api 代理在构建期指向服务名 api。
+  # `docker compose --profile full up -d` 一条命令起整套：应用镜像从 ghcr
+  # 拉取（`VERSION` 不设即 latest），迁移内置在 api 的启动命令里，起来
+  # 即用——用户侧不执行任何 build。本仓库的开发者要本地构建时，叠加
+  # compose.dev.yml（build: 块收在那里）。web 的 /api 代理在构建期指向
+  # 服务名 api。
   api:
     profiles: ["full"]
-    build:
-      context: .
-      dockerfile: infra/api.Dockerfile
-      args:
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    image: ghcr.io/dreamofxm/makemovie/api:${VERSION:-latest}
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
@@ -84,11 +92,7 @@ services:
         condition: service_healthy
   worker:
     profiles: ["full"]
-    build:
-      context: .
-      dockerfile: infra/worker.Dockerfile
-      args:
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    image: ghcr.io/dreamofxm/makemovie/worker:${VERSION:-latest}
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
@@ -104,17 +108,11 @@ services:
         condition: service_healthy
   web:
     profiles: ["full"]
-    build:
-      context: .
-      dockerfile: infra/web.Dockerfile
-      args:
-        # 反代目标=compose 服务名；浏览器端走相对 /api，两侧一致。
-        API_ORIGIN: http://api:4010
-        NEXT_PUBLIC_API_URL: /api
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    image: ghcr.io/dreamofxm/makemovie/web:${VERSION:-latest}
     ports: ["3010:3010"]
     depends_on: [api]
 volumes:
   postgres_data:
+  redis_data:
   minio_data:
   artifacts:
