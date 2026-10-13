@@ -1,0 +1,66 @@
+# Publish the one-command manual to npm on version tags.
+# A stranger then reads the whole project without cloning:
+#   npx -y makemovie@latest
+# Needs one repository secret: NPM_TOKEN — a granular access token with publish
+# permission for `makemovie` and "bypass 2FA" enabled. The tag is the single
+# trigger, exactly as docker.yml does for the images.
+name: npm
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # npm provenance: links the tarball to this commit and workflow
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # package.json is the source of truth for the version, so a tag and the
+      # manifest can only disagree by mistake — and that mistake would hand
+      # `npx makemovie@latest` a manual from a different commit than the Release.
+      - name: Tag must match package.json version
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME != package.json version $pkg"
+            exit 1
+          fi
+
+      # Re-running a failed tag build must not fail on "version already exists".
+      - name: Is this version already on npm?
+        id: probe
+        run: |
+          if npm view "makemovie@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "已发布过，跳过。"
+          fi
+
+      - name: Require NPM_TOKEN
+        if: steps.probe.outputs.published != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "仓库缺 NPM_TOKEN secret，无法发布。"
+            exit 1
+          fi
+
+      - name: Pack guard
+        if: steps.probe.outputs.published != 'true'
+        run: node scripts/pack-check.mjs
+
+      - name: Publish
+        if: steps.probe.outputs.published != 'true'
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
