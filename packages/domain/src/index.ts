@@ -511,3 +511,8 @@ export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | nu
   return audioSource == null ? dialogue !== '' : audioSource !== 'NATIVE'
 }
 
+
+// Readiness rules (slot states, catalog coverage, auto-bind planning). Imported at the
+// end on purpose: readiness.ts reads `slotStageUsage` at module scope, which the lines
+// above have initialized by the time this export runs.
+export * from './readiness.js'

@@ -60,6 +60,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
   const [expanded, setExpanded] = useState(false)
   const [whyOpen, setWhyOpen] = useState(false)
   const [mockBusy, setMockBusy] = useState(false)
+  const [autoBusy, setAutoBusy] = useState(false)
   const [mockNote, setMockNote] = useState<string | null>(null)
 
   const error = connections.error ?? bindings.error
@@ -102,6 +103,11 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
   const minimum = minimumConnections(catalogs)
   const unwired = unwiredSlots(readiness)
   const canWireMock = can('providers:manage') && can('bindings:manage')
+  // The one-click real-vendor exit only makes sense while a required slot is actually empty.
+  // A slot that is held up with bindings in place (call-blocked) is not something more
+  // bindings can fix, so the button stays hidden there.
+  const missingRequired = rows.some(item => item.usage.required && item.state !== 'ready')
+  const canAutoBind = can('bindings:manage') && missingRequired
 
   async function wireMock() {
     setMockBusy(true)
@@ -115,6 +121,25 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
       setMockNote(apiErrorMessage(cause, t))
     } finally {
       setMockBusy(false)
+    }
+  }
+
+  /** The "I bought a key, now set it up" exit: the server plans and binds through the same rules this panel renders. */
+  async function autoBind() {
+    setAutoBusy(true)
+    setMockNote(null)
+    try {
+      const result = await api<{ created: unknown[]; skipped: unknown[]; unfulfilled: string[] }>('/bindings/auto', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      connections.reload()
+      bindings.reload()
+      setMockNote(t(result.created.length > 0 ? 'models.readiness.autoBindDone' : 'models.readiness.autoBindNothing', { count: result.created.length }))
+    } catch (cause) {
+      setMockNote(apiErrorMessage(cause, t))
+    } finally {
+      setAutoBusy(false)
     }
   }
 
@@ -207,7 +232,22 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
             {t('models.readiness.conclusion', { total: rows.length, blockers: 1 })}
           </CardTitle>
           <CardDescription>{t('models.readiness.sortHint')}</CardDescription>
-          <CardAction>{mockControl}</CardAction>
+          <CardAction>
+            {canAutoBind && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button size="sm" variant="ghost" className="text-muted-foreground shrink-0" onClick={autoBind} disabled={autoBusy}>
+                    <PlayIcon />
+                    {autoBusy ? t('models.readiness.autoBindWorking') : t('models.readiness.autoBind')}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-sm">
+                  {t('models.readiness.autoBindHint')}
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {mockControl}
+          </CardAction>
         </CardHeader>
         <CardContent className="space-y-2">
           {mockNote && (

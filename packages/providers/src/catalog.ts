@@ -1,4 +1,4 @@
-import type { ModelModality } from '@studio/domain'
+import type { CapabilitySlot, ModelModality } from '@studio/domain'
 import { ANTHROPIC_DEFAULT_BASE_URL } from './anthropic.js'
 import { GOOGLE_DEFAULT_BASE_URL } from './google.js'
 import { KLING_DEFAULT_BASE_URL } from './kling.js'
@@ -12,6 +12,12 @@ export interface CatalogModel {
   acceptsFirstFrame?: boolean
   acceptsReferenceImages?: boolean
   maxReferenceImages?: number
+  /**
+   * The tier auto-bind points a slot at when this vendor wins it. Auditable product data,
+   * not array position: catalog order starts at each vendor's flagship row, so an unmarked
+   * catalog would silently default one-click setup to the most expensive tier.
+   */
+  recommendedFor?: CapabilitySlot[]
   spec?: Record<string, unknown>
 }
 
@@ -33,17 +39,17 @@ const dashscope: ProviderCatalog = {
   catalogVersion: '2026-09',
   models: [
     { model: 'qwen3.8-max', displayName: 'Qwen3.8 Max', modality: 'text', spec: { use: 'scriptwriting, complex reasoning' } },
-    { model: 'qwen3.7-plus', displayName: 'Qwen3.7 Plus', modality: 'text', spec: { use: 'scriptwriting, storyboards' } },
+    { model: 'qwen3.7-plus', displayName: 'Qwen3.7 Plus', modality: 'text', recommendedFor: ['script_text', 'storyboard_text'], spec: { use: 'scriptwriting, storyboards' } },
     { model: 'qwen3.8-flash', displayName: 'Qwen3.8 Flash', modality: 'text', spec: { use: 'fast drafts, probing' } },
     { model: 'qwen3-vl-plus', displayName: 'Qwen3 VL Plus', modality: 'vlm', spec: { use: 'visual quality audits' } },
     { model: 'qwen3-vl-flash', displayName: 'Qwen3 VL Flash', modality: 'vlm', spec: { use: 'audits at volume, where latency dominates' } },
-    { model: 'wan2.6-t2i', displayName: 'Wan 2.6 T2I', modality: 'image', spec: { note: 'the vendor recommends this tier and lets it be called synchronously, which the older ones are not; sizes are free-form but its total pixel count must sit between 1280×1280 and 1440×1440, so the small square presets other models accept are out of range here' } },
+    { model: 'wan2.6-t2i', displayName: 'Wan 2.6 T2I', modality: 'image', recommendedFor: ['image_gen'], spec: { note: 'the vendor recommends this tier and lets it be called synchronously, which the older ones are not; sizes are free-form but its total pixel count must sit between 1280×1280 and 1440×1440, so the small square presets other models accept are out of range here' } },
     { model: 'wan2.2-t2i-flash', displayName: 'Wan 2.2 T2I Flash', modality: 'image', spec: { note: 'the fast tier, async only; width and height each between 512 and 1440 pixels' } },
     { model: 'qwen-image-3.0', displayName: 'Qwen Image 3.0', modality: 'image', spec: { note: 'synchronous multimodal endpoint, n fixed at 1' } },
     { model: 'qwen-image-3.0-pro', displayName: 'Qwen Image 3.0 Pro', modality: 'image', spec: { note: 'synchronous multimodal endpoint, n fixed at 1' } },
     { model: 'qwen-image-edit', displayName: 'Qwen Image Edit', modality: 'image', acceptsReferenceImages: true, maxReferenceImages: 3, spec: { note: 'reference-image generation: the content array carries the approved asset sheets (cast, sets, props) before the text instruction, so every shot draws the same people and places; a text-only prompt still works, but without references it is just another t2i' } },
     { model: 'wan3.0-video', displayName: 'Wan 3.0 Video', modality: 't2v', spec: { durations: [2, 30], resolutions: ['480P', '720P', '1080P'], ratios: ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16'], note: 'the vendor defaults this model to 1080P and to an adaptive aspect ratio; the worker pins the resolution from this spec so the billed tier is explicit, and leaves the ratio adaptive rather than guessing a framing the shot description does not carry' } },
-    { model: 'wan2.7-t2v', displayName: 'Wan 2.7 T2V', modality: 't2v', spec: { durations: [2, 15], resolutions: ['720P', '1080P'], note: 'the dated snapshot wan2.7-t2v-2026-06-12 is this model pinned to one version' } },
+    { model: 'wan2.7-t2v', displayName: 'Wan 2.7 T2V', modality: 't2v', recommendedFor: ['video_t2v'], spec: { durations: [2, 15], resolutions: ['720P', '1080P'], note: 'the dated snapshot wan2.7-t2v-2026-06-12 is this model pinned to one version' } },
     { model: 'wan3.0-video', displayName: 'Wan 3.0 Video', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [2, 30], resolutions: ['480P', '720P', '1080P'], referenceMaxBytes: 20_971_520, note: 'same media array as wan2.7; the vendor also fuses reference images and video through this id, which this product does not offer yet' } },
     { model: 'wan2.7-i2v-2026-04-25', displayName: 'Wan 2.7 I2V', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [2, 15], resolutions: ['720P', '1080P'], referenceMaxBytes: 20_971_520, note: 'newer request dialect: the frame travels in a media array instead of img_url, and only the wan2.7 and wan3.0 generations speak it' } },
     { model: 'wan2.6-i2v', displayName: 'Wan 2.6 I2V', modality: 'i2v', acceptsFirstFrame: true, spec: { durations: [2, 15], resolutions: ['720P', '1080P'], referenceMaxBytes: 20_971_520 } },

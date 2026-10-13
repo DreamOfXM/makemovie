@@ -5,6 +5,17 @@ import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  gapSlots,
+  minimumConnections,
+  readyCount,
+  reduceCallEvidence,
+  requiredSlotCoverage,
+  slotReadiness,
+  wiredRequiredSlots,
+} from '@studio/domain'
+import { listCatalogs } from '@studio/providers'
+import { loadOrgModelPool } from '../lib/bindings.js'
 import { requirePermission } from '../plugins/auth.js'
 
 /**
@@ -27,6 +38,44 @@ import { requirePermission } from '../plugins/auth.js'
  *     recommendation: 'embedded' | 'voicebox' | 'download' | 'cloud_only' }
  */
 export function systemRoutes(app: FastifyInstance): void {
+  /**
+   * Model readiness as one machine-readable answer: which required slots are covered, what
+   * still blocks the chain, and how far the catalogs get you. Runs the exact rules the
+   * console renders (`@studio/domain`'s readiness module) against the same tables, so an
+   * agent or CLI can ask "what's missing" without reimplementing the panel. Read-only.
+   */
+  app.get(
+    '/system/readiness',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const [{ connections, bindings }, tasks] = await Promise.all([
+        loadOrgModelPool(app.db, auth.organizationId),
+        app.db.generationTask.findMany({
+          where: { organizationId: auth.organizationId, status: { in: ['SUCCEEDED', 'FAILED'] } },
+          select: { provider: true, model: true, status: true, errorSnapshot: true, updatedAt: true },
+        }),
+      ])
+      const evidence = Object.fromEntries(reduceCallEvidence(tasks))
+      const readiness = slotReadiness(connections, bindings, evidence)
+      const catalogs = listCatalogs()
+      reply.send({
+        required: { ready: readyCount(readiness), total: wiredRequiredSlots().length },
+        slots: readiness,
+        gaps: gapSlots(readiness).map(item => ({
+          slot: item.slot,
+          state: item.state,
+          required: item.usage.required,
+          callBlocked: item.callBlocked,
+        })),
+        catalogCoverage: {
+          perSlot: requiredSlotCoverage(catalogs).perSlot,
+          minimumConnections: minimumConnections(catalogs),
+        },
+      })
+    },
+  )
+
   app.get(
     '/system/tts-capability',
     { preHandler: requirePermission('read') },
