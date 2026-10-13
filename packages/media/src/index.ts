@@ -474,6 +474,32 @@ async function detectSubtitlesFilter(): Promise<boolean> {
   }
   return subtitlesFilterAvailable
 }
+
+/**
+ * 字幕交付方式。`auto` 交给本机能力探测;`burn`(硬烧进画面)与 `soft`(mov_text
+ * 软轨)是显式指定,由 STUDIO_SUBTITLE_MODE 给。
+ *
+ * 显式 `burn` 而本机没有 libass 时直接报错,不静默退回软轨——字幕是交付物的一部分,
+ * 静默换一种交付形态等于交付了另一个东西,看交付清单的人无从察觉。
+ */
+export type SubtitleMode = 'auto' | 'burn' | 'soft'
+
+export function subtitleModeFromEnv(raw: string | undefined = process.env.STUDIO_SUBTITLE_MODE): SubtitleMode {
+  const value = (raw ?? '').trim().toLowerCase()
+  if (value === '' || value === 'auto') return 'auto'
+  if (value === 'burn' || value === 'soft') return value
+  throw new Error(`STUDIO_SUBTITLE_MODE must be auto, burn or soft, got "${raw}"`)
+}
+
+async function resolveBurnSubtitles(): Promise<boolean> {
+  const mode = subtitleModeFromEnv()
+  if (mode === 'soft') return false
+  const available = await detectSubtitlesFilter()
+  if (mode === 'burn' && !available) {
+    throw new Error('STUDIO_SUBTITLE_MODE=burn needs an ffmpeg build with the subtitles filter (libass); this build has none')
+  }
+  return available
+}
 const BGM_VOLUME = '0.25'
 /** 有 ducking 时垫底音量可以更高:台词间隙 BGM 该有存在感,说话时再压下去。 */
 const BGM_DUCK_BED = '0.5'
@@ -603,10 +629,10 @@ export class FfmpegComposer implements Composer {
         return { durationMs: await probeDuration(output), ...(labeling ? { labeling } : {}) }
       }
 
-      // 字幕双路径:本机 ffmpeg 带烧录滤镜(libass)→ 硬烧进画面(短剧交付标准);
-      // 精简构建没有该滤镜 → 退回 mov_text 软字幕轨(外部播放器可见,网页端由
-      // 播放器组件叠加渲染)。与末帧定格(tpad)、AI 角标合并在同一条 -vf 里。
-      const canBurn = srt ? await detectSubtitlesFilter() : false
+      // 字幕两条交付路径:硬烧进画面(短剧交付标准)或挂 mov_text 软字幕轨(外部
+      // 播放器可见,网页端由播放器组件叠加渲染)。走哪条由 STUDIO_SUBTITLE_MODE
+      // 定,见 resolveBurnSubtitles。与末帧定格(tpad)、AI 角标合并在同一条 -vf 里。
+      const canBurn = srt ? await resolveBurnSubtitles() : false
       const videoFilters: string[] = []
       if (needsFrameHold) videoFilters.push(`tpad=stop_mode=clone:stop_duration=${overflowSeconds.toFixed(3)}`)
       if (badge) videoFilters.push(badge)

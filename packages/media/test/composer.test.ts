@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { FfmpegComposer, bgmVoiceMixFilter, buildSrt, synthesizeMockMedia } from '../src/index.js'
+import { FfmpegComposer, bgmVoiceMixFilter, buildSrt, subtitleModeFromEnv, synthesizeMockMedia } from '../src/index.js'
 
 const run = promisify(execFile)
 
@@ -56,6 +56,29 @@ async function bandLevel(file: string, fromHz: number, toHz: number, windowMs?: 
   return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
 }
 
+/**
+ * 字幕断言必须自己定交付方式。走硬烧还是软轨由宿主 ffmpeg 有没有 libass 决定,
+ * 而 libass 有无是**构建差异**(本机精简构建没有,GitHub Actions 的 apt 版有),
+ * 不是被测代码的性质——不定死的话同一个断言在两边会得出相反结论。
+ * 见 describe('subtitle delivery')。
+ */
+const savedSubtitleMode = process.env.STUDIO_SUBTITLE_MODE
+afterEach(() => {
+  if (savedSubtitleMode === undefined) delete process.env.STUDIO_SUBTITLE_MODE
+  else process.env.STUDIO_SUBTITLE_MODE = savedSubtitleMode
+})
+
+async function hostCanBurnSubtitles(): Promise<boolean> {
+  try {
+    const { stdout } = await run('ffmpeg', ['-hide_banner', '-filters'])
+    return stdout.includes(' subtitles ')
+  } catch {
+    return false
+  }
+}
+
+const hostHasLibass = await hostCanBurnSubtitles()
+
 describe('ffmpeg composer', () => {
   let workdir: string
   let composer: FfmpegComposer
@@ -84,6 +107,7 @@ describe('ffmpeg composer', () => {
   })
 
   it('mixes voice, music and soft subtitles without re-encoding video', async () => {
+    process.env.STUDIO_SUBTITLE_MODE = 'soft'
     const a = path.join(workdir, 'a.mp4')
     const b = path.join(workdir, 'b.mp4')
     await clip(a, 1)
@@ -134,6 +158,7 @@ describe('ffmpeg composer', () => {
   })
 
   it('keeps silent shots that follow the last line', async () => {
+    process.env.STUDIO_SUBTITLE_MODE = 'soft'
     const a = path.join(workdir, 'a.mp4')
     const b = path.join(workdir, 'b.mp4')
     const c = path.join(workdir, 'c.mp4')
@@ -435,5 +460,74 @@ describe('ffmpeg composer', () => {
         delete process.env.STUDIO_POSTPROCESS_MIN_HEIGHT
       }
     })
+  })
+})
+
+/**
+ * 字幕的两条交付路径都要被钉住,而且不能用宿主 ffmpeg 的构建差异当判据:
+ * libass 有没有是「谁装的 ffmpeg」决定的,不是被测代码的性质。走哪条由
+ * STUDIO_SUBTITLE_MODE 定,于是软轨那条与「硬烧但本机烧不了」这条在本机就能跑,
+ * 真硬烧那条只在带 libass 的宿主上跑——CI 的 ubuntu ffmpeg 带,本机 homebrew 精简构建不带。
+ */
+describe('subtitle delivery', () => {
+  let workdir: string
+  let composer: FfmpegComposer
+
+  beforeEach(async () => {
+    workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-subtitles-'))
+    composer = new FfmpegComposer()
+  })
+
+  afterEach(async () => {
+    await rm(workdir, { recursive: true, force: true })
+  })
+
+  /** 一个 1 秒画面 + 一句字幕,两条路径都用它。 */
+  async function source(): Promise<{ clip: string; srt: string }> {
+    const file = path.join(workdir, 'a.mp4')
+    await clip(file, 1)
+    const srt = path.join(workdir, 'subs.srt')
+    await writeFile(srt, buildSrt([{ text: '第一句', fromMs: 0, toMs: 1000 }]))
+    return { clip: file, srt }
+  }
+
+  it('不填=auto,burn/soft 原样采信,其它值拒绝', () => {
+    expect(subtitleModeFromEnv(undefined)).toBe('auto')
+    expect(subtitleModeFromEnv('')).toBe('auto')
+    expect(subtitleModeFromEnv('  AUTO ')).toBe('auto')
+    expect(subtitleModeFromEnv('burn')).toBe('burn')
+    expect(subtitleModeFromEnv('soft')).toBe('soft')
+    expect(() => subtitleModeFromEnv('hard')).toThrow(/auto, burn or soft/)
+  })
+
+  it('指定 soft 时挂 mov_text 软字幕轨', async () => {
+    process.env.STUDIO_SUBTITLE_MODE = 'soft'
+    const { clip: file, srt } = await source()
+    const output = path.join(workdir, 'soft.mp4')
+
+    await composer.compose({ clips: [file], srt }, output)
+
+    const subtitle = (await probe(output)).streams.find(s => s.codec_type === 'subtitle')
+    expect(subtitle?.codec_name).toBe('mov_text')
+  })
+
+  it.skipIf(!hostHasLibass)('指定 burn 时字幕进画面,成片里不再有独立字幕流', async () => {
+    process.env.STUDIO_SUBTITLE_MODE = 'burn'
+    const { clip: file, srt } = await source()
+    const output = path.join(workdir, 'burn.mp4')
+
+    await composer.compose({ clips: [file], srt }, output)
+
+    const result = await probe(output)
+    // 字幕成了像素,所以没有 subtitle 流;烧录必须重编码,视频流仍是 h264。
+    expect(result.streams.map(s => s.codec_type)).toEqual(['video'])
+    expect(result.streams[0].codec_name).toBe('h264')
+  })
+
+  it.skipIf(hostHasLibass)('指定 burn 但本机烧不了时会报错,不静默退回软轨', async () => {
+    process.env.STUDIO_SUBTITLE_MODE = 'burn'
+    const { clip: file, srt } = await source()
+
+    await expect(composer.compose({ clips: [file], srt }, path.join(workdir, 'x.mp4'))).rejects.toThrow(/libass/)
   })
 })
