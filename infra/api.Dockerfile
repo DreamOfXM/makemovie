@@ -23,8 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-cert
 COPY --from=build /root/.cache/prisma /root/.cache/prisma
 COPY --from=build /root/.cache/node/corepack /root/.cache/node/corepack
 COPY --from=build /app /app
-ENV NODE_ENV=production STUDIO_ARTIFACTS_DIR=/var/lib/studio/artifacts
-RUN mkdir -p /var/lib/studio/artifacts
+ENV NODE_ENV=production STUDIO_ARTIFACTS_DIR=/var/lib/studio/artifacts STUDIO_SECRETS_DIR=/var/lib/studio/secrets
+RUN mkdir -p /var/lib/studio/artifacts /var/lib/studio/secrets
 EXPOSE 4010
 # 启动三步：生成 Prisma 客户端（层间路径解析不承诺保留生成物）→ 迁移 → 起 API。
 CMD ["sh", "-c", "pnpm --filter @studio/db generate && pnpm --filter @studio/db exec prisma migrate deploy && pnpm --filter @studio/api exec tsx src/main.ts"]
