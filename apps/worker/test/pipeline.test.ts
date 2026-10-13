@@ -38,6 +38,17 @@ const MOCK_STORYBOARD_EN = JSON.parse(MOCK_STORYBOARD_JSON_EN) as typeof MOCK_ST
 
 let env: WorkerTestEnv
 
+/**
+ * 字幕交付方式由用例自己指定,不由宿主 ffmpeg 的构建决定:libass 有没有取决于「谁装的
+ * ffmpeg」(本机默认装的是精简版,.env 把 STUDIO_FFMPEG_DIR 指到 ffmpeg-full 之后就带),
+ * 拿它当判据的话同一个断言在不同机器上会得出相反结论。
+ */
+const savedSubtitleMode = process.env.STUDIO_SUBTITLE_MODE
+afterEach(() => {
+  if (savedSubtitleMode === undefined) delete process.env.STUDIO_SUBTITLE_MODE
+  else process.env.STUDIO_SUBTITLE_MODE = savedSubtitleMode
+})
+
 beforeAll(async () => {
   env = await startTestEnv()
 }, 300_000)
@@ -778,6 +789,9 @@ describe('compose-episode', () => {
   })
 
   it('mixes per-shot voice and music and embeds the subtitle track when burning is unavailable', async () => {
+    // 「烧不了」在这里是明确要求的交付方式,不是本机碰巧没有 libass。不写死的话,
+    // .env 把 ffmpeg 指到带 libass 的构建,这条就会改成硬烧、断言随之落空。
+    process.env.STUDIO_SUBTITLE_MODE = 'soft'
     const seed = await env.seed({ storyboards: 2 })
     const [first, second] = seed.storyboardIds as [string, string]
     await env.db.storyboard.update({ where: { id: first }, data: { dialogue: '这条街不能待了。', speaker: '林晚' } })
@@ -794,7 +808,8 @@ describe('compose-episode', () => {
     const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
     expect(updated.status).toBe('COMPLETED')
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
-    // 本机 ffmpeg 无烧录滤镜 → 软字幕轨回退;带 libass 的构建会硬烧进画面。
+    // 本机 ffmpeg 有没有烧录滤镜不由这条用例决定:交付方式上面已定死为软轨,
+    // 所以成片里必然带一条独立字幕流。
     expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio', 'subtitle'])
 
     const subtitle = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.subtitleArtifactId! } })
@@ -849,6 +864,8 @@ describe('compose-episode', () => {
   })
 
   it('subtitles a line whose voice never landed', async () => {
+    // 同上:软字幕轨是有台词就要有的交付物,与宿主能不能硬烧无关。
+    process.env.STUDIO_SUBTITLE_MODE = 'soft'
     const seed = await env.seed({ storyboards: 1 })
     await env.db.storyboard.update({ where: { id: seed.storyboardIds[0]! }, data: { dialogue: '走吧。' } })
     await env.attachSucceededVideo(seed, seed.storyboardIds[0]!, 1)

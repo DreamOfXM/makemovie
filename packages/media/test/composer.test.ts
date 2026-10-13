@@ -1,12 +1,8 @@
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { FfmpegComposer, bgmVoiceMixFilter, buildSrt, subtitleModeFromEnv, synthesizeMockMedia } from '../src/index.js'
-
-const run = promisify(execFile)
+import { FfmpegComposer, bgmVoiceMixFilter, buildSrt, run, subtitleModeFromEnv, synthesizeMockMedia } from '../src/index.js'
 
 interface ProbeResult {
   streams: { codec_type: string; codec_name?: string; width?: number; height?: number; tags?: Record<string, string> }[]
@@ -57,9 +53,9 @@ async function bandLevel(file: string, fromHz: number, toHz: number, windowMs?: 
 }
 
 /**
- * 字幕断言必须自己定交付方式。走硬烧还是软轨由宿主 ffmpeg 有没有 libass 决定,
- * 而 libass 有无是**构建差异**(本机精简构建没有,GitHub Actions 的 apt 版有),
- * 不是被测代码的性质——不定死的话同一个断言在两边会得出相反结论。
+ * 字幕断言必须自己定交付方式。走硬烧还是软轨由**被测代码会用的那个 ffmpeg**
+ * 有没有 libass 决定,而 libass 有无是构建差异(精简构建没有,apt 版有),不是被
+ * 测代码的性质——不定死的话同一个断言在不同机器上会得出相反结论。
  * 见 describe('subtitle delivery')。
  */
 const savedSubtitleMode = process.env.STUDIO_SUBTITLE_MODE
@@ -68,6 +64,12 @@ afterEach(() => {
   else process.env.STUDIO_SUBTITLE_MODE = savedSubtitleMode
 })
 
+/**
+ * 探测走包里的 `run()`——它会按 STUDIO_FFMPEG_DIR 解析 ffmpeg,而裸 execFile 只看
+ * PATH。两者可能不是同一个构建(本机默认装的是精简版,.env 又把 STUDIO_FFMPEG_DIR
+ * 指向 ffmpeg-full,一个没 libass 一个有),各探各的就会让测试对宿主能力的判断与
+ * 被测代码相反:测试以为烧不了,代码其实烧成了。
+ */
 async function hostCanBurnSubtitles(): Promise<boolean> {
   try {
     const { stdout } = await run('ffmpeg', ['-hide_banner', '-filters'])
@@ -464,10 +466,11 @@ describe('ffmpeg composer', () => {
 })
 
 /**
- * 字幕的两条交付路径都要被钉住,而且不能用宿主 ffmpeg 的构建差异当判据:
- * libass 有没有是「谁装的 ffmpeg」决定的,不是被测代码的性质。走哪条由
- * STUDIO_SUBTITLE_MODE 定,于是软轨那条与「硬烧但本机烧不了」这条在本机就能跑,
- * 真硬烧那条只在带 libass 的宿主上跑——CI 的 ubuntu ffmpeg 带,本机 homebrew 精简构建不带。
+ * 字幕的两条交付路径都要被钉住,但判据不能是「宿主的构建差异」:libass 有没有是
+ * 谁装的 ffmpeg 决定的(本机默认装的是精简版,.env 把 STUDIO_FFMPEG_DIR 指到
+ * ffmpeg-full 之后就带),不是被测代码的性质。走哪条由 STUDIO_SUBTITLE_MODE 定,
+ * 于是软轨那条与「硬烧但本机烧不了」这条在本机就能跑,真硬烧那条只在带 libass 的
+ * 宿主上跑。两条都按 hostCanBurnSubtitles() 分流,也就是按被测代码会用的那个二进制。
  */
 describe('subtitle delivery', () => {
   let workdir: string
