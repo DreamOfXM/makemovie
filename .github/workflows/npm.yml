@@ -35,9 +35,13 @@ jobs:
       # Trusted publishing landed in npm CLI 11.5.1, which is newer than the npm
       # bundled with Node 22 — without this the publish falls back to looking for
       # a token, finds none, and fails with a 401 that says nothing about OIDC.
+      # Pinned to the 11.x major on purpose: npm 12 is out as `latest` and turns
+      # install-time behavior stricter (lifecycle scripts, git and remote-URL
+      # dependencies all become opt-in), which is not a variable worth taking on
+      # inside the release path.
       - name: Ensure npm CLI supports trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g npm@^11
           npm --version
 
       # package.json is the source of truth for the version, so a tag and the
