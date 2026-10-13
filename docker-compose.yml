@@ -77,14 +77,17 @@ services:
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
-      # dev-only default; in production set a random 64-hex master key
-      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      # 留空即由容器首启生成并写进 secrets 卷——api 与 worker 挂的是同一个卷，
+      # 所以两边自动拿到同一把。显式给了就用给的。production 拒绝全零 key，
+      # 这就是这里不能像别处那样放一个 `:-<默认值>` 的原因。
+      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-}
       STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
+      STUDIO_SECRETS_DIR: /var/lib/studio/secrets
       <<: *storage-env
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3010}
       PORT: 4010
     ports: ["4010:4010"]
-    volumes: ["artifacts:/var/lib/studio/artifacts"]
+    volumes: ["artifacts:/var/lib/studio/artifacts", "secrets:/var/lib/studio/secrets"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,11 +99,16 @@ services:
     environment:
       DATABASE_URL: postgresql://studio:studio@postgres:5432/studio?schema=public
       REDIS_URL: redis://redis:6379
-      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      # 与 api 同一处引导、同一个卷（见上方 api 的说明）。
+      STUDIO_MASTER_KEY: ${STUDIO_MASTER_KEY:-}
       STUDIO_ARTIFACTS_DIR: /var/lib/studio/artifacts
+      STUDIO_SECRETS_DIR: /var/lib/studio/secrets
       <<: *storage-env
       STUDIO_QC_MODE: ${STUDIO_QC_MODE:-random}
-    volumes: ["artifacts:/var/lib/studio/artifacts"]
+      # 字幕交付方式（auto|burn|soft）。.env.example 里记着它，这里也得接着，
+      # 否则在 .env 里改了没有效果。
+      STUDIO_SUBTITLE_MODE: ${STUDIO_SUBTITLE_MODE:-auto}
+    volumes: ["artifacts:/var/lib/studio/artifacts", "secrets:/var/lib/studio/secrets"]
     depends_on:
       redis:
         condition: service_healthy
@@ -116,3 +124,6 @@ volumes:
   redis_data:
   minio_data:
   artifacts:
+  # 单独一个卷而不是塞进 artifacts：artifacts 是生成物，运营会为了腾空间整个删掉，
+  # 而 master key 一丢，库里所有 provider 凭据都解不开。生命周期不能绑在一起。
+  secrets:

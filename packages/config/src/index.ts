@@ -1,3 +1,5 @@
+export * from './master-key.js'
+
 export interface AppConfig {
   nodeEnv: 'development' | 'test' | 'production'
   databaseUrl: string

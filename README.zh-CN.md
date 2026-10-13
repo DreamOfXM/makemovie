@@ -226,7 +226,8 @@ pnpm dev                                              # api :4010 · web :3010 �
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `DATABASE_URL` | — | PostgreSQL 连接串（必填） |
-| `STUDIO_MASTER_KEY` | 开发用密钥 | 64 位十六进制 AES-256-GCM 密钥，加密提供商密钥；生产环境必填且拒绝开发用密钥 |
+| `STUDIO_MASTER_KEY` | 首次启动时自动生成 | 64 位十六进制 AES-256-GCM 密钥，加密提供商密钥。不设则自动生成一把存到 `STUDIO_SECRETS_DIR`；生产环境拒绝开发用的全零密钥。事后换掉它等于让已存凭据全部解不开 |
+| `STUDIO_SECRETS_DIR` | `/var/lib/studio/secrets` | 自动生成的那把密钥的存放位置。Docker Compose 给 api 与 worker 各挂了一个 `secrets` 卷，所以它跳重启保留、两边读到的是同一把 |
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ broker |
 | `STORAGE_BACKEND` | `disk` | `disk` 将产物存于 `STUDIO_ARTIFACTS_DIR`；`s3` 存于 S3 兼容对象存储 |
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | 磁盘后端根目录；API 与 worker 必须共享同一路径（`pnpm dev` 已设置，Docker Compose 以共享卷提供） |
@@ -262,17 +263,19 @@ pnpm db:migrate && pnpm dev
 mkdir makemovie && cd makemovie
 wget https://github.com/DreamOfXM/makemovie/releases/latest/download/docker-compose.yml
 wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env -O .env
-# 然后设置 STUDIO_MASTER_KEY（openssl rand -hex 32）；需要固定版本就加 VERSION=0.2.0
+# 需要固定版本就加 VERSION=0.2.0（默认 latest）
 docker compose --profile full up -d   # postgres, redis, api, worker, web（minio 走 --profile s3）
 ```
 
-迁移内置在 api 容器的启动命令里，起来即可用。要从本仓库源码自行构建镜像时，叠加开发覆盖文件：
+迁移内置在 api 容器的启动命令里，起来即可用。`STUDIO_MASTER_KEY` 不用你操心：首次启动会生成一把写进 `secrets` 卷，之后一直复用它——api 与 worker 挂的是同一个卷，所以两边读到的必然是同一把。它加密数据库里的 provider 凭据，因此那个卷要跟着数据库一起备份；想自己掌握这把密钥，就在 `.env` 里显式设 `STUDIO_MASTER_KEY`（`openssl rand -hex 32`）。
+
+要从本仓库源码自行构建镜像时，叠加开发覆盖文件：
 
 ```bash
 docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --build
 ```
 
-会咬人的几点：postgres 与 redis 对外发布在宿主端口 **5433** 与 **6380**，以免撞上你本机已有的安装——`.env.example` 已经指向那里；api 与 worker 共用同一个 artifacts 卷（或用 `STORAGE_BACKEND=s3` 走同一个 S3 桶，MinIO 即可提供）；生产环境要把 `STUDIO_MASTER_KEY`、`CORS_ORIGIN` 与 `NEXT_PUBLIC_API_URL` 设成你的真实来源。
+会咬人的几点：postgres 与 redis 对外发布在宿主端口 **5433** 与 **6380**，以免撞上你本机已有的安装——`.env.example` 已经指向那里；api 与 worker 共用两个卷，**artifacts**（生成物，腾空间时可以清）与 **secrets**（存 master key，清了库里所有模型密钥就解不开）；公开部署要把 `CORS_ORIGIN` 与 `NEXT_PUBLIC_API_URL` 设成你的真实来源。
 
 **图 2：** 配好密钥后的模型中心：就绪度标签页把每个能力槽位解析到绑定在它上面的模型，而一个槽位只有在厂商自己确认过权限后才会变成就绪——调不通的密钥不会被算成可用。
 

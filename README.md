@@ -140,7 +140,7 @@ wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env
 docker compose --profile full up -d                  # postgres, redis, api, worker, web
 ```
 
-Migrations run inside the api container before it serves; open http://localhost:3010. For a self-hosted deployment set a real `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` — the all-zero key is dev-only and refused nowhere, but it should not survive past your own machine. Pin a version with `VERSION=0.2.0` in `.env` (default is `latest`); images live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}` for amd64 and arm64.
+Migrations run inside the api container before it serves; open http://localhost:3010. The first start generates a `STUDIO_MASTER_KEY`, writes it into the `secrets` volume and reuses that one from then on. It decrypts the provider credentials in the database, so keep that volume backed up next to the database — or set `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` yourself and hold it deliberately. Pin a version with `VERSION=0.2.0` in `.env` (default is `latest`); images live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}` for amd64 and arm64.
 
 **Building the images yourself** (from a checkout):
 
@@ -247,7 +247,8 @@ The pipeline adapts to your requirements through project settings and per-shot d
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | — | PostgreSQL connection string (required) |
-| `STUDIO_MASTER_KEY` | development key | 64-hex AES-256-GCM key encrypting provider secrets; required in production, which refuses the development key |
+| `STUDIO_MASTER_KEY` | generated on first production start | 64-hex AES-256-GCM key encrypting provider secrets. Leave it unset and the app generates one under `STUDIO_SECRETS_DIR`; production refuses the all-zero development key. Changing it later leaves every stored credential undecryptable |
+| `STUDIO_SECRETS_DIR` | `/var/lib/studio/secrets` | Where that generated key is kept. Docker Compose mounts a `secrets` volume here for both api and worker, so it survives restarts and both processes read the same one |
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ broker |
 | `STORAGE_BACKEND` | `disk` | `disk` stores artifacts under `STUDIO_ARTIFACTS_DIR`; `s3` stores them in an S3-compatible object store |
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | Disk backend root; the API and the worker must share the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume) |
@@ -285,7 +286,7 @@ docker compose up -d --build          # postgres, redis, minio, api, worker, web
 docker compose exec api pnpm --filter @studio/db exec prisma migrate deploy
 ```
 
-Points that bite: postgres and redis publish on host ports **5433** and **6380** to stay out of the way of any local installs — `.env.example` already points there; the api and worker share one artifacts volume (or an S3 bucket via `STORAGE_BACKEND=s3`, which MinIO can serve); in production set `STUDIO_MASTER_KEY`, `CORS_ORIGIN`, and `NEXT_PUBLIC_API_URL` to your real origin.
+Points that bite: postgres and redis publish on host ports **5433** and **6380** to stay out of the way of any local installs — `.env.example` already points there; the api and worker share two volumes, **artifacts** (generated media — safe to clear when you need the space) and **secrets** (the master key — clearing it leaves every model credential in the database undecryptable); for a public deployment point `CORS_ORIGIN` and `NEXT_PUBLIC_API_URL` at your real origin.
 
 <p align="center"><img src="./docs/assets/readme/model-center-en.png" width="838" alt="The MakeMovie Model center, readiness tab: a four-step setup explainer above a list of capability slots each marked Ready, with a banner saying 4/4 required slots are usable."></p>
 

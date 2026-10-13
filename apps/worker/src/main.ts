@@ -1,5 +1,6 @@
 import { Worker } from 'bullmq'
 import { PrismaClient } from '@studio/db'
+import { ensureMasterKey } from '@studio/config'
 import { PIPELINE_QUEUE, createPipelineQueue, enqueue, type PipelinePayload } from '@studio/jobs'
 import { FfmpegComposer, storageFrom } from '@studio/media'
 import { composeEpisode } from './compose.js'
@@ -7,6 +8,9 @@ import { loadWorkerConfig } from './config.js'
 import type { PipelineDeps } from './deps.js'
 import { runTask } from './run-task.js'
 import { ModelQualityChecker } from './visual-audit.js'
+
+// 与 api 同一段引导：worker 也要解密 provider 凭据，密钥必须同源。
+ensureMasterKey()
 
 const config = loadWorkerConfig()
 const db = new PrismaClient({ datasources: { db: { url: config.databaseUrl } } })
