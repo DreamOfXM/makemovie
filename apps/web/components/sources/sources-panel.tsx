@@ -367,8 +367,8 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
           ) : (
             <div className="space-y-3">
               {activeSources.length > 0 && (
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-muted-foreground text-xs">{t('sources.manualAddHint')}</p>
+                <div className="flex items-center justify-end gap-1.5">
+                  <HelpHint text={t('sources.manualAddHint')} />
                   <Button variant="ghost" size="sm" disabled={uploading} onClick={() => { setManualOpen(false); setUploadError(null) }}>
                     {t('common.collapse')}
                   </Button>
@@ -394,9 +394,8 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                 {/* The ceiling exists only server-side; a live counter keeps it
                     from being discovered by hitting the rejection. */}
                 <p className="text-muted-foreground text-xs">{t('sources.charCount', { count: content.length, limit: 200_000 })}</p>
-                <p className="text-muted-foreground text-xs">{t('sources.uploadDisabledHint')}</p>
               </Field>
-              <div className="flex justify-end">
+              <div className="flex items-center justify-end gap-1.5">
                 <GuardedButton
                   action="episode:write"
                   size="sm"
@@ -407,6 +406,7 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
                   <UploadIcon />
                   {uploading ? t('sources.uploading') : t('sources.upload')}
                 </GuardedButton>
+                <HelpHint text={t('sources.uploadDisabledHint')} />
               </div>
             </div>
           )}
@@ -835,8 +835,8 @@ function VersionTable({
                       ) : (
                         <div className="space-y-2">
                           <Textarea rows={14} value={draft} onChange={event => setDraft(event.target.value)} />
-                          <p className="text-muted-foreground text-xs">{t('sources.editHint')}</p>
-                          <div className="flex justify-end gap-2">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <HelpHint text={t('sources.editHint')} />
                             <Button variant="ghost" size="sm" disabled={saving} onClick={() => setDraft(null)}>
                               {t('common.cancel')}
                             </Button>

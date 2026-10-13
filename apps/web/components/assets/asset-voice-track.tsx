@@ -7,6 +7,7 @@ import { artifactHref } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
+import { HelpHint } from '@/components/ui/help-hint'
 import { VoiceEngineStatus } from '@/components/settings/voice-engine-status'
 
 /**
@@ -113,10 +114,16 @@ export function AssetVoiceTrack({ asset, episodeId, onChanged }: { asset: Asset;
         /* 选完文件/录完音的确认步：补 transcript 再提交 */
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium">{pendingFile.name}</p>
+          {/* 这个框要填的是「这段音频说了什么」。字段名常驻，说明（拿来做什么用）
+              挂问号——placeholder 只留一句「填什么」的短提示。 */}
+          <span className="text-muted-foreground flex items-center gap-1 text-[10px] font-medium">
+            {t('assets.voiceTranscriptLabel')}
+            <HelpHint text={t('assets.voiceTranscriptHint')} />
+          </span>
           <textarea
             value={transcript}
             onChange={event => setTranscript(event.target.value)}
-            placeholder={t('assets.voiceTranscriptHint')}
+            placeholder={t('assets.voiceTranscriptPlaceholder')}
             rows={2}
             className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-[11px]"
           />

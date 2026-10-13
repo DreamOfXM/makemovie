@@ -31,6 +31,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
+import { HelpHint } from '@/components/ui/help-hint'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/error-state'
@@ -481,6 +482,9 @@ function EpisodeWorkspace() {
                       {t('storyboards.revision', { revision: storyboardRevision })}
                     </Badge>
                   )}
+                  {/* 「点镜头行看左右对照」是操作说明，不是统计数字——挂问号，
+                      不混进下面那排 tabular-nums 的计数里冒充统计。 */}
+                  {storyboards.length > 0 && <HelpHint text={t('storyboards.boardHint')} />}
                 </CardTitle>
                 <CardDescription>
                   {episode
@@ -498,7 +502,6 @@ function EpisodeWorkspace() {
                       {mediaProgress.clipFailed > 0 && ` · ${t('generations.status.FAILED')} ${mediaProgress.clipFailed}`}
                     </span>
                     <span>{t('generations.stage.AUDIO')} {mediaProgress.voices}/{mediaProgress.speaking}</span>
-                    <span className="text-foreground font-medium">{t('storyboards.boardHint')}</span>
                   </div>
                 )}
                 <CardAction>
@@ -537,7 +540,7 @@ function EpisodeWorkspace() {
                       <LoaderCircleIcon className="text-primary size-4 shrink-0 animate-spin" />
                       <div>
                         <p className="text-sm font-medium">{t('storyboards.generating')}</p>
-                        <p className="text-muted-foreground text-xs">{t('storyboards.generatingHint')}</p>
+                        <p className="text-muted-foreground text-xs">{t('storyboards.generatingNotice')}</p>
                       </div>
                     </div>
                   ) : (

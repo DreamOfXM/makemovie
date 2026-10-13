@@ -301,7 +301,7 @@ export function UsagePanel({ episodeId = null, projectId = null, scopeFromUrl = 
                           <Hint text={t('usage.failedHint')}>
                             <Link
                               href={failedHref}
-                              aria-label={`${row.failedTaskCount} · ${t('usage.failedHint')}`}
+                              aria-label={`${row.failedTaskCount} · ${t('usage.failedLink')}`}
                               className="text-destructive-ink font-medium underline-offset-2 hover:underline"
                             >
                               {row.failedTaskCount}

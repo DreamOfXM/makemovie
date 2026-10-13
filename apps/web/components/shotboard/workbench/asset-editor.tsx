@@ -135,8 +135,8 @@ export function AssetEditor({ episodeId, asset, usages, canWrite, onOpenShot, on
               {t('workbench.save')}
             </GuardedButton>
           )}
-          {/* 只读访客也看得到档案，但没有可保存的东西——不放死按钮。 */}
-          {!canWrite && <span className="text-subtle-foreground text-[11px]">{t('workbench.readonlyHint')}</span>}
+          {/* 只读访客也看得到档案，但没有可保存的东西——不放死按钮，只标一个状态。 */}
+          {!canWrite && <Badge variant="outline" className="text-[11px] font-normal">{t('workbench.readonlyNotice')}</Badge>}
         </div>
       </div>
     </div>

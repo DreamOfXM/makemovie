@@ -115,7 +115,7 @@ export function VoiceEngineStatus({ compact = false }: { compact?: boolean }) {
       <div className="space-y-1.5">
         <p className={line}>
           <DownloadIcon className="text-muted-foreground size-3.5 shrink-0" />
-          {t('voiceEngine.downloadHint')}
+          {t('voiceEngine.downloadNotice')}
         </p>
         <Button variant="outline" size="sm" className="h-6 text-[10px]" disabled={starting} onClick={() => void startInstall()}>
           {starting && <LoaderCircleIcon className="size-3 animate-spin" />}

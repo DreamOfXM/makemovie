@@ -231,7 +231,7 @@ export function ShotEditor({
             <span>{t('storyboards.description')}</span>
             {/* 整集重跑分镜的入口曾只住在流程页，用户在制作台找不到（2026-09-29）。 */}
             <button type="button" onClick={onOpenStoryboardCard} className="text-primary hover:underline font-medium">
-              {t('storyboards.rewriteAllHint')}
+              {t('storyboards.rewriteAll')}
             </button>
           </span>
           <Textarea rows={3} value={form.description} disabled={!canWrite} onChange={event => field('description', event.target.value)} />
