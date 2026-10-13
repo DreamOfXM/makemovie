@@ -1,7 +1,34 @@
 {
   "name": "makemovie",
-  "private": true,
+  "version": "0.2.0",
+  "description": "AI film and video production platform — from source text to an audited, delivered master. A self-hostable pipeline for short dramas, series and films, with an EDL / FCP XML edit list for Premiere Pro and DaVinci Resolve.",
   "license": "Apache-2.0",
+  "homepage": "https://dreamofxm.github.io/makemovie/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DreamOfXM/makemovie.git"
+  },
+  "keywords": [
+    "ai-video",
+    "film-production",
+    "video-production",
+    "short-drama",
+    "storyboard",
+    "text-to-video",
+    "screenplay",
+    "ffmpeg",
+    "edl",
+    "fcpxml",
+    "premiere-pro",
+    "davinci-resolve",
+    "self-hosted",
+    "ai-agent"
+  ],
+  "files": [
+    "bin/",
+    "skills/",
+    "TRADEMARK.md"
+  ],
   "bin": {
     "makemovie": "bin/makemovie.mjs"
   },
@@ -16,6 +43,7 @@
     "test": "pnpm -r test",
     "dev": "set -a && . ./.env && set +a && STUDIO_ARTIFACTS_DIR=\"$PWD/var/artifacts\" pnpm --parallel --filter @studio/api --filter @studio/worker --filter @studio/web dev",
     "check": "pnpm --filter @studio/worker exec tsx doctor.ts",
+    "prepublishOnly": "node scripts/pack-check.mjs",
     "db:migrate": "set -a && . ./.env && set +a && pnpm --filter @studio/db exec prisma migrate deploy"
   },
   "devDependencies": {

@@ -30,6 +30,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # The published package is the repository root, so its `files` whitelist
+      # is what keeps apps/ and packages/ off npm. Checked on every pull request
+      # because by the time a tag runs it, the mistake is already a release.
+      - name: Pack guard
+        run: node scripts/pack-check.mjs
+
       # The worker synthesizes mock media and composes episodes with the real
       # binary, so the tests fail loudly rather than silently skipping it.
       - name: Ensure FFmpeg
