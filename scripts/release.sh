@@ -46,8 +46,13 @@ fi
 
 git tag -a "$version" -m "$version"
 git push origin "$version"
+# gh 的 `file#label` 只改附件显示名，下载直链仍用原文件名：直接附 .env.example，
+# 说明里的 `wget .../example.env` 就是 404。以目标名复制一份再附。
+assets_dir="$(mktemp -d)"
+trap 'rm -rf "$assets_dir"' EXIT
+cp .env.example "$assets_dir/example.env"
 gh release create "$version" --title "$version" --notes-file "$notes" \
-  docker-compose.yml ".env.example#example.env"
+  docker-compose.yml "$assets_dir/example.env"
 echo
 echo "完成：标签已推（CI 正在发布镜像与 npm 包），Release 已建。"
 echo "  https://github.com/$repo/releases/tag/$version"

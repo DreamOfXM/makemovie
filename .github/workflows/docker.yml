@@ -36,10 +36,19 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
+          # The planned allinone (single-container) image must land at
+          # ghcr.io/dreamofxm/makemovie — no /app suffix, it is the storefront.
+          # Appending matrix.app would yield .../makemovie/allinone, which none
+          # of the docs reference; special-case the image when that lands.
           images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.app }}
+          # vX.Y.Z must land as bare semver (0.2.0, 0.2): README, compose's VERSION=
+          # and the release notes all pin the v-less form, while type=ref keeps the
+          # prefix — that mismatch 404'd the documented install line. Dashed
+          # prerelease tags never refresh latest.
           tags: |
-            type=ref,event=tag
-            type=raw,value=latest
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       - name: Build and push ${{ matrix.app }}
         uses: docker/build-push-action@v6
         with:
