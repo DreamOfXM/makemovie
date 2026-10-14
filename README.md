@@ -126,6 +126,7 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Node.js ≥ 22.18 (workspace packages run as TypeScript source via native type stripping)
 - pnpm 9
 - FFmpeg ≥ 6 on `PATH` (composition); the worker Docker image includes it
+- An ffmpeg build with the `subtitles` filter (libass) for burned-in subtitles, and with `drawtext` plus a CJK font for the GB 45438 compliance badge — the worker image ships `fonts-noto-cjk`, and a host run can point `STUDIO_AIGC_LABEL_FONT_FILE` at one. `pnpm check` reports both before you spend anything
 - Docker, for PostgreSQL / Redis in local deployment (plus MinIO when `STORAGE_BACKEND=s3`)
 - Outbound HTTPS to whichever model vendors you bind; the mock provider is the only one that needs no network or key
 
@@ -252,6 +253,7 @@ The pipeline adapts to your requirements through project settings and per-shot d
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ broker |
 | `STORAGE_BACKEND` | `disk` | `disk` stores artifacts under `STUDIO_ARTIFACTS_DIR`; `s3` stores them in an S3-compatible object store |
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | Disk backend root; the API and the worker must share the same absolute path (`pnpm dev` sets it, Docker Compose shares a volume) |
+| `STUDIO_SUBTITLE_MODE` | `auto` | How subtitles reach the finished cut: `auto` burns them into the picture when the local ffmpeg has libass (the `subtitles` filter) and muxes a `mov_text` soft track otherwise, `burn` insists on burned-in subtitles and fails loudly instead of quietly delivering a soft track, `soft` always muxes the track |
 | `STUDIO_QC_MODE` | `pass` | Quality gate: `pass` accepts every artifact, `fail` rejects every one, `random` scores a hash of task and attempt against the 0.7 threshold, `model` asks the bound `visual_audit` model |
 | `STUDIO_POLL_TIMEOUT_MS` | `900000` | How long the worker keeps polling one provider task before writing it off; text-to-video vendors routinely take several minutes |
 | `STUDIO_ALLOW_PRIVATE_PROVIDER_URLS` | off | Allow a provider connection to point at a private, loopback or link-local host. Off by default so the API refuses a gateway address that reaches the cloud metadata endpoint; turn it on only where the gateway is self-hosted on the same trusted network |
@@ -278,13 +280,22 @@ docker compose up -d postgres redis   # minio too, when STORAGE_BACKEND=s3
 pnpm db:migrate && pnpm dev
 ```
 
-**Everything in containers** (evaluating or deploying):
+**Everything in containers** (evaluating or deploying) — no clone, no local build; the Release attaches the deployable `docker-compose.yml` and a ready `.env`:
 
 ```bash
-cp .env.example .env                  # then set STUDIO_MASTER_KEY (openssl rand -hex 32)
-docker compose up -d --build          # postgres, redis, minio, api, worker, web
-docker compose exec api pnpm --filter @studio/db exec prisma migrate deploy
+mkdir makemovie && cd makemovie
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/docker-compose.yml
+wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env -O .env
+docker compose --profile full up -d   # postgres, redis, api, worker, web (minio is behind --profile s3)
 ```
+
+From a checkout, build the three app images yourself instead of pulling the published ones. The build blocks live in `compose.dev.yml` on purpose — `docker-compose.yml` alone is `image:` only, so a stranger's `up` can never fall back into building:
+
+```bash
+docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --build
+```
+
+Migrations are part of the api container's start command, so there is no separate migrate step. `STUDIO_MASTER_KEY` needs no attention: the first start generates one, writes it into the `secrets` volume and reuses that one from then on — api and worker mount the same volume, so they always read the same key. Set `STUDIO_MASTER_KEY` in `.env` yourself to hold it deliberately.
 
 Points that bite: postgres and redis publish on host ports **5433** and **6380** to stay out of the way of any local installs — `.env.example` already points there; the api and worker share two volumes, **artifacts** (generated media — safe to clear when you need the space) and **secrets** (the master key — clearing it leaves every model credential in the database undecryptable); for a public deployment point `CORS_ORIGIN` and `NEXT_PUBLIC_API_URL` at your real origin.
 
@@ -300,14 +311,17 @@ The repository ships a mock provider used by the test suite and for exploring th
 
 ```bash
 pnpm test
+pnpm check   # pre-flight audit, against the database and providers in .env
 ```
+
+`pnpm check` walks every episode's chain, the model configuration (readiness plus the recorded result of each real call, so a green probe that later ran out of quota is called out by name), the GB 45438 badge capability and the subtitle delivery capability. It exits non-zero while any must-fix item stands, so it is safe to use as a gate before a batch.
 
 API integration tests boot an embedded PostgreSQL, apply the real migrations, and exercise auth, RBAC, tenant isolation, the state machine, the audit trail, the model capability center, generation batches, artifact streaming, versioning, assets, orchestration and acceptance-gated deliveries end to end — no Docker and no API key required. Worker tests cover candidate fallback, the quality gate with rework, the visual audit, per-shot voice, composition, AI content write-back and auto-advance, shelling out to a real `ffmpeg`. Media tests cover both storage backends and the two-pass composer, including the case where a voice line is longer or shorter than its shot. Provider tests replay each vendor's request shapes, task vocabulary and credential handling against stubbed HTTP, so no live key is ever involved; the overseas adapters are covered the same way, which is exactly what "contract-tested, not account-verified" means — the request is right, the vendor's answer is a fixture. They also pin the two things a hand-entered model row depends on: that a denial naming the model revokes its verified stamp while a timeout leaves it alone, and that a gateway connection is refused without a base URL rather than defaulting to someone else's host. Prompt tests fix the Chinese templates byte for byte and assert that an English request appends its directive without dropping a single protocol key. The mock provider stands in for live multimodal calls so the suite runs anywhere.
 
 ## Roadmap
 
 - Reference-to-video conditioning: the chain attributes cast and prop assets to each shot, so a clip can be driven by the characters in it and not only by its own first frame
-- Per-shot loudness matching, and an option to burn subtitles into the picture
+- Per-shot loudness matching
 - Post-generation content audits: source coverage, script coverage, cross-shot continuity verification, audio sync
 - Audit thresholds calibrated against live vision-model scores
 - Edit cascade from an individual shot to its media

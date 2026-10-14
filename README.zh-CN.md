@@ -126,6 +126,7 @@ MakeMovie 把一段原文——小说节选、故事梗概或剧本——通过�
 - Node.js ≥ 22.18（工作区包以 TypeScript 源码经原生类型剥离直接运行）
 - pnpm 9
 - FFmpeg ≥ 6 位于 `PATH`（合成使用）；worker 的 Docker 镜像已内置
+- 字幕硬烧需要带 `subtitles` 滤镜（libass）的 ffmpeg 构建；GB 45438 合规角标需要 `drawtext` 加一套中文字体——worker 镜像内置 `fonts-noto-cjk`，宿主运行可用 `STUDIO_AIGC_LABEL_FONT_FILE` 指定。`pnpm check` 会在花任何钱之前把这两项报出来
 - Docker，用于本地部署的 PostgreSQL / Redis（`STORAGE_BACKEND=s3` 时另需 MinIO）
 - 可出网访问所绑定的模型提供商；只有 mock 提供商无需联网与密钥
 
@@ -231,6 +232,7 @@ pnpm dev                                              # api :4010 · web :3010 �
 | `REDIS_URL` | `redis://localhost:6380` | BullMQ broker |
 | `STORAGE_BACKEND` | `disk` | `disk` 将产物存于 `STUDIO_ARTIFACTS_DIR`；`s3` 存于 S3 兼容对象存储 |
 | `STUDIO_ARTIFACTS_DIR` | `var/artifacts` | 磁盘后端根目录；API 与 worker 必须共享同一路径（`pnpm dev` 已设置，Docker Compose 以共享卷提供） |
+| `STUDIO_SUBTITLE_MODE` | `auto` | 字幕如何进入成片：`auto` 在本机 ffmpeg 具备 libass（`subtitles` 滤镜）时烧进画面，否则封装 `mov_text` 软轨；`burn` 坚持硬烧，缺失能力时直接报错，而不是悄悄交付软轨；`soft` 始终只封装软轨 |
 | `STUDIO_QC_MODE` | `pass` | 质量闸门：`pass` 全部通过，`fail` 全部拒绝，`random` 以任务与尝试次数的哈希对 0.7 阈值打分，`model` 交由绑定的 `visual_audit` 模型判定 |
 | `STUDIO_POLL_TIMEOUT_MS` | `900000` | worker 对单个提供商任务轮询的上限；视频生成类模型动辄需要数分钟 |
 | `STUDIO_ALLOW_PRIVATE_PROVIDER_URLS` | 关闭 | 允许提供商连接指向私有、回环或链路本地地址。默认关闭，因此 API 会拒绝能触达云元数据端点的网关地址；仅当网关由你自建并与 worker 处于同一可信网络时才开启 |
@@ -289,14 +291,17 @@ docker compose -f docker-compose.yml -f compose.dev.yml --profile full up -d --b
 
 ```bash
 pnpm test
+pnpm check   # 起飞前体检，读 .env 里的数据库与提供商配置
 ```
+
+`pnpm check` 会走一遍每集的链路、模型配置（就绪度，外加每次真实调用的记录结果——所以「探测时绿、后来额度用尽」会被点名报出）、GB 45438 角标能力与字幕交付能力。只要还有「必须修复」项，它就非零退出，因此可以直接当投放前的闸门用。
 
 API 集成测试启动内嵌 PostgreSQL、应用真实迁移，端到端覆盖认证、RBAC、租户隔离、状态机、审计日志、模型能力中心、生成批次、产物串流、版本管理、资产、编排与验收闸门交付——无需 Docker、无需 API Key。Worker 测试覆盖候选回退、带返工的质量闸门、视觉审核、逐镜配音、合成、AI 内容回写与自动推进，并调用真实 `ffmpeg`。Media 测试覆盖两种存储后端与两段式合成器，包括台词长于或短于画面时长的情况。提供商测试以桩化 HTTP 复现各厂商的请求结构、任务状态词表与凭据处理，全程不涉及真实密钥；海外适配器以同样方式覆盖，这正是「契约测试通过、未经真实账号验证」的含义——请求是对的，厂商的应答是 fixture。它们还钉住了手工录入模型行依赖的两件事：被点名拒绝的模型会撤销其验证标记，而超时不会；网关连接缺少 Base URL 时会被拒绝，而不是默认落到别人的主机上。提示词测试逐字节固定中文模板，并断言英文请求只追加语言指令、不丢任何一个协议字段名。多模态调用由 mock 提供商替身，测试可在任何环境运行。
 
 ## 路线图
 
 - 参考生视频的条件化：由链路把角色与道具资产归属到每个分镜，让片段可以由画面中的角色驱动，而不只是它自己的首帧
-- 逐镜响度对齐，以及把字幕烧录进画面的可选项
+- 逐镜响度对齐
 - 生成后内容审计：原文覆盖度、剧本覆盖度、跨分镜连续性校验、音画同步
 - 以视觉模型实测分数校准的审核阈值
 - 单个分镜编辑到其媒体的级联重生成
