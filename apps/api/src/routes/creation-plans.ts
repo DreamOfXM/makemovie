@@ -4,6 +4,7 @@ import { buildCreationPlan, planFingerprint, triggerStage, type CreationPlanInpu
 import { recordAudit } from '../lib/audit.js'
 import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
+import { apiError } from '../lib/api-error.js'
 
 /**
  * US-011 制作计划与提交幂等(§14):
@@ -74,7 +75,8 @@ export async function creationPlanRoutes(app: FastifyInstance): Promise<void> {
       const fingerprint = typeof request.body?.fingerprint === 'string' ? request.body.fingerprint : ''
       const current = planFingerprint(auth.organizationId, parsed.input)
       if (fingerprint !== current) {
-        return reply.code(409).send({ code: 'version_conflict', message: '计划输入已变化——重新生成计划后提交', retryable: false, billingRisk: 'none' })
+        const { statusCode, body } = apiError('version_conflict', '计划输入已变化——重新生成计划后提交', { nextAction: 'replan', billingRisk: 'none' })
+        return reply.code(statusCode).send(body)
       }
 
       const idempotencyKey = request.headers['idempotency-key']
@@ -83,7 +85,8 @@ export async function creationPlanRoutes(app: FastifyInstance): Promise<void> {
         const prior = runsByKey.get(runKey)
         if (prior) {
           if (prior.fingerprint !== current) {
-            return reply.code(409).send({ code: 'invalid_argument', message: '同幂等键不能携带不同参数', retryable: false, billingRisk: 'none' })
+            const conflict = apiError('invalid_argument', '同幂等键不能携带不同参数', { nextAction: 'use_a_new_key', billingRisk: 'none' })
+            return reply.code(409).send(conflict.body)
           }
           return reply.code(200).send({ batchId: prior.batchId, idempotentReplay: true })
         }
