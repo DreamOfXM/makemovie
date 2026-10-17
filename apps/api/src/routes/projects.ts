@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { ProjectFormat } from '@studio/db'
 import { automationGates, contentLocales, durationOutOfRange, formatDefaults, formatDurationRange, isAutomationGate, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
+import { cloneExampleProject, EXAMPLE_FIXTURES, installExampleProject } from '../lib/example-project.js'
 import { requirePermission } from '../plugins/auth.js'
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
@@ -107,6 +108,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'Project not found' })
+      // 示例项目只读:改它等于污染所有人的教材——复制一份去改。
+      if (project.isExample) return reply.code(403).send({ error: 'example project is read-only — clone it to edit' })
       // The format is fixed at creation by design; silently ignoring it here made
       // third-party callers believe a rename also re-shaped the project.
       if (request.body?.format !== undefined || request.body?.targetDurationMs !== undefined) {
@@ -160,6 +163,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'Project not found' })
+      if (project.isExample) return reply.code(403).send({ error: 'example project is read-only' })
       await app.db.project.delete({ where: { id: project.id } })
       await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'project.delete', entityType: 'Project', entityId: project.id, payload: { name: project.name } })
       return reply.code(204).send()
@@ -233,4 +237,32 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       return { ...updated, appliedPipeline: pipeline }
     },
   )
+  // US-008 示例项目:安装幂等(重复调用返回已有),只读守卫在 PATCH/DELETE 侧。
+  app.post<{ Body: { slug?: unknown } }>(
+    '/projects/install-example',
+    { preHandler: requirePermission('project:create') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const slug = typeof request.body?.slug === 'string' ? request.body.slug : EXAMPLE_FIXTURES[0]!.slug
+      const fixture = EXAMPLE_FIXTURES.find(item => item.slug === slug)
+      if (!fixture) return reply.code(400).send({ error: `unknown example slug ${slug}` })
+      const result = await installExampleProject(app.db, auth.organizationId, fixture)
+      return reply.code(result.installed ? 201 : 200).send(result)
+    },
+  )
+
+  app.post<{ Params: { projectId: string } }>(
+    '/projects/:projectId/clone-example',
+    { preHandler: requirePermission('project:create') },
+    async (request, reply) => {
+      const auth = request.auth!
+      try {
+        const result = await cloneExampleProject(app.db, request.params.projectId, auth.organizationId, auth.userId)
+        return reply.code(201).send(result)
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : 'clone failed' })
+      }
+    },
+  )
+
 }

@@ -357,6 +357,10 @@ model Project {
   pipelineConfigId     String?
   /// 审计不过线时的自动重抽上限（1-3）。null = 默认 2。花用户的钱，次数由项目主人定。
   qcMaxAttempts        Int?
+  /// US-008 只读示例:预生成素材带合法来源,可播放可复制为私人项目,不可在原地修改。
+  isExample            Boolean  @default(false)
+  /// 示例的素材来源与授权说明(外宣边界内的公开事实)。
+  exampleSourceNote    String?
   /// US-005 配方引用:建项时实例化,快照存 recipeSnapshot——配方升级不漂移旧作品。
   recipeKey            String?
   recipeVersion        Int?
