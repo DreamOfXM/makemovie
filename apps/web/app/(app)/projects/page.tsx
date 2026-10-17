@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { ArrowRightIcon, ClapperboardIcon, LoaderCircleIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { ArrowRightIcon, ClapperboardIcon, LoaderCircleIcon, NotebookPenIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import type { WorkflowStatus } from '@studio/domain'
 import { listProjectPage, toWorkflowStatus, type Project } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -56,6 +56,7 @@ const barStatuses: WorkflowStatus[] = ['draft', 'running', 'needs_review', 'appr
  * is navigation rather than local state — the project surface owns the episodes.
  */
 export default function ProjectsPage() {
+  const router = useRouter()
   const { t, locale } = useI18n()
   const { api, organizationId } = useSession()
   const { can } = usePermission()
@@ -145,10 +146,17 @@ export default function ProjectsPage() {
         title={t('projects.title')}
         description={t('projects.subtitle')}
         actions={
-          <GuardedButton action="project:create" onClick={() => setProjectDialog({ mode: 'create' })}>
-            <PlusIcon />
-            {t('projects.new')}
-          </GuardedButton>
+          <div className="flex items-center gap-2">
+            {/* 长表单承载故事建项(US-007);快捷弹窗保留,同一创建服务两条入口。 */}
+            <GuardedButton action="project:create" variant="outline" onClick={() => setProjectDialog({ mode: 'create' })}>
+              <PlusIcon />
+              {t('projects.quickNew')}
+            </GuardedButton>
+            <GuardedButton action="project:create" onClick={() => void router.push('/projects/new')}>
+              <NotebookPenIcon />
+              {t('projects.newStory')}
+            </GuardedButton>
+          </div>
         }
       />
 

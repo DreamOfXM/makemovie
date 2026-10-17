@@ -846,3 +846,44 @@ export interface MeResponse {
   organization: { id: string; role: Role }
   memberships: Membership[]
 }
+
+export interface StoryDraft {
+  id: string
+  title: string | null
+  storyText: string
+  recipeKey: string | null
+  styleId: string | null
+  contentLocale: string | null
+  targetDurationMs: number | null
+  consumedProjectId: string | null
+  updatedAt: string
+}
+
+export interface RecipeInfo {
+  recipeKey: string
+  version: number
+  notes: string
+  checksum: string
+  spec: { aspect: string; targetShotDurationMs: { min: number; max: number }; [key: string]: unknown }
+}
+
+export async function listRecipes(token: string | null): Promise<RecipeInfo[]> {
+  const data = await request<{ recipes: RecipeInfo[] }>('/recipes', { token })
+  return data.recipes
+}
+
+export async function saveStoryDraft(token: string | null, values: Partial<Pick<StoryDraft, 'title' | 'storyText' | 'recipeKey' | 'styleId' | 'contentLocale' | 'targetDurationMs'>> & { storyText: string }, draftId?: string): Promise<StoryDraft> {
+  const data = draftId === undefined
+    ? await request<{ draft: StoryDraft }>('/story-drafts', { token, method: 'POST', body: JSON.stringify(values) })
+    : await request<{ draft: StoryDraft }>(`/story-drafts/${draftId}`, { token, method: 'PUT', body: JSON.stringify(values) })
+  return data.draft
+}
+
+export async function listStoryDrafts(token: string | null): Promise<Array<Pick<StoryDraft, 'id' | 'title' | 'recipeKey' | 'consumedProjectId' | 'updatedAt'>>> {
+  const data = await request<{ drafts: Array<Pick<StoryDraft, 'id' | 'title' | 'recipeKey' | 'consumedProjectId' | 'updatedAt'>> }>('/story-drafts', { token })
+  return data.drafts
+}
+
+export async function createProjectFromStory(token: string | null, draftId: string, format: string): Promise<{ project: Project; idempotentReplay: boolean }> {
+  return request<{ project: Project; idempotentReplay: boolean }>(`/story-drafts/${draftId}/create-project`, { token, method: 'POST', body: JSON.stringify({ format }) })
+}
