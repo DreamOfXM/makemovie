@@ -571,6 +571,10 @@ model Storyboard {
   /// US-014 镜头可变输入的对象级 CAS:文字/控制/参考/锁/选版在同一事务比较并递增。
   /// 既有 revision 只代表重拆批次,不能复用。
   stateRevision                                             Int       @default(0)
+  /// US-015 人工锁:锁定后后台返回、自动重跑、Agent 均不得替换。解锁是显式操作。
+  lockedVideoSelection                                      Boolean   @default(false)
+  lockedVoiceSelection                                      Boolean   @default(false)
+  lockedReferences                                          Boolean   @default(false)
   assets                                                     StoryboardAsset[]
   shotControl                                                ShotControl?
   generationTasks                                            GenerationTask[]  @relation("GenerationTask_storyboardIdToStoryboard")

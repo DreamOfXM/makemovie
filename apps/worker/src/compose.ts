@@ -196,7 +196,7 @@ async function chosenVideoArtifact(
   storyboardId: string,
   organizationId: string,
 ): Promise<{ artifact: MediaArtifact; source: 'manual' | 'auto' } | null> {
-  const shot = await db.storyboard.findUnique({ where: { id: storyboardId }, select: { selectedVideoArtifactId: true } })
+  const shot = await db.storyboard.findUnique({ where: { id: storyboardId }, select: { selectedVideoArtifactId: true, lockedVideoSelection: true } })
   if (shot?.selectedVideoArtifactId) {
     // 钦定的信任条件只有两条:挂在本镜成功任务下的产物,或经统一归属解析器
     // 验证过操作链归属的制品操作产物(延长等)。「没有任务」本身不是归属证明。
@@ -205,6 +205,15 @@ async function chosenVideoArtifact(
       ? await db.mediaArtifact.findFirst({ where: { id: shot.selectedVideoArtifactId, stage: 'VIDEO', organizationId } })
       : null
     if (pinned) return { artifact: pinned, source: 'manual' }
+    // US-015 锁定语义:人工锁定了选版但制品解析失败——报错而不是静默回落 latest。
+    // 锁定是人工意图声明,「锁定了一个不存在的东西」是数据事故,必须暴露。
+    if (shot.lockedVideoSelection) {
+      throw new Error(`storyboard's locked video selection ${shot.selectedVideoArtifactId} no longer resolves — fix the selection before composing`)
+    }
+  }
+  // US-015 锁定但没钦定:锁定意味着「用现在的」,null + locked = 数据矛盾,报错。
+  if (shot?.lockedVideoSelection && !shot?.selectedVideoArtifactId) {
+    throw new Error('storyboard has lockedVideoSelection but no selectedVideoArtifactId — lock means "keep this", so a selection must exist')
   }
   const latest = await latestVideoArtifact(db, storyboardId)
   return latest ? { artifact: latest, source: 'auto' } : null
