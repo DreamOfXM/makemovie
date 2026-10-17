@@ -55,6 +55,8 @@ export interface StorageStream {
 }
 
 export interface Storage {
+  /** 后端类别,启动诊断用它报「产物落在哪」,不暴露路径细节。 */
+  readonly kind: 'disk' | 's3'
   put(key: string, data: Uint8Array, mimeType: string): Promise<StoredObject>
   read(key: string): Promise<Uint8Array>
   exists(key: string): Promise<boolean>
@@ -76,6 +78,7 @@ export function sha256(data: Uint8Array): string {
 }
 
 export class DiskStorage implements Storage {
+  readonly kind = 'disk' as const
   // Strip-only TypeScript (the runtime for source-exported packages) cannot erase
   // parameter properties, so the field is declared explicitly.
   private readonly root: string
@@ -157,6 +160,7 @@ function isAbsentObject(error: unknown): boolean {
 }
 
 export class S3Storage implements Storage {
+  readonly kind = 's3' as const
   private readonly client: S3Client
   private readonly bucket: string
 
@@ -654,6 +658,19 @@ function labelMetadataArgs(label: AigcLabel | undefined): string[] {
  * 供体检与运营探活:这台机器能不能烧显式角标,缺哪一块。合规能力在开跑前
  * 就该知道自己缺什么,而不是等成片标着 skipped 才发现。
  */
+/** 一次性探测一组滤镜是否存在(如 subtitles/drawtext)——启动诊断与体检共用,
+ * 结果只到「这一版 ffmpeg 有没有编译进来」,不涉及字体或业务判断。 */
+export async function probeFilterPresence(names: readonly string[]): Promise<Record<string, boolean>> {
+  const found: Record<string, boolean> = {}
+  try {
+    const { stdout } = await run('ffmpeg', ['-hide_banner', '-filters'])
+    for (const name of names) found[name] = stdout.includes(` ${name} `)
+  } catch {
+    for (const name of names) found[name] = false
+  }
+  return found
+}
+
 export async function aigcBadgeCapability(): Promise<{ canBurn: boolean; drawtext: boolean; fontFile?: string }> {
   const drawtext = await detectDrawtextFilter()
   const fontFile = await labelFontFile()

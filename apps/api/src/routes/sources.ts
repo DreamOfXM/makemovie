@@ -110,7 +110,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
   // Best effort for the same reason the cascade is: the approval is already
   // persisted, so a next step that could not be started is logged, never thrown
   // back as a failed approval.
-  async function advanceAfterApproval(request: FastifyRequest, organizationId: string, userId: string, episodeId: string): Promise<void> {
+  async function advanceAfterApproval(request: FastifyRequest, organizationId: string, userId: string | null, episodeId: string): Promise<void> {
     try {
       await advancePipeline({ db: app.db, enqueueJob }, organizationId, userId, episodeId)
     } catch (error) {

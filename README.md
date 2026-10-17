@@ -105,6 +105,15 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Attribution that does not lie: a task that died because a vendor ran out of free quota is reported as quota, not as "the review did not like it"
 - A usage board that reports physical quantities only — calls, prompt characters, artifact bytes, attempts spent — with no money field anywhere in the console or the API
 
+## Startup diagnostics / 启动诊断
+
+| Step / 步骤 | Command / 命令 | What it answers / 它回答什么 |
+| --- | --- | --- |
+| Environment audit / 环境体检 | `pnpm check` | Episodes' chain health, model slots (probe + real-call evidence), GB 45438 badge and subtitle capabilities — per-issue fix hints, non-zero exit while must-fix items stand. / 各集链路健康、模型槽位(探测+真实调用证据)、角标与字幕能力,逐项修复指引,有必修项即非零退出。 |
+| API startup self-check / API 启动自检 | `curl :4010/api/system/startup-check` | No login needed: database + applied migrations, ffmpeg filters (subtitles/drawtext), master key, storage backend. Model configuration is deliberately NOT here — that lives in Model Center readiness after login, so environment errors never masquerade as "models missing". / 免登录:数据库与已应用迁移数、ffmpeg 滤镜、主密钥、存储后端。模型配置刻意不在此——那是登录后模型中心就绪度的事,环境错误不会冒充"缺模型"。 |
+
+Common issues / 常见问题: Postgres is on host port **5433** and Redis on **6380**, not the defaults / Postgres 用宿主端口 5433、Redis 6380,不是默认端口; a slim ffmpeg build silently drops subtitle burning — `pnpm check` names the missing filters / 精简版 ffmpeg 会静默丢字幕烧录,`pnpm check` 会点名缺失滤镜; the all-zero master key is dev-only and production refuses to boot on it / 全零主密钥仅限开发,生产拒绝启动.
+
 ## Architecture
 
 | Component | Purpose |

@@ -108,13 +108,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const auth = request.auth!
     const token = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? ''
     await revokeSession(app.db, token)
-    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'auth.logout', entityType: 'User', entityId: auth.userId })
+    await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'auth.logout', entityType: 'User', entityId: auth.userId ?? 'unknown' })
     return reply.code(204).send()
   })
 
   app.get('/me', { preHandler: [authenticate] }, async request => {
     const auth = request.auth!
     const db = app.db
+    // Agent 令牌(userId=null)没有用户档案:如实返回 null 用户而不是造一个——
+    // 消费方(web 会话面板)本来就不该对 agent 会话渲染用户信息。
+    if (auth.userId === null) {
+      return { user: null, organization: { id: auth.organizationId, role: auth.role }, memberships: [] }
+    }
     const user = await db.user.findUniqueOrThrow({ where: { id: auth.userId }, include: { memberships: { include: { organization: true } } } })
     return {
       user: { id: user.id, email: user.email, name: user.name, locale: user.locale },
@@ -133,11 +138,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!targetId) return reply.code(400).send({ error: 'organizationId is required' })
 
     const db = app.db
-    const membership = await db.organizationMember.findUnique({
-      where: { organizationId_userId: { organizationId: targetId, userId: auth.userId } },
-    })
+    // Agent 令牌没有用户成员关系:按「不是该组织成员」拒绝——令牌只在签发它的
+    // 组织里有效(organizationId 已在上面校验过归属)。
+    const membership = auth.userId === null
+      ? null
+      : await db.organizationMember.findUnique({
+          where: { organizationId_userId: { organizationId: targetId, userId: auth.userId } },
+        })
     if (!membership) return reply.code(403).send({ error: 'Not a member of the requested organization' })
 
+    if (auth.userId === null) return reply.code(403).send({ error: 'agent tokens cannot switch organizations' })
     const token = request.headers.authorization?.replace(/^Bearer\s+/i, '') ?? ''
     await revokeSession(db, token)
     await recordAudit(db, { organizationId: targetId, userId: auth.userId, action: 'auth.switch_org', entityType: 'Organization', entityId: targetId, payload: { from: auth.organizationId } })

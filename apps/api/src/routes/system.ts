@@ -15,6 +15,7 @@ import {
   wiredRequiredSlots,
 } from '@studio/domain'
 import { listCatalogs } from '@studio/providers'
+import { probeFilterPresence } from '@studio/media'
 import { loadOrgModelPool } from '../lib/bindings.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -139,6 +140,46 @@ export function systemRoutes(app: FastifyInstance): void {
       return reply.code(202).send({ started: true, pid: child.pid })
     },
   )
+  /**
+   * US-004 启动诊断(无鉴权,只报环境事实,不含任何组织数据):装完的人第一眼看
+   * 「环境对不对」,和「模型配没配」(登录后的 /system/readiness)分开——环境错给
+   * 精确修复指引,模型未配给引导,不再混在一个 500 里。稳定 check id 供前端/agent
+   * 按 id 出双语文案,这里只出事实。
+   */
+  app.get('/system/startup-check', async (_request, reply) => {
+    const checks: Array<{ id: string; status: 'ok' | 'warn' | 'error'; detail: string }> = []
+
+    // 数据库:能查 + 迁移已应用(数量>0,避免「连上了但表没建」的假绿)。
+    try {
+      const migrations = await app.db.$queryRawUnsafe<{ count: bigint }[]>('select count(*)::int as count from _prisma_migrations')
+      const count = Number(migrations[0]?.count ?? 0)
+      checks.push(count > 0
+        ? { id: 'database', status: 'ok', detail: `${count} migrations applied` }
+        : { id: 'database', status: 'error', detail: 'database reachable but no migrations applied — run prisma migrate deploy' })
+    } catch (error) {
+      checks.push({ id: 'database', status: 'error', detail: `database unreachable: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}` })
+    }
+
+    // ffmpeg:字幕烧录与角标两块能力,精简构建在这里点名而不是等生成时静默降级。
+    const filters = await probeFilterPresence(['subtitles', 'drawtext'])
+    const missing = Object.entries(filters).filter(([, present]) => !present).map(([name]) => name)
+    checks.push(missing.length === 0
+      ? { id: 'ffmpeg', status: 'ok', detail: 'ffmpeg with subtitles and drawtext filters' }
+      : { id: 'ffmpeg', status: missing.length === 2 ? 'error' : 'warn', detail: `ffmpeg missing filters: ${missing.join(', ')} — install a full build (brew install ffmpeg-full / apt install ffmpeg)` })
+
+    // 主密钥:生产全零=拒绝启动级,开发全零=提醒。
+    const key = app.config.masterKey
+    const zeroKey = /^0+$/.test(key)
+    checks.push(zeroKey
+      ? { id: 'master_key', status: app.config.nodeEnv === 'production' ? 'error' : 'warn', detail: 'all-zero development master key — set STUDIO_MASTER_KEY (openssl rand -hex 32) before production' }
+      : { id: 'master_key', status: 'ok', detail: 'set' })
+
+    // 存储:报后端类别与产物落点性质;disk 的可写性由启动时的目录探测兜底,这里不重复写文件。
+    checks.push({ id: 'storage', status: 'ok', detail: `${app.storage.kind} storage` })
+
+    reply.send({ service: 'makemovie-api', version: process.env.npm_package_version ?? '0.2.0', checks })
+  })
+
 }
 
 // ── 引擎目录与安装状态（与 worker 的 tts-engine.ts 同一套布局约定）──
@@ -284,4 +325,6 @@ function getDiskFreeGB(): number {
   } catch {
     return 0
   }
+
+
 }

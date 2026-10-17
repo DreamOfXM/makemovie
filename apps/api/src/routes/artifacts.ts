@@ -90,7 +90,7 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
         ...(await resolveSlotCandidates(app.db, auth.organizationId, projectId, 'video_t2v')),
         ...(await resolveSlotCandidates(app.db, auth.organizationId, projectId, 'video_i2v')),
       ]
-      const candidate = pool.find(item => typeof createAdapter(item.provider, {}).extend === 'function')
+      const candidate = pool.find(item => typeof createAdapter(item.provider, { apiKey: '', baseUrl: '' }).extend === 'function')
       if (!candidate) return reply.code(409).send({ error: 'no bound video model supports extend' })
 
       const operation = await app.db.artifactOperation.create({
