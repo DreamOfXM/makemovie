@@ -1,3 +1,4 @@
+import { OFFICIAL_RECIPES, recipeChecksum } from './recipes.js'
 import { createHash } from 'node:crypto'
 import type { AudioSource, PrismaClient, SlotCandidate, Stage } from '@studio/db'
 import { resolveSlotCandidates, syncBatchStatus } from '@studio/db'
@@ -18,6 +19,7 @@ import { applyStyleToPrompt, getStyleById, isVisualStyleStage, type StylePreset 
 // The stage vocabulary and its slot wiring live in @studio/domain — the console's
 // readiness panel reads the same table, so neither side keeps a private copy.
 export { generationStages, isGenerationStage } from '@studio/domain'
+export { OFFICIAL_RECIPES, recipeChecksum, type OfficialRecipe, type RecipeSpec } from './recipes.js'
 export type { GenerationStage } from '@studio/domain'
 
 /**
