@@ -887,3 +887,21 @@ export async function listStoryDrafts(token: string | null): Promise<Array<Pick<
 export async function createProjectFromStory(token: string | null, draftId: string, format: string): Promise<{ project: Project; idempotentReplay: boolean }> {
   return request<{ project: Project; idempotentReplay: boolean }>(`/story-drafts/${draftId}/create-project`, { token, method: 'POST', body: JSON.stringify({ format }) })
 }
+
+export interface CreationReadiness {
+  recommendationVersion: string
+  required: { ready: number; total: number }
+  gaps: Array<{ slot: string; required: boolean; autoBindable: boolean }>
+  autoBindPlan: { planned: Array<{ slot: string; provider: string; model: string }>; unfulfilled: string[] }
+  catalogCoverage: { perSlot: Array<Record<string, unknown>>; minimumConnections: Record<string, unknown> }
+  nextStep: 'connect_provider' | 'probe_models' | 'auto_bind' | 'ready'
+  canConfigure: boolean
+}
+
+export async function fetchCreationReadiness(token: string | null, projectId: string): Promise<CreationReadiness> {
+  return request<CreationReadiness>(`/projects/${projectId}/creation-readiness`, { token })
+}
+
+export async function autoBindProject(token: string | null, projectId: string): Promise<{ created: string[]; skipped: string[]; unfulfilled: string[] }> {
+  return request<{ created: string[]; skipped: string[]; unfulfilled: string[] }>(`/projects/${projectId}/auto-bind`, { token, method: 'POST' })
+}

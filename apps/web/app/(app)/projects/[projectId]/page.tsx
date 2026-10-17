@@ -47,6 +47,7 @@ import { GuardedButton, usePermission } from '@/components/permission'
 import { EpisodeDialog, ProjectDeleteDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
 import { BookSplitPanel } from '@/components/sources/book-split-panel'
 import { ProjectSettingsDialog, SettingsButton } from '@/components/ProjectSettingsDialog'
+import { ModelGuidanceCard } from '@/components/models/model-guidance-card'
 
 /** The strip's four colours plus the pipeline's own, in the same tokens the
  *  projects board uses for its lifecycle bars. */
@@ -258,7 +259,8 @@ export default function ProjectPage() {
 
   return (
     <>
-      <PageHeader
+      <ModelGuidanceCard projectId={projectId} />
+    <PageHeader
         title={project?.name ?? t('common.loading')}
         description={
           project
