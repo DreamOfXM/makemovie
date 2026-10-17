@@ -237,7 +237,7 @@ async function runCandidate(
   // 文字描述仍在提示词里,降级原因记进 responseSnapshot.reference 供排查。
   if (capability.modality === 'image' || capability.modality === 'i2v' || capability.modality === 'r2v') {
     const sheets = await resolveAssetReferences(task, capability, capabilityRow.spec, deps, referenceLog)
-    if (sheets) request.input.media = [...(request.input.media ?? []), ...sheets]
+    if (sheets) request.input.media = [...(Array.isArray(request.input.media) ? request.input.media : []), ...sheets]
   }
   const apiKey = decryptSecret(connection.encryptedSecret, deps.masterKey)
   const accessKey = connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, deps.masterKey) : undefined

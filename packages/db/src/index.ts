@@ -49,36 +49,111 @@ export interface ArtifactShotContext {
  * taskId 为空的制品必须命中成功的操作链才算数;两者都不满足返回 null,
  * 消费方(compose 选版/钦定接口/再次延长)按无归属拒绝,不许各自放宽。
  */
-export async function resolveVideoArtifactShot(
+
+export type ArtifactOrigin = 'generation_task' | 'artifact_operation' | 'manual_import' | 'legacy_pointer'
+
+export interface ArtifactOwnership {
+  organizationId: string
+  projectId: string
+  episodeId: string
+  /** 镜头级来源才有;集级(配乐)与悬空旧指针为 null。 */
+  storyboardId: string | null
+  origin: ArtifactOrigin
+  /** 终态:任务/操作 SUCCEEDED;导入件天然终态;悬空指针 false。 */
+  terminal: boolean
+}
+
+/**
+ * US-003 统一素材归属解析:生成任务产物、人工导入件、制品操作产物共用一条信任
+ * 路径,全部校验组织/项目/剧集(及可得时的镜头)归属与终态。悬空旧指针(任务已删
+ * 的历史裸 id)回落到 objectKey 路径解析——仓库唯一的 key 构造器把 org/project/
+ * episode 编进路径,兼容读取但不判终态。所有消费入口(compose/选版/延长/交付)
+ * 必须经此解析取归属,禁止新增绕过校验的裸 artifactId 读取。
+ */
+export async function resolveArtifactOwnership(
   db: PrismaClient,
   artifactId: string,
   organizationId: string,
-): Promise<ArtifactShotContext | null> {
+): Promise<ArtifactOwnership | null> {
   const artifact = await db.mediaArtifact.findFirst({
     where: { id: artifactId, organizationId },
     include: { task: { include: { batch: { include: { episode: { select: { id: true, projectId: true } } } } } } },
   })
   if (!artifact) return null
-  if (artifact.task?.storyboardId) {
-    return { storyboardId: artifact.task.storyboardId, episodeId: artifact.task.batch.episode.id, projectId: artifact.task.batch.episode.projectId }
+
+  // 1) 生成任务产物:任务链给出全部归属;终态=SUCCEEDED。
+  if (artifact.task) {
+    const episode = artifact.task.batch.episode
+    return {
+      organizationId, projectId: episode.projectId, episodeId: episode.id,
+      storyboardId: artifact.task.storyboardId, origin: 'generation_task',
+      terminal: artifact.task.status === 'SUCCEEDED',
+    }
   }
+
+  // 2) 制品操作产物:归属在操作行快照;终态=操作 SUCCEEDED。
   const operation = await db.artifactOperation.findFirst({
     where: { outputArtifactId: artifact.id, organizationId, status: 'SUCCEEDED' },
   })
-  if (!operation) return null
-  let storyboardId: string | undefined
-  try {
-    storyboardId = (JSON.parse(operation.requestSnapshot) as { storyboardId?: string }).storyboardId
-  } catch {
-    return null
+  if (operation) {
+    try {
+      const storyboardId = (JSON.parse(operation.requestSnapshot) as { storyboardId?: string }).storyboardId
+      if (storyboardId) {
+        const storyboard = await db.storyboard.findUnique({
+          where: { id: storyboardId },
+          include: { episode: { include: { project: { select: { organizationId: true } } } } },
+        })
+        if (storyboard && storyboard.episode.project.organizationId === organizationId) {
+          return {
+            organizationId, projectId: storyboard.episode.projectId, episodeId: storyboard.episodeId,
+            storyboardId, origin: 'artifact_operation', terminal: true,
+          }
+        }
+      }
+    } catch {
+      // 快照损坏按无法证明归属处理,落入后续路径
+    }
   }
-  if (!storyboardId) return null
-  const storyboard = await db.storyboard.findUnique({
-    where: { id: storyboardId },
+
+  // 3) 人工导入件:镜头指针列(配音/环境音)与导入关系给出镜头归属;导入即终态。
+  const importing = await db.storyboard.findFirst({
+    where: {
+      OR: [
+        { importedVoiceArtifactId: artifact.id },
+        { importedAmbienceArtifactId: artifact.id },
+        { importedVoices: { some: { id: artifact.id } } },
+      ],
+    },
     include: { episode: { include: { project: { select: { organizationId: true } } } } },
   })
-  if (!storyboard || storyboard.episode.project.organizationId !== organizationId) return null
-  return { storyboardId, episodeId: storyboard.episodeId, projectId: storyboard.episode.projectId }
+  if (importing && importing.episode.project.organizationId === organizationId) {
+    return {
+      organizationId, projectId: importing.episode.projectId, episodeId: importing.episodeId,
+      storyboardId: importing.id, origin: 'manual_import', terminal: true,
+    }
+  }
+
+  // 4) 悬空旧指针兼容回落:objectKey 路径 = org/project/episode/stage/entity/version。
+  const segments = artifact.objectKey.split('/')
+  if (segments.length >= 3 && segments[0] === organizationId) {
+    return {
+      organizationId, projectId: segments[1]!, episodeId: segments[2]!,
+      storyboardId: null, origin: 'legacy_pointer', terminal: false,
+    }
+  }
+  return null
+}
+
+export async function resolveVideoArtifactShot(
+  db: PrismaClient,
+  artifactId: string,
+  organizationId: string,
+): Promise<ArtifactShotContext | null> {
+  const ownership = await resolveArtifactOwnership(db, artifactId, organizationId)
+  // 可钦定/可再延长的信任条件:镜头级归属 + 终态。失败任务产物与悬空旧指针
+  // 能被「读到」(兼容),但不能被「采用」。
+  if (!ownership?.storyboardId || !ownership.terminal) return null
+  return { storyboardId: ownership.storyboardId, episodeId: ownership.episodeId, projectId: ownership.projectId }
 }
 
 export function toDbSlot(slot: DomainCapabilitySlot): CapabilitySlot {

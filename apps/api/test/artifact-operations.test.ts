@@ -128,3 +128,35 @@ describe('artifact extend route', () => {
     expect(refused.statusCode).toBe(400)
   })
 })
+
+describe('unified ownership resolution (US-003)', () => {
+  it('resolves imports, legacy pointers and failed-task artifacts through one trust path', async () => {
+    const { resolveArtifactOwnership } = await import('@studio/db')
+    const imported = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: null, stage: 'AUDIO', objectKey: `${organizationId}/${projectId}/${episodeId}/AUDIO/imp/v1.wav`, checksum: 'imp-1', mimeType: 'audio/wav', version: 1, metadata: JSON.stringify({ imported: true }) },
+    })
+    await env.db.storyboard.update({ where: { id: storyboardId }, data: { importedVoiceArtifactId: imported.id } })
+    await expect(resolveArtifactOwnership(env.db, imported.id, organizationId)).resolves.toMatchObject({ origin: 'manual_import', storyboardId, terminal: true })
+
+    const legacy = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: null, stage: 'VIDEO', objectKey: `${organizationId}/${projectId}/${episodeId}/VIDEO/old/v1.mp4`, checksum: 'legacy-1', mimeType: 'video/mp4', version: 1 },
+    })
+    await expect(resolveArtifactOwnership(env.db, legacy.id, organizationId)).resolves.toMatchObject({ origin: 'legacy_pointer', storyboardId: null, terminal: false })
+
+    const failedTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: (await env.db.generationBatch.findFirstOrThrow({ where: { episodeId } })).id, stage: 'VIDEO', status: 'FAILED', storyboardId },
+    })
+    const failedArtifact = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: failedTask.id, stage: 'VIDEO', objectKey: `${organizationId}/${projectId}/${episodeId}/VIDEO/fail/v1.mp4`, checksum: 'fail-1', mimeType: 'video/mp4', version: 1 },
+    })
+    await expect(resolveArtifactOwnership(env.db, failedArtifact.id, organizationId)).resolves.toMatchObject({ origin: 'generation_task', terminal: false })
+    const refused = await env.app.inject({
+      method: 'POST', url: `/api/storyboards/${storyboardId}/video-selection`,
+      headers: { ...authHeaders(ownerToken), 'content-type': 'application/json' }, payload: { artifactId: failedArtifact.id },
+    })
+    expect(refused.statusCode).toBe(400)
+
+    const outsider = await env.register('us003-outsider@example.com', 'Outsider Org')
+    await expect(resolveArtifactOwnership(env.db, videoArtifactId, outsider.organization.id)).resolves.toBeNull()
+  })
+})

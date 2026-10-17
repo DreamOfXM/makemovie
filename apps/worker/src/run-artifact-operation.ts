@@ -36,7 +36,7 @@ export async function runArtifactOperation(payload: RunArtifactOperationPayload,
     if (!connection) throw new Error(`connection ${operation.connectionId} unavailable`)
     const capabilityRow = await deps.db.modelCapability.findUnique({ where: { id: operation.capabilityId } })
     if (!capabilityRow) throw new Error(`capability ${operation.capabilityId} unavailable`)
-    const capability = toCapability(connection, capabilityRow)
+    const capability = toCapability(connection.provider, capabilityRow)
 
     const apiKey = decryptSecret(connection.encryptedSecret, deps.masterKey)
     const adapter = createAdapter(connection.provider, { apiKey, baseUrl: connection.baseUrl })
@@ -52,6 +52,7 @@ export async function runArtifactOperation(payload: RunArtifactOperationPayload,
 
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-extend-'))
     try {
+      if (!source.stage) throw new Error('source artifact has no stage')
       const material: Material = await materialize(result, capability.modality, workdir)
       const objectKey = buildObjectKey({
         tenantId: operation.organizationId,

@@ -58,8 +58,8 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
       const subtitle = shot?.subtitleText ?? dialogue
       // 声音来源是人给的，缺省才回落到镜型默认（有台词=只用配音，无台词=只用原声）。
       // 落库的 IMPORTED 在混音层就是「用人声轨」，区别只在人声从哪来。
-      const resolved = await resolveShotAudio(deps, storyboardId, workdir, index, shot)
-      const ambience = await resolveShotAmbience(deps, workdir, index, shot?.importedAmbienceArtifactId ?? null)
+      const resolved = await resolveShotAudio(deps, payload.organizationId, storyboardId, workdir, index, shot)
+      const ambience = await resolveShotAmbience(deps, payload.organizationId, workdir, index, shot?.importedAmbienceArtifactId ?? null)
       voices.push(resolved.voiceFile)
       audioSources.push(resolved.mode)
       ambiences.push(ambience.file)
@@ -242,6 +242,7 @@ interface ShotAudio {
  */
 async function resolveShotAudio(
   deps: PipelineDeps,
+  organizationId: string,
   storyboardId: string,
   workdir: string,
   index: number,
@@ -258,8 +259,9 @@ async function resolveShotAudio(
     // 人声从哪来：钦定「导入音频」就只认那个文件；其余档先看配音版本的人选
     // （selectedVoiceArtifactId），没选才找本镜最新的 TTS 产物、再退到导入件——
     // 无台词镜永远不排 TTS，它的「配音」只能来自导入。
+    // 导入指针是裸 id:读侧必须验组织(schema 注释钦定的口径),防指针被污染后跨租户读件。
     const imported = shot?.importedVoiceArtifactId
-      ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.importedVoiceArtifactId, stage: 'AUDIO' } })
+      ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.importedVoiceArtifactId, stage: 'AUDIO', organizationId } })
       : null
     const chosen = shot?.selectedVoiceArtifactId
       ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVoiceArtifactId, stage: 'AUDIO', task: { status: 'SUCCEEDED', storyboardId } } })
@@ -293,12 +295,13 @@ async function resolveShotAudio(
  */
 async function resolveShotAmbience(
   deps: PipelineDeps,
+  organizationId: string,
   workdir: string,
   index: number,
   artifactId: string | null,
 ): Promise<{ file: string | null; artifactId: string | null }> {
   if (!artifactId) return { file: null, artifactId: null }
-  const artifact = await deps.db.mediaArtifact.findFirst({ where: { id: artifactId, stage: 'AUDIO' } })
+  const artifact = await deps.db.mediaArtifact.findFirst({ where: { id: artifactId, stage: 'AUDIO', organizationId } })
   if (!artifact) return { file: null, artifactId: null }
   const file = path.join(workdir, `ambience-${index}${path.extname(artifact.objectKey) || '.wav'}`)
   await writeFile(file, await deps.storage.read(artifact.objectKey))
