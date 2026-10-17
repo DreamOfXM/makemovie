@@ -1539,3 +1539,41 @@ export async function cascadeScriptApproval(
     return { cascaded: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
+
+export interface CreationPlanInput {
+  episodeId: string
+  stage: GenerationStage
+  storyboardIds?: string[]
+  promptNote?: string
+  regenerate?: boolean
+  styleId?: string
+}
+
+export interface CreationPlan {
+  planId: string
+  fingerprint: string
+  stage: GenerationStage
+  episodeId: string
+  /** 任务量预估:目标镜头数(素材/剧本类阶段为 1)。 */
+  estimatedTasks: number
+  inputs: CreationPlanInput
+}
+
+/**
+ * US-011 制作计划:把一次生成的输入固定成指纹化的计划。plan 不落库、不花钱——
+ * 它是提交前的确认凭据;run 提交时重算指纹,漂移(镜头清单/上游文本变了)返回
+ * 409,用户重新计划。指纹对输入稳定:同输入同指纹,幂等键在 API 层按组织+操作
+ * 隔离。任务量按 stage 的目标粒度估(IMAGE/VIDEO/AUDIO 按镜,其余 1)。
+ */
+export function buildCreationPlan(organizationId: string, input: CreationPlanInput, targetCount: number): CreationPlan {
+  const canonical = JSON.stringify({ organizationId, episodeId: input.episodeId, stage: input.stage, storyboardIds: input.storyboardIds ?? null, promptNote: input.promptNote ?? null, regenerate: input.regenerate ?? false, styleId: input.styleId ?? null })
+  const fingerprint = createHash('sha256').update(canonical).digest('hex')
+  return { planId: `plan:${fingerprint.slice(0, 16)}`, fingerprint, stage: input.stage, episodeId: input.episodeId, estimatedTasks: targetCount, inputs: input }
+}
+
+/** 重算并比对:提交侧用。输入一致才算同一份计划。 */
+export function planFingerprint(organizationId: string, input: CreationPlanInput): string {
+  const canonical = JSON.stringify({ organizationId, episodeId: input.episodeId, stage: input.stage, storyboardIds: input.storyboardIds ?? null, promptNote: input.promptNote ?? null, regenerate: input.regenerate ?? false, styleId: input.styleId ?? null })
+  return createHash('sha256').update(canonical).digest('hex')
+}
+
