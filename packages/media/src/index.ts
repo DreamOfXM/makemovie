@@ -390,6 +390,9 @@ export interface EditListInput {
   clips: EditClip[]
   /** 时间线帧率，默认 25。 */
   fps?: number
+  /** 序列画幅。缺省回落 1080×1920 竖屏旧默认——仅供拿不到切片实测尺寸的老交付；
+   *  新导出必须传入真实尺寸，NLE 按它建序，横屏素材不能被竖屏 format 吞掉。 */
+  frame?: { width: number; height: number }
 }
 
 const EDIT_FPS = 25
@@ -429,6 +432,7 @@ function xmlEscape(value: string): string {
 /** FCPXML 1.10：Final Cut Pro / 达芬奇可直接导入的整集粗剪。 */
 export function buildFcpxml(input: EditListInput): string {
   const fps = input.fps ?? EDIT_FPS
+  const frame = input.frame ?? { width: 1080, height: 1920 }
   const rational = (frames: number) => `${frames}/${fps}s`
   const total = input.clips.reduce((sum, clip) => sum + toFrames(clip.durationMs, fps), 0)
   const assets: string[] = []
@@ -447,7 +451,7 @@ export function buildFcpxml(input: EditListInput): string {
     '<!DOCTYPE fcpxml>',
     '<fcpxml version="1.10">',
     '  <resources>',
-    `    <format id="r1" frameDuration="1/${fps}s" width="1080" height="1920" />`,
+    `    <format id="r1" frameDuration="1/${fps}s" width="${frame.width}" height="${frame.height}" />`,
     ...assets,
     `    <sequence id="r0" name="${xmlEscape(input.title)}" format="r1" tcStart="0s" tcDuration="${rational(total)}" audioLayout="stereo" audioRate="48k">`,
     '      <spine>',
@@ -458,6 +462,79 @@ export function buildFcpxml(input: EditListInput): string {
     '</fcpxml>',
     '',
   ].join('\n')
+}
+
+/** OTIO 的配乐轨素材引用:合成清单里记录了它才排 A1;EDL 把配乐丢了,OTIO 找回。 */
+export interface OtioScoreInput {
+  sourceUrl: string
+  durationMs: number | null
+}
+
+export interface OtioInput extends EditListInput {
+  score?: OtioScoreInput
+}
+
+/**
+ * OpenTimelineIO(OTIO):ASFW 标准、多数 NLE 原生可读的工程交接格式,也是「LLM 生成
+ * 时间线」类工具的通用载体。与 EDL/FCPXML 同一份数学与回退口径:逐镜 Clip 顺序排满
+ * V1,planned 回退照实标在 clip 名与 metadata。配乐经合成清单排成 A1 音轨;字幕不进
+ * OTIO——它有自己的 SRT 交付,塞非标字幕轨只会让导入器噎住。序列画幅不属于 Timeline
+ * 语义,由导入侧 NLE 自行解释,故这里没有 frame 参数。
+ */
+export function buildOtio(input: OtioInput): string {
+  const fps = input.fps ?? EDIT_FPS
+  const rationalTime = (frames: number) => ({ OTIO_SCHEMA: 'RationalTime.1', rate: fps, value: frames })
+  const timeRange = (startFrames: number, durationFrames: number) => ({
+    OTIO_SCHEMA: 'TimeRange.1',
+    start_time: rationalTime(startFrames),
+    duration: rationalTime(durationFrames),
+  })
+  let cursor = 0
+  const videoChildren = input.clips.map(clip => {
+    const frames = toFrames(clip.durationMs, fps)
+    cursor += frames
+    return {
+      OTIO_SCHEMA: 'Clip.1',
+      name: `#${clip.number} ${clip.title}${clip.measured ? '' : ' (planned)'}`,
+      source_range: timeRange(0, frames),
+      media_reference: {
+        OTIO_SCHEMA: 'ExternalReference.1',
+        target_url: `file:///${clip.sourceFile}`,
+        available_range: timeRange(0, frames),
+      },
+      metadata: { makemovie: { shot: clip.number, measured_duration: clip.measured } },
+    }
+  })
+  const tracks: object[] = [
+    { OTIO_SCHEMA: 'Track.1', name: 'V1', kind: 'Video', children: videoChildren },
+  ]
+  if (input.score) {
+    const frames = input.score.durationMs != null ? toFrames(input.score.durationMs, fps) : cursor
+    tracks.push({
+      OTIO_SCHEMA: 'Track.1',
+      name: 'A1',
+      kind: 'Audio',
+      children: [
+        {
+          OTIO_SCHEMA: 'Clip.1',
+          name: 'Score',
+          source_range: timeRange(0, frames),
+          media_reference: {
+            OTIO_SCHEMA: 'ExternalReference.1',
+            target_url: `file:///${input.score.sourceUrl}`,
+            available_range: timeRange(0, frames),
+          },
+        },
+      ],
+    })
+  }
+  const timeline = {
+    OTIO_SCHEMA: 'Timeline.1',
+    name: input.title,
+    global_start_time: rationalTime(0),
+    tracks: { OTIO_SCHEMA: 'Stack.1', name: 'tracks', children: tracks },
+  }
+  return `${JSON.stringify(timeline, null, 2)}\n`
 }
 
 const AUDIO_SHAPE = 'aformat=sample_rates=44100:channel_layouts=stereo'

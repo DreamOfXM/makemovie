@@ -289,6 +289,7 @@ describe('delivery acceptance gate', () => {
       objectKey('first-frame', 'sb2', 'v1.png'),
     ])
     expect(manifest.storyboards[1]!.artifacts[0]).toEqual({
+      id: expect.any(String),
       stage: 'VIDEO',
       objectKey: objectKey('video', 'sb2', 'v2.mp4'),
       checksum: 'video-sb2-v2',
@@ -357,10 +358,27 @@ describe('delivery edit handoff export', () => {
     expect(res.headers['content-type']).toContain('application/xml')
     expect(res.headers['content-disposition']).toContain('episode-1-edit.fcpxml')
     expect(res.body).toContain('<fcpxml version="1.10">')
+    // 序列画幅取自切片实测(种子视频 1280×720),不再写死竖屏。
+    expect(res.body).toContain('width="1280" height="720"')
+    expect(res.body).not.toContain('width="1080"')
     expect(res.body).toContain('duration="125/25s"')
     expect(res.body).toContain('duration="153/25s"')
     expect(res.body).toContain('ref="x2" offset="125/25s"')
     expect(res.body).toContain('tcDuration="278/25s"')
+  })
+
+  it('serves an OTIO timeline whose V1 carries the packaged clips', async () => {
+    const res = await env.app.inject({ method: 'GET', url: `/api/deliveries/${deliveryOneId}/edit-list?format=otio`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('application/json')
+    expect(res.headers['content-disposition']).toContain('episode-1-edit.otio')
+    const timeline = res.json() as { OTIO_SCHEMA: string; name: string; tracks: { children: Array<{ name: string; kind: string; children: unknown[] }> } }
+    expect(timeline.OTIO_SCHEMA).toBe('Timeline.1')
+    expect(timeline.name).toBe('EP1 EP1')
+    // 这一版母带没混配乐,只有 V1——配乐轨的有无必须诚实于合成记录。
+    expect(timeline.tracks.children).toHaveLength(1)
+    expect(timeline.tracks.children[0]).toMatchObject({ name: 'V1', kind: 'Video' })
+    expect(timeline.tracks.children[0]!.children).toHaveLength(2)
   })
 
   it('refuses unknown formats and hides other organizations\' deliveries', async () => {
@@ -489,5 +507,52 @@ describe('delivery audio tracks', () => {
       ['MUSIC', 'score-in-the-file'],
     ])
     expect(manifest.composition.tracks[1]).toEqual(expect.objectContaining({ objectKey: objectKey('music', 'master', 'v1.wav'), durationMs: 9000 }))
+  })
+})
+
+// Last of last: the block above gave the composition a subtitle artifact and packaged
+// the third delivery; this one downloads it and then packages a silent fourth.
+describe('delivery subtitle file', () => {
+  it('serves the SRT that belongs to the packaged composition, byte for byte', async () => {
+    const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
+    const third = (list.json() as { deliveries: DeliveryDto[] }).deliveries[0]!
+    const srtBody = '1\n00:00:00,000 --> 00:00:03,000\n巷口相遇\n'
+    await env.app.storage.put(objectKey('subtitle', 'master', 'v1.srt'), new TextEncoder().encode(srtBody), 'application/x-subrip')
+
+    const res = await env.app.inject({ method: 'GET', url: `/api/deliveries/${third.id}/subtitle`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('application/x-subrip')
+    expect(res.headers['content-disposition']).toContain('episode-1.srt')
+    expect(String(res.body)).toBe(srtBody)
+  })
+
+  it('answers 404 for a master without subtitles and stays org-scoped and authenticated', async () => {
+    const silentMaster = await env.db.mediaArtifact.create({
+      data: {
+        organizationId,
+        stage: 'COMPOSITION',
+        objectKey: `${organizationId}/${projectId}/${episodeId}/composition/master/v2.mp4`,
+        checksum: 'master-2-checksum',
+        mimeType: 'video/mp4',
+        version: 2,
+        durationMs: 11000,
+      },
+    })
+    await env.db.composition.create({
+      data: { episodeId, status: 'COMPLETED', manifest: JSON.stringify({ storyboardIds }), artifactId: silentMaster.id },
+    })
+    const res = await createDelivery(editorToken)
+    expect(res.statusCode).toBe(201)
+    const silent = (res.json() as { delivery: DeliveryDto }).delivery
+
+    const no = await env.app.inject({ method: 'GET', url: `/api/deliveries/${silent.id}/subtitle`, headers: authHeaders(ownerToken) })
+    expect(no.statusCode).toBe(404)
+    expect(no.json().error).toBe('delivery:noSubtitles')
+
+    expect((await env.app.inject({ method: 'GET', url: '/api/deliveries/does-not-exist/subtitle', headers: authHeaders(ownerToken) })).statusCode).toBe(404)
+    const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/deliveries`, headers: authHeaders(viewerToken) })
+    const subtitled = (list.json() as { deliveries: DeliveryDto[] }).deliveries.find(delivery => delivery.id !== silent.id)!
+    expect((await env.app.inject({ method: 'GET', url: `/api/deliveries/${subtitled.id}/subtitle`, headers: authHeaders(outsiderToken) })).statusCode).toBe(404)
+    expect((await env.app.inject({ method: 'GET', url: `/api/deliveries/${silent.id}/subtitle` })).statusCode).toBe(401)
   })
 })

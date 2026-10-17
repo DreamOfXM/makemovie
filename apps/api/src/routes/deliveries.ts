@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import type { Delivery, GenerationTask, MediaArtifact, PrismaClient, Stage, WorkflowStatus } from '@studio/db'
-import { buildEdl, buildFcpxml, type EditClip } from '@studio/media'
+import { buildEdl, buildFcpxml, buildOtio, type EditClip } from '@studio/media'
 import { composedStoryboardIds, liveStoryboards } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -16,6 +16,8 @@ interface VersionRef {
 }
 
 interface ManifestArtifact {
+  /** 制品 id：清单自足的钥匙——拿着它能直接拼出 /artifacts/:id/content，字幕轨尤其依赖它。 */
+  id: string
   stage: Stage | null
   objectKey: string
   checksum: string
@@ -102,6 +104,7 @@ async function findDeliveryInOrg(db: PrismaClient, deliveryId: string, organizat
 
 function toManifestArtifact(artifact: MediaArtifact): ManifestArtifact {
   return {
+    id: artifact.id,
     stage: artifact.stage,
     objectKey: artifact.objectKey,
     checksum: artifact.checksum,
@@ -276,7 +279,7 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
-  // 剪辑交接:从这一份交付清单生成 EDL/FCPXML,精剪在 NLE 里做。时长优先用切片
+  // 剪辑交接:从这一份交付清单生成 EDL/FCPXML/OTIO,精剪在 NLE 里做。时长优先用切片
   // 实测值，缺失才回退分镜规划值并在导出里如实标注——导出必须诚实于母带。
   app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
     '/deliveries/:id/edit-list',
@@ -284,7 +287,9 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const auth = request.auth!
       const format = request.query.format ?? 'edl'
-      if (format !== 'edl' && format !== 'fcpxml') return reply.code(400).send({ error: "format must be 'edl' or 'fcpxml'" })
+      if (format !== 'edl' && format !== 'fcpxml' && format !== 'otio') {
+        return reply.code(400).send({ error: "format must be 'edl', 'fcpxml' or 'otio'" })
+      }
       const delivery = await findDeliveryInOrg(app.db, request.params.id, auth.organizationId)
       if (!delivery) return reply.code(404).send({ error: 'Delivery not found' })
 
@@ -302,11 +307,59 @@ export async function deliveryRoutes(app: FastifyInstance): Promise<void> {
         }
       })
       const title = `EP${manifest.episode.number} ${manifest.episode.title}`
-      const body = format === 'edl' ? buildEdl({ title, clips }) : buildFcpxml({ title, clips })
-      const extension = format === 'edl' ? 'edl' : 'fcpxml'
-      reply.header('content-type', format === 'edl' ? 'text/plain; charset=utf-8' : 'application/xml; charset=utf-8')
+      // FCPXML 的序列画幅来自切片实测值：清单里第一个带完整尺寸的 VIDEO 产物即整集
+      // 画幅（单集同源同参，尺寸一致）；老交付拿不到尺寸时由构建器回落竖屏旧默认。
+      const sized = manifest.storyboards
+        .map(storyboard => storyboard.artifacts.find(artifact => artifact.stage === 'VIDEO'))
+        .filter((artifact): artifact is ManifestArtifact & { width: number; height: number } =>
+          artifact?.width != null && artifact?.height != null)
+      const frame = sized[0] ? { width: sized[0].width, height: sized[0].height } : undefined
+      // OTIO 把 EDL 丢掉的配乐轨带回来:清单 tracks 里的 MUSIC 就是合成时真正混入的那条。
+      const score = manifest.composition.tracks.find(artifact => artifact.stage === 'MUSIC')
+      const body = format === 'edl'
+        ? buildEdl({ title, clips })
+        : format === 'fcpxml'
+          ? buildFcpxml({ title, clips, frame })
+          : buildOtio({
+              title,
+              clips,
+              ...(score ? { score: { sourceUrl: score.objectKey, durationMs: score.durationMs } } : {}),
+            })
+      const extension = format
+      reply.header('content-type', format === 'edl' ? 'text/plain; charset=utf-8' : format === 'fcpxml' ? 'application/xml; charset=utf-8' : 'application/json; charset=utf-8')
       reply.header('content-disposition', `attachment; filename="episode-${manifest.episode.number}-edit.${extension}"`)
       return body
+    },
+  )
+
+  // 字幕交付：SRT 是交付物的一部分——烧进画面或挂成软轨都不等于「交出去了」，
+  // 用户要能拿到文件去外部工具校对、复用、替换重合成。合成 worker 早已把它落成
+  // SUBTITLE 制品并记在 composition 上；这里经 delivery.artifactId 精确回到打包时
+  // 的那一次合成取件，而不是「该集最新」——母带之后重新合成过也不能换掉这份字幕。
+  app.get<{ Params: { id: string } }>(
+    '/deliveries/:id/subtitle',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const delivery = await findDeliveryInOrg(app.db, request.params.id, auth.organizationId)
+      if (!delivery) return reply.code(404).send({ error: 'Delivery not found' })
+
+      const composition = delivery.artifactId
+        ? await app.db.composition.findFirst({ where: { artifactId: delivery.artifactId }, select: { subtitleArtifactId: true } })
+        : null
+      const artifact = composition?.subtitleArtifactId
+        ? await app.db.mediaArtifact.findFirst({ where: { id: composition.subtitleArtifactId, organizationId: auth.organizationId } })
+        : null
+      if (!composition?.subtitleArtifactId || !artifact) {
+        return reply.code(404).send({ error: 'delivery:noSubtitles' })
+      }
+      const stored = await app.storage.open(artifact.objectKey)
+      if (!stored) return reply.code(404).send({ error: 'artifact file not found' })
+      const manifest = parseManifest(delivery.manifest)
+      reply.header('content-type', 'application/x-subrip; charset=utf-8')
+      reply.header('content-length', String(stored.sizeBytes))
+      reply.header('content-disposition', `attachment; filename="episode-${manifest.episode.number}.srt"`)
+      return reply.send(stored.body)
     },
   )
 

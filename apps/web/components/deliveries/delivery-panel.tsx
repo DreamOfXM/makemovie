@@ -7,6 +7,7 @@ import {
   CheckIcon,
   DownloadIcon,
   FileJsonIcon,
+  FileTextIcon,
   LoaderCircleIcon,
   PackageIcon,
   RefreshCwIcon,
@@ -238,8 +239,8 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
     }
   }
 
-  /** 剪辑交接:同一份交付清单导出 EDL/FCPXML，精剪在 NLE 里做而不是重烧。 */
-  async function downloadEditList(delivery: Delivery, format: 'edl' | 'fcpxml') {
+  /** 剪辑交接:同一份交付清单导出 EDL/FCPXML/OTIO，精剪在 NLE 里做而不是重烧。 */
+  async function downloadEditList(delivery: Delivery, format: 'edl' | 'fcpxml' | 'otio') {
     setDownloadingId(delivery.id)
     try {
       const response = await fetch(`${API_BASE}/deliveries/${delivery.id}/edit-list?format=${format}`, {
@@ -247,16 +248,43 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const text = await response.text()
-      const blob = new Blob([text], { type: format === 'edl' ? 'text/plain' : 'application/xml' })
+      const blob = new Blob([text], { type: format === 'edl' ? 'text/plain' : format === 'fcpxml' ? 'application/xml' : 'application/json' })
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = `episode-${delivery.manifest.episode.number}-edit.${format === 'edl' ? 'edl' : 'fcpxml'}`
+      anchor.download = `episode-${delivery.manifest.episode.number}-edit.${format}`
       document.body.appendChild(anchor)
       anchor.click()
       anchor.remove()
       URL.revokeObjectURL(url)
       toast.success(t('delivery.editListDownloaded'))
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  /** 字幕交付：SRT 是交付物的一部分——烧进画面或挂成软轨不等于交出去了，
+   *  用户要能拿文件去外部工具校对、复用。没有字幕轨的交付不显示这条入口。 */
+  async function downloadSubtitle(delivery: Delivery) {
+    setDownloadingId(delivery.id)
+    try {
+      const response = await fetch(`${API_BASE}/deliveries/${delivery.id}/subtitle`, {
+        headers: { authorization: `Bearer ${getToken()}` },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const text = await response.text()
+      const blob = new Blob([text], { type: 'application/x-subrip' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `episode-${delivery.manifest.episode.number}.srt`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      toast.success(t('delivery.subtitleDownloaded'))
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
     } finally {
@@ -341,6 +369,8 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
               <TableBody>
                 {deliveries.data.map(delivery => {
                   const accepted = delivery.status === 'APPROVED'
+                  // 增删对等：母带里没有字幕轨的交付不显示 SRT 入口，不做点了 404 的死按钮。
+                  const hasSubtitle = delivery.manifest.composition.tracks?.some(track => track.stage === 'SUBTITLE') ?? false
                   return (
                     <TableRow key={delivery.id}>
                       <TableCell>
@@ -413,6 +443,40 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                             </TooltipTrigger>
                             <TooltipContent>{t('delivery.editListHint')}</TooltipContent>
                           </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={downloadingId === delivery.id}
+                                onClick={() => void downloadEditList(delivery, 'otio')}
+                              >
+                                {downloadingId === delivery.id
+                                  ? <LoaderCircleIcon className="animate-spin" />
+                                  : <ScissorsIcon />}
+                                OTIO
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{t('delivery.editListHint')}</TooltipContent>
+                          </Tooltip>
+                          {hasSubtitle && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={downloadingId === delivery.id}
+                                  onClick={() => void downloadSubtitle(delivery)}
+                                >
+                                  {downloadingId === delivery.id
+                                    ? <LoaderCircleIcon className="animate-spin" />
+                                    : <FileTextIcon />}
+                                  SRT
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>{t('delivery.subtitleHint')}</TooltipContent>
+                            </Tooltip>
+                          )}
                           <GuardedButton
                             action="episode:write"
                             variant="outline"
@@ -427,7 +491,6 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                             action="episode:write"
                             variant="destructive"
                             size="sm"
-                            className="text-destructive hover:text-destructive"
                             disabled={accepted}
                             onClick={() => setRejectTarget(delivery)}
                           >
