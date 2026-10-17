@@ -1,0 +1,11 @@
+/*
+  Warnings:
+
+  - You are about to drop the column `stateRevision` on the `Project` table. All the data in the column will be lost.
+
+*/
+-- AlterTable
+ALTER TABLE "Project" DROP COLUMN "stateRevision";
+
+-- AlterTable
+ALTER TABLE "Storyboard" ADD COLUMN     "stateRevision" INTEGER NOT NULL DEFAULT 0;

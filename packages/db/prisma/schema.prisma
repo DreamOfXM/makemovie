@@ -568,7 +568,11 @@ model Storyboard {
   importedAmbienceArtifactId                                 String?
   /// 烧进画面的字幕文本。null = 用本镜台词；导入的音频念的不是台词时才改这里。
   subtitleText                                               String?
+  /// US-014 镜头可变输入的对象级 CAS:文字/控制/参考/锁/选版在同一事务比较并递增。
+  /// 既有 revision 只代表重拆批次,不能复用。
+  stateRevision                                             Int       @default(0)
   assets                                                     StoryboardAsset[]
+  shotControl                                                ShotControl?
   generationTasks                                            GenerationTask[]  @relation("GenerationTask_storyboardIdToStoryboard")
   qualityChecks                                              QualityCheck[]
   episode                                                    Episode           @relation(fields: [episodeId], references: [id], onDelete: Cascade)
@@ -580,6 +584,22 @@ model Storyboard {
 
   @@unique([episodeId, revision, number])
   @@index([episodeId, supersededAt])
+}
+
+// US-014 镜头结构化控制:景别/机位/运动/动作/情绪/负面约束,全部可选「自动」——
+// 旧自由描述不被解析回填。与 Storyboard.stateRevision 同事务更新(CAS)。
+model ShotControl {
+  id             String   @id @default(cuid())
+  storyboardId   String   @unique
+  framing        String?  // 景别: close_up | medium | wide | extreme_close_up | auto
+  cameraAngle    String?  // 机位: eye_level | low | high | dutch | over_shoulder | auto
+  cameraMovement String?  // 运动: static | pan | tilt | dolly | handheld | auto
+  actionStart    String?  // 动作起:自由文本(「从门口走到桌边」)
+  actionEnd      String?  // 动作止:自由文本
+  mood           String?  // 情绪/节奏:自由文本
+  negativePrompt String?  // 负面约束:不出现的东西
+  updatedAt      DateTime @updatedAt
+  storyboard     Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
 }
 
 model StoryboardAsset {
