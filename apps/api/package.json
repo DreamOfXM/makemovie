@@ -13,6 +13,7 @@
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.1",
     "@fastify/rate-limit": "^11.2.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@studio/config": "workspace:*",
     "@studio/db": "workspace:*",
     "@studio/domain": "workspace:*",
@@ -22,7 +23,8 @@
     "@studio/providers": "workspace:*",
     "@studio/security": "workspace:*",
     "fastify": "^5.2.1",
-    "fflate": "^0.8.3"
+    "fflate": "^0.8.3",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "embedded-postgres": "18.4.0-beta.17",

@@ -5,7 +5,7 @@ generator client {
   // 为什么要写死：目标一旦和运行时不符，容器启动时那次 `prisma generate` 就得去
   // binaries.prisma.sh 补下载，拉不到就静默沿用旧引擎、容器直接起不来——而这个
   // 错配是由「谁在什么环境下构建的」决定的，不该让发布产物承担这个变量。
-  binaryTargets = ["native", "linux-x64-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
 }
 
 datasource db {
@@ -242,11 +242,29 @@ model Organization {
   capabilityBindings CapabilityBinding[]
   catalogCustomModels CatalogCustomModel[]
   catalogHidden       CatalogHidden[]
+  agentTokens        AgentToken[]
   members            OrganizationMember[]
   projects           Project[]
   providerConnections ProviderConnection[]
   sessions           Session[]
   usageLedger        UsageLedger[]
+}
+
+// Agent 接入令牌:签发给 AI agent(Claude Code/Cursor 经 MCP)用的 Bearer 凭据。
+// 与 Session 同一套 hash 机制,但独立成表:可吊销、可命名、带角色,不受用户改密/
+// 退会牵连;lastUsedAt 让"哪个 agent 还在用"可运营。
+model AgentToken {
+  id             String        @id @default(cuid())
+  name           String
+  tokenHash      String        @unique
+  organizationId String
+  role           MemberRole    @default(EDITOR)
+  createdAt      DateTime      @default(now())
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
 }
 
 model OrganizationMember {

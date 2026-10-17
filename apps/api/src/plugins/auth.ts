@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { can, type Action } from '@studio/domain'
+import { isAgentToken, resolveAgentToken } from '../lib/agent-tokens.js'
 import { resolveSession } from '../lib/sessions.js'
 
 export function bearerToken(request: FastifyRequest): string | undefined {
@@ -15,9 +16,13 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     await reply.code(401).send({ error: 'Missing bearer token' })
     return
   }
-  const context = await resolveSession(request.server.db, token)
+  // mmt_ 前缀 = agent 令牌,其余按用户会话;两者产出同一 AuthContext,下游
+  // 权限检查不需要知道对面是人是 agent。
+  const context = isAgentToken(token)
+    ? await resolveAgentToken(request.server.db, token)
+    : await resolveSession(request.server.db, token)
   if (!context) {
-    await reply.code(401).send({ error: 'Invalid or expired session' })
+    await reply.code(401).send({ error: isAgentToken(token) ? 'Invalid or revoked agent token' : 'Invalid or expired session' })
     return
   }
   request.auth = context

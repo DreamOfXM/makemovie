@@ -32,7 +32,7 @@ function fromDbSlot(value: string): CapabilitySlot {
  * at probe time and historically starts at the most expensive row). Unmarked vendors keep
  * pool order — the marking is a product decision per row, not an obligation.
  */
-function recommendedForPredicate() {
+export function recommendedForPredicate() {
   return (candidate: { provider: string; model: string }, slot: CapabilitySlot): boolean => {
     const models = getCatalog(candidate.provider)?.models
     if (!models) return false

@@ -14,12 +14,13 @@ import { PageHeader } from '@/components/ui/page-header'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BindingsPanel } from '@/components/models/bindings-panel'
 import { CatalogsPanel } from '@/components/models/catalogs-panel'
+import { AgentAccessCard } from '@/components/models/agent-access-card'
 import { ConnectionsPanel } from '@/components/models/connections-panel'
 import { ReadinessPanel } from '@/components/models/readiness-panel'
 
-type ModelsTab = 'readiness' | 'connections' | 'bindings' | 'catalogs'
+type ModelsTab = 'readiness' | 'connections' | 'bindings' | 'catalogs' | 'agent'
 
-const MODELS_TABS: readonly ModelsTab[] = ['readiness', 'connections', 'bindings', 'catalogs']
+const MODELS_TABS: readonly ModelsTab[] = ['readiness', 'connections', 'bindings', 'catalogs', 'agent']
 
 /**
  * Drives the horizontal tab rail on narrow screens: reports whether a tab is
@@ -188,6 +189,10 @@ const ANCHOR_FALLBACK: Record<string, string> = {
               <BoxesIcon />
               {t('models.tab.catalogs')}
             </TabsTrigger>
+            <TabsTrigger value="agent">
+              <RadioTowerIcon />
+              {t('models.tab.agent')}
+            </TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="readiness">
@@ -207,6 +212,9 @@ const ANCHOR_FALLBACK: Record<string, string> = {
         </TabsContent>
         <TabsContent value="catalogs">
           <CatalogsPanel catalogs={catalogs} onChanged={catalogs.reload} />
+        </TabsContent>
+        <TabsContent value="agent">
+          <AgentAccessCard />
         </TabsContent>
       </Tabs>
     </>

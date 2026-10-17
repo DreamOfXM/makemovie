@@ -5,10 +5,11 @@ import type { Storage } from '@studio/media'
 
 export interface AuthContext {
   sessionId: string
-  userId: string
+  /** Agent 令牌没有用户——null 表示这次请求来自一个 agent,审计按令牌记账。 */
+  userId: string | null
   organizationId: string
   role: Role
-  userEmail: string
+  userEmail: string | null
 }
 
 declare module 'fastify' {
