@@ -534,3 +534,5 @@ export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | nu
 // ESM evaluates a module's dependencies before its own body, so a module-scope read in
 // readiness.ts would see them uninitialised no matter where this line sits.
 export * from './readiness.js'
+
+export * from './contracts.js'
