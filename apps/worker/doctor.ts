@@ -125,7 +125,7 @@ async function checkModelConfig(): Promise<void> {
     }
   }
 
-  for (const slot of ['VIDEO_I2V', 'IMAGE_GEN', 'SCRIPT_TEXT', 'STORYBOARD_TEXT', 'TTS_VOICE', 'MUSIC_GEN', 'VISUAL_AUDIT']) {
+  for (const slot of ['VIDEO_I2V', 'IMAGE_GEN', 'SCRIPT_TEXT', 'STORYBOARD_TEXT', 'TTS_VOICE', 'MUSIC_GEN', 'VISUAL_AUDIT', 'SFX']) {
     const bound = capabilities.filter(capability => capability.bindings.some(binding => binding.slot === slot))
     if (bound.length === 0) {
       warn(`槽位 ${slot} 没有绑定任何模型——依赖它的阶段会被推进链跳过。`)

@@ -4,6 +4,7 @@ import { ensureMasterKey } from '@studio/config'
 import { PIPELINE_QUEUE, createPipelineQueue, enqueue, type PipelinePayload } from '@studio/jobs'
 import { FfmpegComposer, storageFrom } from '@studio/media'
 import { composeEpisode } from './compose.js'
+import { runArtifactOperation } from './run-artifact-operation.js'
 import { loadWorkerConfig } from './config.js'
 import type { PipelineDeps } from './deps.js'
 import { runTask } from './run-task.js'
@@ -37,7 +38,11 @@ const worker = new Worker<PipelinePayload>(
   PIPELINE_QUEUE,
   async job => {
     const payload = job.data
-    return payload.kind === 'run-task' ? runTask(payload, deps) : composeEpisode(payload, deps)
+    return payload.kind === 'run-task'
+      ? runTask(payload, deps)
+      : payload.kind === 'compose-episode'
+        ? composeEpisode(payload, deps)
+        : runArtifactOperation(payload, deps)
   },
   { connection: { url: config.redisUrl } },
 )

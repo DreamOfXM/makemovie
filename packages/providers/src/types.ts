@@ -47,6 +47,11 @@ export interface ProviderAdapter {
    * row, which is the failure mode this whole feature exists to avoid.
    */
   verifyModel?(capability: ModelCapability): Promise<ProbeResult>
+  /**
+   * 对已有视频制品的延长:input.media 携带 first_clip(原片),输出同源更长的新片。
+   * 可选方法——不支持的适配器没有它,路由按方法存在与否选模型,而不是猜能力。
+   */
+  extend?(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult>
   submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult>
   poll(capability: ModelCapability, taskId: string): Promise<PollResult>
 }
@@ -116,10 +121,12 @@ export function readMediaReferences(value: unknown): MediaReference[] {
  */
 export function validateReferenceRequest(capability: ModelCapability, input: Record<string, unknown>): void {
   const media = readMediaReferences(input.media)
-  if (capability.modality === 't2v' && media.length > 0) {
+  // first_clip 是延长操作的续片输入(对已有视频「接着拍」):对任何视频模态都合法,
+  // 与参考图/首帧的约束正交——生成路径从不携带它,只有制品操作会。
+  if (capability.modality === 't2v' && media.some(reference => reference.type !== 'first_clip')) {
     throw new Error(`t2v model "${capability.model}" cannot receive reference media`)
   }
-  if (capability.modality === 'i2v' && !media.some(reference => reference.type === 'first_frame')) {
+  if (capability.modality === 'i2v' && !media.some(reference => reference.type === 'first_frame' || reference.type === 'first_clip')) {
     throw new Error(`i2v model "${capability.model}" requires a first_frame reference`)
   }
   if (capability.modality === 'r2v' && !media.some(reference => reference.type === 'reference_image')) {

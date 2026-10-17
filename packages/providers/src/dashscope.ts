@@ -160,7 +160,7 @@ export function buildSubmitRequest(
     }
   }
 
-  if (capability.modality === 'music') {
+  if (capability.modality === 'music' || capability.modality === 'sfx') {
     return {
       url: `${base}${MUSIC_PATH}`,
       method: 'POST',

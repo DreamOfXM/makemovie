@@ -243,6 +243,7 @@ model Organization {
   catalogCustomModels CatalogCustomModel[]
   catalogHidden       CatalogHidden[]
   agentTokens        AgentToken[]
+  artifactOperations ArtifactOperation[]
   members            OrganizationMember[]
   projects           Project[]
   providerConnections ProviderConnection[]
@@ -263,6 +264,30 @@ model AgentToken {
   lastUsedAt     DateTime?
   revokedAt      DateTime?
   organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// 制品操作:对「已有制品」的变换(视频延长;未来的口型/视频生音效同型)。与
+// GenerationTask 分表——生成任务以分镜为原子、以阶段为生命周期,装不下「输入=一个
+// 制品、输出=一个新制品」。source/output 存弱引用 id:制品的归属与生命周期仍在
+// MediaArtifact/任务侧,操作行只记谁、用什么模型、请求了什么、成了没有。
+model ArtifactOperation {
+  id               String        @id @default(cuid())
+  organizationId   String
+  kind             String
+  sourceArtifactId String
+  outputArtifactId String?
+  connectionId     String
+  capabilityId     String
+  provider         String
+  model            String
+  status           String        @default("QUEUED")
+  requestSnapshot  String
+  errorSnapshot    String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  organization     Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
 }
@@ -623,6 +648,7 @@ enum CapabilitySlot {
   TTS_VOICE
   MUSIC_GEN
   VISUAL_AUDIT
+  SFX
 }
 
 enum MemberRole {

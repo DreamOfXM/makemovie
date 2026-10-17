@@ -24,7 +24,15 @@ export interface ComposeEpisodePayload {
   organizationId: string
 }
 
-export type PipelinePayload = RunTaskPayload | ComposeEpisodePayload
+export interface RunArtifactOperationPayload {
+  kind: 'run-artifact-operation'
+  operationId: string
+  organizationId: string
+  attempt: number
+  candidate: RunTaskCandidate
+}
+
+export type PipelinePayload = RunTaskPayload | ComposeEpisodePayload | RunArtifactOperationPayload
 export type JobName = PipelinePayload['kind']
 
 export function pipelineConnection(): ConnectionOptions {
@@ -45,7 +53,11 @@ export function createPipelineQueue(connection: ConnectionOptions = pipelineConn
 
 /** Deduplicated per (task, attempt) so a rework enqueue never collides with its predecessor. */
 export function jobIdFor(payload: PipelinePayload): string {
-  return payload.kind === 'run-task' ? `run-${payload.taskId}-${payload.attempt}` : `compose-${payload.compositionId}`
+  return payload.kind === 'run-task'
+    ? `run-${payload.taskId}-${payload.attempt}`
+    : payload.kind === 'compose-episode'
+      ? `compose-${payload.compositionId}`
+      : `op-${payload.operationId}-${payload.attempt}`
 }
 
 export async function enqueue(queue: Queue<PipelinePayload>, payload: PipelinePayload): Promise<void> {

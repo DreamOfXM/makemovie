@@ -27,7 +27,7 @@ export type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { incl
 
 type CandidateOutcome = { status: 'succeeded' } | { status: 'rework' } | { status: 'exhausted' } | { status: 'next'; error: string }
 
-interface Material {
+export interface Material {
   bytes: Uint8Array
   mimeType: string
   width?: number
@@ -39,7 +39,7 @@ const MOCK_DURATION_MS = 1_000
 
 // ffmpeg chooses the container from the output file extension, so the temp name has to
 // match the modality before synthesizeMockMedia can tell us the real mime type.
-const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 'mp4', r2v: 'mp4', tts: 'wav', music: 'wav' }
+const MOCK_EXTENSION: Record<string, string> = { image: 'png', t2v: 'mp4', i2v: 'mp4', r2v: 'mp4', tts: 'wav', music: 'wav', sfx: 'wav' }
 
 /** 产物版本号按「同一实体同一阶段已落产物最大版 +1」分配——版本是给用户看的
  *  "这一镜/这个素材的第 N 版"，必须跨任务连续：重跑会开新任务，旧逻辑按本任务
@@ -572,7 +572,7 @@ async function runSegmentedStoryboard(
   return { status: 'succeeded' }
 }
 
-async function materialize(result: PollResult, modality: string, workdir: string): Promise<Material> {
+export async function materialize(result: PollResult, modality: string, workdir: string): Promise<Material> {
   // A vendor that returns bytes has already done the download the worker cannot: its
   // media sits behind an authenticated GET or came inline as base64.
   if (result.inlineArtifact) return { ...result.inlineArtifact }

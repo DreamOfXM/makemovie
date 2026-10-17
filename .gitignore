@@ -69,3 +69,6 @@ AGENTS.md
 # Outbound promo material (Xiaohongshu notes and their rendered previews).
 xhs-promo/
 xhs-preview/
+
+# Internal handoff packages (planning materials, not product code).
+docs/superpowers/

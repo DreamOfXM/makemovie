@@ -6,7 +6,7 @@ export function isWorkflowStatus(value: unknown): value is WorkflowStatus {
 }
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled'
 
-export const modelModalities = ['text', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'vlm'] as const
+export const modelModalities = ['text', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'sfx', 'vlm'] as const
 export type ModelModality = typeof modelModalities[number]
 
 export function isModelModality(value: unknown): value is ModelModality {
@@ -102,6 +102,7 @@ export const capabilitySlots = [
   'tts_voice',
   'music_gen',
   'visual_audit',
+  'sfx',
 ] as const
 
 export type CapabilitySlot = typeof capabilitySlots[number]
@@ -120,6 +121,7 @@ export const slotModality: Record<CapabilitySlot, ModelModality> = {
   tts_voice: 'tts',
   music_gen: 'music',
   visual_audit: 'vlm',
+  sfx: 'sfx',
 }
 
 /**
@@ -166,6 +168,12 @@ export const slotStageUsage: Record<CapabilitySlot, SlotStageUsage> = {
   // bound sheets simply never pick an r2v model; planVideoModels drops it.
   video_r2v: { stages: ['VIDEO'], qcOnly: false, required: false },
   tts_voice: { stages: ['AUDIO'], qcOnly: false, required: false },
+  // The silent half of AUDIO: shots with no dialogue still owe the cut a sound bed
+  // (rain, footsteps, doors). Optional like tts_voice — an installation that never
+  // binds it keeps masters at voice+music, exactly as before. Artifacts land as
+  // AUDIO-stage rows for silent shots only, so voice resolution for voiced shots
+  // never sees them; the cut takes an sfx through the shot's ambience pin.
+  sfx: { stages: ['AUDIO'], qcOnly: false, required: false },
   music_gen: { stages: ['MUSIC'], qcOnly: false, required: false },
   visual_audit: { stages: [], qcOnly: true, required: false },
 }

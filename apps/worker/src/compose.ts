@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { AudioSource, MediaArtifact, PrismaClient } from '@studio/db'
+import { resolveVideoArtifactShot, type AudioSource, type MediaArtifact, type PrismaClient } from '@studio/db'
 import { masterNeedsVoice, recordedAudioMode } from '@studio/domain'
 import type { ComposeEpisodePayload } from '@studio/jobs'
 import { buildObjectKey, buildSrt, probeDuration, type ShotAudioMode, type SubtitleEntry } from '@studio/media'
@@ -42,7 +42,7 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
           dialogue: true, subtitleText: true, audioSource: true, importedVoiceArtifactId: true, importedAmbienceArtifactId: true, selectedVoiceArtifactId: true,
         },
       })
-      const chosen = await chosenVideoArtifact(deps.db, storyboardId)
+      const chosen = await chosenVideoArtifact(deps.db, storyboardId, payload.organizationId)
       if (!chosen) throw new Error(`storyboard ${storyboardId} has no succeeded video artifact`)
       const source = chosen.artifact
       selections[storyboardId] = { artifactId: source.id, source: chosen.source }
@@ -191,12 +191,19 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
  * deleted, superseded, or never this shot's — falls back to the newest rather than
  * blocking the master: the selection is an editorial preference, not a dependency.
  */
-async function chosenVideoArtifact(db: PrismaClient, storyboardId: string): Promise<{ artifact: MediaArtifact; source: 'manual' | 'auto' } | null> {
+async function chosenVideoArtifact(
+  db: PrismaClient,
+  storyboardId: string,
+  organizationId: string,
+): Promise<{ artifact: MediaArtifact; source: 'manual' | 'auto' } | null> {
   const shot = await db.storyboard.findUnique({ where: { id: storyboardId }, select: { selectedVideoArtifactId: true } })
   if (shot?.selectedVideoArtifactId) {
-    const pinned = await db.mediaArtifact.findFirst({
-      where: { id: shot.selectedVideoArtifactId, stage: 'VIDEO', task: { status: 'SUCCEEDED', stage: 'VIDEO', storyboardId } },
-    })
+    // 钦定的信任条件只有两条:挂在本镜成功任务下的产物,或经统一归属解析器
+    // 验证过操作链归属的制品操作产物(延长等)。「没有任务」本身不是归属证明。
+    const context = await resolveVideoArtifactShot(db, shot.selectedVideoArtifactId, organizationId)
+    const pinned = context?.storyboardId === storyboardId
+      ? await db.mediaArtifact.findFirst({ where: { id: shot.selectedVideoArtifactId, stage: 'VIDEO', organizationId } })
+      : null
     if (pinned) return { artifact: pinned, source: 'manual' }
   }
   const latest = await latestVideoArtifact(db, storyboardId)

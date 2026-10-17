@@ -99,6 +99,11 @@ export class MockProviderAdapter implements ProviderAdapter {
     return { ok: true, status: 200, message: `model "${capability.model}" answered` }
   }
 
+  async extend(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
+    // 延长与生成在 mock 侧同构:同一任务面、同一 poll 产物,引用类型里多一枚 first_clip。
+    return this.submit(capability, request)
+  }
+
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     if (this.options.apiKey === 'invalid') throw new Error('mock: invalid api key')
     validateReferenceRequest(capability, request.input)

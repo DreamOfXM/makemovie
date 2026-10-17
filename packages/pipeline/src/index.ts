@@ -483,6 +483,8 @@ interface GenerationTarget {
   assetReferenceArtifactIds?: string[]
   /** P7 守卫的改写/提醒留痕,随请求快照入库:"这条 prompt 被动过什么、为什么"的审计答案。 */
   guardFindings?: GuardFinding[]
+  /** AUDIO 阶段的音效半边:无台词镜的声床任务,候选取 sfx 槽而不是 tts_voice。 */
+  sfx?: boolean
   /** P7 拦截型守卫的落点:任务直接落 BLOCKED、不排队,绑定补齐后经重试路径复活。 */
   blockedReason?: string
 }
@@ -889,7 +891,17 @@ export async function triggerStage(
   // audio of nothing, and composition never waits for it. AUDIO still connects
   // the shots it actually planned so a later dialogue edit re-opens the stage.
   const voiced = stage === 'AUDIO' ? selected.filter(storyboard => storyboard.dialogue !== '') : selected
-  if (stage === 'AUDIO' && voiced.length === 0) return { ok: false, code: 400, error: 'episode has no shots with dialogue to voice' }
+  // The silent half of AUDIO: a shot with no dialogue still owes the cut a sound bed
+  // (rain, footsteps, doors). Only planned when an sfx model is bound — unbound
+  // installations keep exactly the voice+music masters they had.
+  const sfxCandidates = stage === 'AUDIO'
+    ? await resolveSlotCandidates(db, organizationId, episode.projectId, 'sfx')
+    : []
+  const silent = stage === 'AUDIO' ? selected.filter(storyboard => storyboard.dialogue === '') : []
+  const sfxShots = sfxCandidates.length > 0 ? silent : []
+  if (stage === 'AUDIO' && voiced.length === 0 && sfxShots.length === 0) {
+    return { ok: false, code: 400, error: 'episode has no shots with dialogue to voice' }
+  }
 
   // The media prompts are deliberately not translated per locale: an asset image, a
   // shot frame and a clip are described by the storyboard text this stage consumes,
@@ -922,7 +934,7 @@ export async function triggerStage(
         assetId: asset.id,
       }))
     : perStoryboard
-      ? voiced.map(storyboard => ({
+      ? [...voiced.map(storyboard => ({
           entityId: storyboard.id,
           prompt: stage === 'AUDIO'
             ? voiceLine(locale, storyboard.speaker, storyboard.dialogue)
@@ -937,7 +949,14 @@ export async function triggerStage(
           ...((stage === 'IMAGE' || stage === 'VIDEO') && assetReferences.has(storyboard.id) ? { assetReferenceArtifactIds: assetReferences.get(storyboard.id) } : {}),
           // 场景主帧未就绪的镜不排队不烧钱，重试路径在首镜落位后复活它。
           ...(blockedByMaster.has(storyboard.id) ? { blockedReason: blockedByMaster.get(storyboard.id)! } : {}),
-        }))
+        })), ...sfxShots.map(storyboard => ({
+          // 音效只服务无台词镜：台词镜的人声来自 TTS，画面动作与环境声落在氛围底
+          // 那一格——提示词只描述「能听到什么」，不写画面、不写人声。
+          entityId: storyboard.id,
+          prompt: [`为这一镜生成环境/动作音效，无人声、无配乐：${storyboard.title}。${storyboard.description}`].filter(Boolean).join('\n\n'),
+          storyboardId: storyboard.id,
+          sfx: true,
+        }))]
       : [{ entityId: episode.id, prompt: contentPrompt ?? episode.title, ...(scriptVersionId ? { scriptVersionId } : {}) }]
 
   // 画面文字语言规则与调整要求都在风格层之后再拼（见下）：提示词尾部权重最高，
@@ -1114,6 +1133,8 @@ export async function triggerStage(
   const candidatesForKey = (key: string): RunTaskCandidate[] => {
     // 图像阶段的按需排序:带参考图的任务(首帧)编辑模型优先;纯文字出图(定妆照)
     // 纯文生图模型优先——编辑模型裸跑文字出图,质感明显弱于文生图模型(实测)。
+    // 音效任务的花费走 sfx 槽:与 tts_voice 是两笔钱、两家候选,不能混排。
+    if (stage === 'AUDIO' && targetsByKey.get(key)?.sfx) return sfxCandidates.map(toRunTaskCandidate)
     if (stage === 'IMAGE' || stage === 'ASSET') {
       const hasRefs = stage === 'ASSET' ? false : (targetsByKey.get(key)?.assetReferenceArtifactIds?.length ?? 0) > 0
       const ordered = [...candidates].sort((a, b) =>
@@ -1142,9 +1163,10 @@ export async function triggerStage(
         // Which shots the batch was planned against. `nextRunnableStage` reads this to
         // tell a stage that ran for the live shots from one that only covers superseded
         // ones; the clip of an individual shot comes from the task's own storyboardId.
-        // For AUDIO that set is exactly the shots with dialogue — a shot that gains
-        // its line later is not covered, which re-opens the stage on the next advance.
-        storyboards: { connect: voiced.map(storyboard => ({ id: storyboard.id })) },
+        // For AUDIO that set is the voiced shots plus whatever silent shots got an sfx
+        // task — a shot that gains its line later (or an sfx slot bound later) is not
+        // covered, which re-opens the stage on the next advance.
+        storyboards: { connect: [...new Set([...voiced, ...sfxShots])].map(storyboard => ({ id: storyboard.id })) },
         tasks: { create: promptedTargets.map((target, index) => taskRow(target, idempotencyKeys[index])) },
       },
       include: { tasks: true },

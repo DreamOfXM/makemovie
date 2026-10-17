@@ -128,7 +128,7 @@ describe('catalog', () => {
 
   it('mock catalog covers every modality', () => {
     const modalities = new Set(getCatalog('mock')!.models.map(m => m.modality))
-    expect(modalities).toEqual(new Set(['text', 'vlm', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music']))
+    expect(modalities).toEqual(new Set(['text', 'vlm', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'sfx']))
   })
 })
 

@@ -9,6 +9,7 @@ import { apiErrorMessage } from '@/lib/api-error'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Input } from '@/components/ui/input'
 
 interface AgentTokenRow {
@@ -108,8 +109,10 @@ export function AgentAccessCard() {
 
         {secret && (
           <div className="rounded-md border border-warning/50 bg-warning/5 p-3 text-sm">
-            <div className="font-medium">{t('models.agent.secretShown')}</div>
-            <div className="text-muted-foreground mt-1 text-xs">{t('models.agent.secretHint')}</div>
+            <div className="flex items-center gap-1 font-medium">
+              {t('models.agent.secretShown')}
+              <HelpHint text={t('models.agent.secretHint')} />
+            </div>
             <div className="mt-2 flex items-center gap-2">
               <code className="bg-muted flex-1 truncate rounded px-2 py-1 font-mono text-xs">{secret}</code>
               <Button variant="ghost" size="sm" onClick={() => copy(secret)}><CopyIcon /></Button>

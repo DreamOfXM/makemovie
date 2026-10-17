@@ -35,6 +35,52 @@ export async function syncBatchStatus(db: PrismaClient, batchId: string): Promis
 }
 
 /** Slots are lowercase in the domain vocabulary and an UPPERCASE enum in the schema. */
+
+export interface ArtifactShotContext {
+  storyboardId: string
+  episodeId: string
+  projectId: string
+}
+
+/**
+ * 统一归属解析(US-003 的先行最小版):一个 VIDEO 制品属于哪一镜。
+ * 两条合法来源——挂在成功任务下(生成),或是一条 SUCCEEDED ArtifactOperation 的
+ * 输出(延长等制品操作,归属记在操作行快照里)。「没有任务」本身不是归属证明,
+ * taskId 为空的制品必须命中成功的操作链才算数;两者都不满足返回 null,
+ * 消费方(compose 选版/钦定接口/再次延长)按无归属拒绝,不许各自放宽。
+ */
+export async function resolveVideoArtifactShot(
+  db: PrismaClient,
+  artifactId: string,
+  organizationId: string,
+): Promise<ArtifactShotContext | null> {
+  const artifact = await db.mediaArtifact.findFirst({
+    where: { id: artifactId, organizationId },
+    include: { task: { include: { batch: { include: { episode: { select: { id: true, projectId: true } } } } } } },
+  })
+  if (!artifact) return null
+  if (artifact.task?.storyboardId) {
+    return { storyboardId: artifact.task.storyboardId, episodeId: artifact.task.batch.episode.id, projectId: artifact.task.batch.episode.projectId }
+  }
+  const operation = await db.artifactOperation.findFirst({
+    where: { outputArtifactId: artifact.id, organizationId, status: 'SUCCEEDED' },
+  })
+  if (!operation) return null
+  let storyboardId: string | undefined
+  try {
+    storyboardId = (JSON.parse(operation.requestSnapshot) as { storyboardId?: string }).storyboardId
+  } catch {
+    return null
+  }
+  if (!storyboardId) return null
+  const storyboard = await db.storyboard.findUnique({
+    where: { id: storyboardId },
+    include: { episode: { include: { project: { select: { organizationId: true } } } } },
+  })
+  if (!storyboard || storyboard.episode.project.organizationId !== organizationId) return null
+  return { storyboardId, episodeId: storyboard.episodeId, projectId: storyboard.episode.projectId }
+}
+
 export function toDbSlot(slot: DomainCapabilitySlot): CapabilitySlot {
   return slot.toUpperCase() as CapabilitySlot
 }

@@ -181,6 +181,7 @@ const mock: ProviderCatalog = {
     { model: 'mock-i2v', displayName: 'Mock I2V', modality: 'i2v', acceptsFirstFrame: true },
     { model: 'mock-r2v', displayName: 'Mock R2V', modality: 'r2v', acceptsFirstFrame: true, acceptsReferenceImages: true, maxReferenceImages: 4 },
     { model: 'mock-tts', displayName: 'Mock TTS', modality: 'tts' },
+    { model: 'mock-sfx', displayName: 'Mock SFX', modality: 'sfx', acceptsFirstFrame: false, acceptsReferenceImages: false, maxReferenceImages: 0 },
     { model: 'mock-music', displayName: 'Mock Music', modality: 'music' },
   ],
 }

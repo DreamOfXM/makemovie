@@ -1100,6 +1100,7 @@ function argsFor(modality: string, seconds: number, outPath: string): string[] |
       ]
     case 'tts':
     case 'music':
+    case 'sfx':
       return ['-f', 'lavfi', '-i', `sine=frequency=440:duration=${seconds}`, outPath]
     default:
       return null
@@ -1116,6 +1117,7 @@ function metaFor(modality: string, seconds: number): SynthesizedMedia {
       return { mimeType: 'video/mp4', width: 320, height: 240, durationMs: seconds * 1000 }
     case 'tts':
     case 'music':
+    case 'sfx':
       return { mimeType: 'audio/wav', durationMs: seconds * 1000 }
     default:
       return { mimeType: 'text/plain' }

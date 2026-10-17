@@ -53,7 +53,7 @@ describe('provider connections', () => {
   it('creates a connection with catalog capabilities and encrypts the api key', async () => {
     const owner = await env.register('mc-conn@example.com', 'Conn Org')
     const connection = await createMockConnection(owner.token, 'mock-main')
-    expect(connection.capabilities.length).toBe(10)
+    expect(connection.capabilities.length).toBe(11)
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.encryptedSecret.startsWith('v1.')).toBe(true)
@@ -374,7 +374,7 @@ describe('models entered by hand', () => {
   it('accepts a named model, refuses to repeat one, and rejects a modality we do not speak', async () => {
     const owner = await env.register('mc-add@example.com', 'Add Model Org')
     const connection = await createMockConnection(owner.token, 'add-main')
-    expect(connection.capabilities).toHaveLength(10)
+    expect(connection.capabilities).toHaveLength(11)
 
     const added = await addModel(owner.token, connection.id, { model: '  qwen2.5-72b-instruct  ', modality: 'text', displayName: 'Lab Qwen' })
     expect(added.statusCode).toBe(201)
@@ -439,7 +439,7 @@ describe('models entered by hand', () => {
     const honest = await addModel(owner.token, connection.id, { model: 'claim-r2v', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
     expect(honest.statusCode).toBe(201)
     expect(honest.json()).toMatchObject({ modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
-    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(11)
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(12)
   })
 
   it('blocks deleting a row a slot still points at, then lets it go', async () => {
@@ -474,7 +474,7 @@ describe('models entered by hand', () => {
     expect((await env.app.inject({ method: 'POST', url: `/api/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(b.token) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'DELETE', url: `/api/providers/capabilities/${capabilityId}`, headers: authHeaders(b.token) })).statusCode).toBe(404)
     expect((await addModel(a.token, 'does-not-exist', { model: 'mock-x', modality: 'text' })).statusCode).toBe(404)
-    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(10)
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(11)
   })
 })
 

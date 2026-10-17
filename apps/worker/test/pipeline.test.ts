@@ -19,6 +19,7 @@ import { composeEpisode } from '../src/compose.js'
 import { recordGeneratedContent } from '../src/content.js'
 import type { QcSubject, QualityChecker } from '../src/qc.js'
 import { pinBilledParameters, runTask } from '../src/run-task.js'
+import { runArtifactOperation } from '../src/run-artifact-operation.js'
 import { ModelQualityChecker } from '../src/visual-audit.js'
 import { MASTER_KEY, startTestEnv, type Seed, type WorkerTestEnv } from './env.js'
 
@@ -1735,6 +1736,53 @@ describe('usable first frames', () => {
   })
 })
 
+describe('sfx (the silent half of AUDIO)', () => {
+  it('plans one sfx task per dialogue-free shot, billed against the sfx slot', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    const [voicedShot, silentShot] = seed.storyboardIds as [string, string]
+    await env.db.storyboard.update({ where: { id: voicedShot }, data: { dialogue: '借过。', speaker: '路人' } })
+    await approveScript(seed)
+    const tts = await bindVideoSlot(seed, 'TTS_VOICE', 'mock-tts')
+    const sfx = await bindVideoSlot(seed, 'SFX', 'mock-sfx')
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'AUDIO')
+    if (!result.ok) throw new Error(`AUDIO refused: ${result.error}`)
+    const tasks = await env.db.generationTask.findMany({ where: { batchId: result.batchId } })
+    // 台词镜只排配音,无台词镜只排音效——两侧互不越界。
+    expect(tasks).toHaveLength(2)
+    const voiceTask = tasks.find(task => task.storyboardId === voicedShot)!
+    const sfxTask = tasks.find(task => task.storyboardId === silentShot)!
+    expect(JSON.parse(voiceTask.requestSnapshot!).input.prompt).toContain('借过')
+    expect(JSON.parse(sfxTask.requestSnapshot!).input.prompt).toContain('环境/动作音效')
+
+    const payloads = await env.takeWaitingRunTasks()
+    const voicePayload = payloads.find(payload => payload.taskId === voiceTask.id)!
+    const sfxPayload = payloads.find(payload => payload.taskId === sfxTask.id)!
+    expect(voicePayload.candidates).toEqual([tts])
+    expect(sfxPayload.candidates).toEqual([sfx])
+
+    await runTask(sfxPayload, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const artifact = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: sfxTask.id } })
+    expect(artifact.mimeType).toBe('audio/wav')
+    expect((await env.db.generationTask.findUniqueOrThrow({ where: { id: sfxTask.id } })).status).toBe('SUCCEEDED')
+  })
+
+  it('keeps a fully silent episode plannable once the sfx slot is bound', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'TTS_VOICE', 'mock-tts')
+    // 未绑 sfx 时:全静音集维持旧口径,400。
+    const refused = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'AUDIO')
+    expect(refused.ok).toBe(false)
+    expect((refused as { error: string }).error).toContain('no shots with dialogue')
+    // 绑上 sfx:同样的集子可以排了——音效就是它的声音。
+    await bindVideoSlot(seed, 'SFX', 'mock-sfx')
+    const ok = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'AUDIO')
+    expect(ok.ok).toBe(true)
+    expect(await env.db.generationTask.count({ where: { batchId: (ok as { batchId: string }).batchId } })).toBe(1)
+  })
+})
+
 describe('first-frame conditioning', () => {
   it('plans a video task exactly as it did before any conditioning model was bound', async () => {
     const seed = await env.seed()
@@ -2209,7 +2257,7 @@ async function bindVideoSlot(seed: Seed, slot: CapabilitySlot, model: string, sp
       capabilities: {
         create: [{
           model,
-          modality: slot === 'VIDEO_I2V' ? 'i2v' : slot === 'VIDEO_R2V' ? 'r2v' : 't2v',
+          modality: ({ VIDEO_I2V: 'i2v', VIDEO_R2V: 'r2v', TTS_VOICE: 'tts', SFX: 'sfx' } as Record<string, string>)[slot] ?? 't2v',
           acceptsFirstFrame: slot === 'VIDEO_I2V',
           acceptsReferenceImages: slot === 'VIDEO_R2V',
           maxReferenceImages: slot === 'VIDEO_R2V' ? 4 : 0,
@@ -2345,5 +2393,99 @@ describe('billed parameters', () => {
     expect(call?.[1].parameters).toEqual(billed)
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(JSON.parse(succeeded.responseSnapshot!).parameters).toEqual(billed)
+  })
+})
+
+
+describe('video extend (artifact operation)', () => {
+  it('extends the shot\u2019s clip and pins the longer cut as the master selection', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    const candidate = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot })
+
+    const operation = await env.db.artifactOperation.create({
+      data: {
+        organizationId: seed.organizationId,
+        kind: 'video_extend',
+        sourceArtifactId: clip.artifactId,
+        connectionId: candidate.connectionId,
+        capabilityId: candidate.capabilityId,
+        provider: candidate.provider,
+        model: candidate.model,
+        requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜' }, parameters: { durationMs: 5000 }, sourceArtifactId: clip.artifactId, storyboardId: shot }),
+      },
+    })
+    await runArtifactOperation(
+      { kind: 'run-artifact-operation', operationId: operation.id, organizationId: seed.organizationId, attempt: 1, candidate },
+      env.deps({ pollIntervalMs: 10 }),
+    )
+
+    const done = await env.db.artifactOperation.findUniqueOrThrow({ where: { id: operation.id } })
+    expect(done.status).toBe('SUCCEEDED')
+    expect(done.outputArtifactId).toBeTruthy()
+    const output = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: done.outputArtifactId! } })
+    expect(output.mimeType).toBe('video/mp4')
+    expect(output.stage).toBe('VIDEO')
+    // 延长即采用:加长版直接落钦定,否则自动选版(只看任务制品)永远看不见它。
+    const storyboard = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot } })
+    expect(storyboard.selectedVideoArtifactId).toBe(output.id)
+
+    // 钦定必须真正被合成消费:曾出现"钦定字段写了、compose 解析不到(操作产物
+    // 无任务),静默回退取最新任务产物"——加长片永远进不了母带。断言入片的那一
+    // 版就是延长输出,且来源是 manual。
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: [shot] }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+    const composed = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(composed.status).toBe('COMPLETED')
+    const selections = (JSON.parse(composed.manifest) as { selections: Record<string, { artifactId: string; source: string }> }).selections
+    expect(selections[shot]).toEqual({ artifactId: output.id, source: 'manual' })
+
+    // 链式延长:加长版本身没有任务,统一归属解析器经成功操作链认它——再次延长
+    // 必须走通,否则延长产物是一次性死胡同。
+    const chain = await env.db.artifactOperation.create({
+      data: {
+        organizationId: seed.organizationId,
+        kind: 'video_extend',
+        sourceArtifactId: output.id,
+        connectionId: candidate.connectionId,
+        capabilityId: candidate.capabilityId,
+        provider: candidate.provider,
+        model: candidate.model,
+        requestSnapshot: JSON.stringify({ input: { prompt: '再延长' }, parameters: { durationMs: 3000 }, sourceArtifactId: output.id, storyboardId: shot }),
+      },
+    })
+    await runArtifactOperation(
+      { kind: 'run-artifact-operation', operationId: chain.id, organizationId: seed.organizationId, attempt: 1, candidate },
+      env.deps({ pollIntervalMs: 10 }),
+    )
+    const chained = await env.db.artifactOperation.findUniqueOrThrow({ where: { id: chain.id } })
+    expect(chained.status).toBe('SUCCEEDED')
+    expect((await env.db.storyboard.findUniqueOrThrow({ where: { id: shot } })).selectedVideoArtifactId).toBe(chained.outputArtifactId)
+  })
+
+  it('refuses a pinned artifact whose ownership cannot be proven (no task, no succeeded operation)', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot })
+    // 一个凭空的无任务制品被塞进钦定位:不是任务产物、也不在任何成功操作链上,
+    // 合成必须拒绝它并回退自动选版——「没有任务」不是归属证明。
+    const orphan = await env.db.mediaArtifact.create({
+      data: { organizationId: seed.organizationId, stage: 'VIDEO', objectKey: `${seed.organizationId}/orphan.mp4`, checksum: 'orphan', mimeType: 'video/mp4', version: 1 },
+    })
+    await env.db.storyboard.update({ where: { id: shot }, data: { selectedVideoArtifactId: orphan.id } })
+
+    const composition = await env.db.composition.create({
+      data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: [shot] }) },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+    const composed = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    const selections = (JSON.parse(composed.manifest) as { selections: Record<string, { artifactId: string; source: string }> }).selections
+    expect(selections[shot].source).toBe('auto')
+    expect(selections[shot].artifactId).toBe(clip.artifactId)
   })
 })

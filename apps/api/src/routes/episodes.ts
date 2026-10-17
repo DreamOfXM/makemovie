@@ -2,7 +2,7 @@ import { basename, extname, join } from 'node:path'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { AudioSource, Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
+import { resolveVideoArtifactShot, AudioSource, Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
 import { can, canTransition, durationOutOfRange, formatDefaults, formatDurationRange, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
 import { buildObjectKey, probeDuration } from '@studio/media'
 import { recordAudit } from '../lib/audit.js'
@@ -628,10 +628,11 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
       const { artifactId } = request.body
       if (artifactId !== null) {
-        const artifact = await app.db.mediaArtifact.findFirst({
-          where: { id: artifactId, organizationId: auth.organizationId, stage: 'VIDEO', task: { status: 'SUCCEEDED', stage: 'VIDEO', storyboardId: storyboard.id } },
-          select: { id: true },
-        })
+        // 钦定的信任条件:本镜成功任务的产物,或经统一归属解析器验证过操作链的
+        // 延长产物——人可以重新钦定加长版,也可以从加长版换回任务产物。
+        const artifact = (await resolveVideoArtifactShot(app.db, artifactId, auth.organizationId))?.storyboardId === storyboard.id
+          ? await app.db.mediaArtifact.findFirst({ where: { id: artifactId, organizationId: auth.organizationId, stage: 'VIDEO' }, select: { id: true } })
+          : null
         if (!artifact) return reply.code(400).send({ error: 'artifact is not a succeeded video of this shot' })
       }
       const updated = await app.db.storyboard.update({
