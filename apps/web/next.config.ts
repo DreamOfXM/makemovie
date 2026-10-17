@@ -7,6 +7,15 @@ const apiOrigin = process.env.API_ORIGIN ?? 'http://localhost:4010'
 const nextConfig: NextConfig = {
   transpilePackages: ['@studio/domain'],
 
+  // @studio/domain 是 type:module 的工作区包，内部相对导入按 NodeNext 拼写
+  // （'./readiness.js' 实指 readiness.ts）。tsx/vitest 认这种拼写，webpack 不认
+  // ——拆包后（15915f6）web 一启动就 500。extensionAlias 是 webpack 5 对这个
+  // 「TS 源码 + .js 拼写」问题的官方开关：.js 请求依次尝试 .ts/.tsx/.js。
+  webpack(config) {
+    config.resolve.extensionAlias = { '.js': ['.ts', '.tsx', '.js'] }
+    return config
+  },
+
   // 镜像里只跑 standalone server.js，体积与依赖面以它为准。
   output: 'standalone',
 
@@ -36,6 +45,11 @@ const nextConfig: NextConfig = {
       {
         source: '/api/:path*',
         destination: `${apiOrigin}/api/:path*`,
+      },
+      // MCP 端点(agent 接入):与 /api 同源反代,Claude Code/Cursor 只填一个 URL。
+      {
+        source: '/mcp',
+        destination: `${apiOrigin}/mcp`,
       },
       // Rewrite /auth/* to backend /auth/*
       {
