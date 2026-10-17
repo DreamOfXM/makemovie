@@ -244,6 +244,7 @@ model Organization {
   catalogHidden       CatalogHidden[]
   agentTokens        AgentToken[]
   artifactOperations ArtifactOperation[]
+  storyDrafts        StoryDraft[]
   members            OrganizationMember[]
   projects           Project[]
   providerConnections ProviderConnection[]
@@ -300,6 +301,29 @@ model OrganizationMember {
   user           User         @relation("Memberships", fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([organizationId, userId])
+}
+
+// US-006 故事建项草稿:用户在新建作品页输入的故事/文档与选择(配方/画幅/风格)。
+// 保存不调用模型;建项消费草稿后回填 projectId——草稿从此只读,是那次建项的输入凭证。
+model StoryDraft {
+  id             String    @id @default(cuid())
+  organizationId String
+  /// 建项人;agent 令牌建项时为 null,与 AuthContext 对齐。
+  userId         String?
+  title          String?
+  storyText      String
+  recipeKey      String?
+  recipeVersion  Int?
+  styleId        String?
+  contentLocale  String?
+  targetDurationMs Int?
+  /// 建项后回填;null = 还没消费。已消费的草稿不可再用于建项(幂等由消费侧保证)。
+  consumedProjectId String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
 }
 
 // US-005 版本化制作配方:key+version 唯一且不可变。spec 承载画幅/时长范围/剧本分镜
