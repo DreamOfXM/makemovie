@@ -226,12 +226,18 @@ async function runCandidate(
   if (frame?.conditioned && capability.modality === 't2v') {
     return { status: 'next', error: `${label(candidate)}: skipped — the task carries an approved first frame, which a text-to-video model cannot honor (bind or fund an image-to-video model)` }
   }
+  // r2v 的硬前提是 ≥1 张定妆照参考图(adapter 会直接拒);计划层已按镜头筛过,
+  // 这里是同一条规则在执行侧的兜底——比如人工把无绑定素材的镜头塞进了重试。
+  if (capability.modality === 'r2v' && readFrameReferences(task.requestSnapshot, 'reference_image').length === 0) {
+    return { status: 'next', error: `${label(candidate)}: skipped — reference-to-video needs the shot's approved asset sheets; this shot has none` }
+  }
   // 定妆照参考图:首帧任务带上镜头绑定素材的已定稿图,让支持参考图的图像模型
-  // (qwen-image-edit 一类)画出同一批人。绑定的模型不吃参考图时不拦任务——
+  // (qwen-image-edit 一类)画出同一批人;视频侧 r2v/i2v 同吃这批图——主体一致
+  // 的锚就是这批定妆照(可灵主体库同路)。绑定的模型不吃参考图时不拦任务——
   // 文字描述仍在提示词里,降级原因记进 responseSnapshot.reference 供排查。
-  if (capability.modality === 'image') {
+  if (capability.modality === 'image' || capability.modality === 'i2v' || capability.modality === 'r2v') {
     const sheets = await resolveAssetReferences(task, capability, capabilityRow.spec, deps, referenceLog)
-    if (sheets) request.input.media = sheets
+    if (sheets) request.input.media = [...(request.input.media ?? []), ...sheets]
   }
   const apiKey = decryptSecret(connection.encryptedSecret, deps.masterKey)
   const accessKey = connection.accessKeyEncrypted ? decryptSecret(connection.accessKeyEncrypted, deps.masterKey) : undefined
@@ -621,7 +627,7 @@ async function resolveFrame(
   // A text-to-video candidate has no slot for a frame and the adapter says so; reading the
   // bytes for it would spend storage traffic on an image nobody is going to look at.
   if (capability.modality !== 'i2v') return null
-  const references = readFrameReferences(task.requestSnapshot)
+  const references = readFrameReferences(task.requestSnapshot, 'first_frame')
   if (references.length === 0) return null
   const { artifactId } = references[0]
 
@@ -670,10 +676,10 @@ async function resolveAssetReferences(
   deps: PipelineDeps,
   referenceLog: ReferenceRecord[],
 ): Promise<MediaReference[] | null> {
-  const references = readFrameReferences(task.requestSnapshot)
+  const references = readFrameReferences(task.requestSnapshot, 'reference_image')
   if (references.length === 0) return null
   if (!capability.acceptsReferenceImages) {
-    referenceLog.push({ model: capability.model, conditioned: false, reason: `model "${capability.model}" does not take reference images; this frame fell back to text-to-image without the approved asset sheets` })
+    referenceLog.push({ model: capability.model, conditioned: false, reason: `model "${capability.model}" does not take reference images; the generation ran without the approved asset sheets` })
     return null
   }
   const media: MediaReference[] = []
@@ -708,8 +714,10 @@ async function resolveAssetReferences(
   return media
 }
 
-/** The frame/sheet references this task was planned with, as the pipeline wrote them. */
-function readFrameReferences(snapshot: string | null): { artifactId: string }[] {
+/** The frame/sheet references this task was planned with, as the pipeline wrote them.
+ *  快照里 first_frame 与 reference_image 是同一数组的两种类型,取的时候必须按用途
+ *  过滤——不过滤时首帧解析会拿到别人的定妆照,参考图解析会把首帧当定妆照送出。 */
+function readFrameReferences(snapshot: string | null, type?: 'first_frame' | 'reference_image'): { artifactId: string }[] {
   if (!snapshot) return []
   const parsed: unknown = JSON.parse(snapshot)
   if (!isRecord(parsed) || !Array.isArray(parsed.referenceArtifacts)) return []
@@ -720,6 +728,7 @@ function readFrameReferences(snapshot: string | null): { artifactId: string }[] 
     if (!isRecord(entry) || (entry.type !== 'first_frame' && entry.type !== 'reference_image') || typeof entry.artifactId !== 'string') {
       throw new Error(`requestSnapshot carries a reference this worker cannot resolve: ${JSON.stringify(entry)}`)
     }
+    if (type && entry.type !== type) continue
     references.push({ artifactId: entry.artifactId })
   }
   return references

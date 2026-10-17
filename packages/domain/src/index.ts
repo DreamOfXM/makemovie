@@ -159,10 +159,12 @@ export const slotStageUsage: Record<CapabilitySlot, SlotStageUsage> = {
   // frame — the one no review sent back — conditions its clip. With nothing bound the stage
   // runs on `video_t2v` alone, exactly as it did before conditioning existed.
   video_i2v: { stages: ['VIDEO'], qcOnly: false, required: false },
-  // Unwired because of our own upstream data, not the contract: the reference type exists
-  // and binds, but the pipeline attributes no asset to a shot, so the only
-  // `StoryboardAsset` rows that exist are the ones a human routed by hand.
-  video_r2v: { stages: [], qcOnly: false, required: false },
+  // VIDEO's identity half: a shot's bound, approved asset sheets travel to the model as
+  // reference images, so a character's face follows its character board across cuts. The
+  // old blocker (pipeline attributed no asset to a shot) is gone — breakdown regeneration
+  // auto-binds StoryboardAsset rows and a human can route them by hand. Shots without
+  // bound sheets simply never pick an r2v model; planVideoModels drops it.
+  video_r2v: { stages: ['VIDEO'], qcOnly: false, required: false },
   tts_voice: { stages: ['AUDIO'], qcOnly: false, required: false },
   music_gen: { stages: ['MUSIC'], qcOnly: false, required: false },
   visual_audit: { stages: [], qcOnly: true, required: false },
@@ -288,12 +290,18 @@ export interface GenerationPlan<T extends VideoModelCandidate = VideoModelCandid
  * use it and keeps text-to-video behind them, so a conditioning model that is down still
  * yields a picture — a lesser one, but the shot is not lost over a quality gain.
  */
-export function planVideoModels<T extends VideoModelCandidate>(candidates: T[], hasReferenceInput: boolean): GenerationPlan<T> {
-  // i2v is the only conditioning slot the pipeline resolves today; a frame cannot be
-  // spent on a model that would refuse it.
-  const referenceCapable = (candidate: T): boolean => candidate.modality === 'i2v'
-  const allowed = (candidate: T): boolean => hasReferenceInput || candidate.modality === 't2v'
-  const ordered = hasReferenceInput ? [...candidates].sort((a, b) => Number(referenceCapable(b)) - Number(referenceCapable(a))) : candidates
+export function planVideoModels<T extends VideoModelCandidate>(candidates: T[], hasReferenceInput: boolean, hasAssetReferences = false): GenerationPlan<T> {
+  // i2v 花的是这一镜的首帧，r2v 花的是绑定素材的定妆照：缺各自输入的模态不进计划
+  // ——到供应商那儿也是被拒，白烧一次尝试。两个输入都在时 r2v 排前：多张定妆照锁
+  // 的主体一致性比单帧构图更强（可灵主体库/O1 同路），t2v 永远垫底兜底。
+  const conditioningRank = (candidate: T): number =>
+    candidate.modality === 'r2v' && hasAssetReferences ? 2 : candidate.modality === 'i2v' && hasReferenceInput ? 1 : 0
+  const allowed = (candidate: T): boolean => {
+    if (candidate.modality === 'i2v') return hasReferenceInput
+    if (candidate.modality === 'r2v') return hasAssetReferences
+    return true
+  }
+  const ordered = [...candidates].sort((a, b) => conditioningRank(b) - conditioningRank(a))
   const seen = new Set<string>()
   const picked = ordered.filter(candidate => {
     if (!allowed(candidate) || seen.has(candidate.model)) return false

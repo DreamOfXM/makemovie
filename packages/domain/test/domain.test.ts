@@ -53,6 +53,24 @@ describe('planVideoModels', () => {
     expect(plan.candidates.map(c => c.model)).toEqual(['t2v-model'])
   })
 
+  it('puts r2v first when asset sheets are present, frame or not', () => {
+    const t2v = capability({ model: 't2v-model', modality: 't2v' })
+    const i2v = capability({ model: 'i2v-model', modality: 'i2v', acceptsFirstFrame: true })
+    const r2v = capability({ model: 'r2v-model', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 4 })
+    // 定妆照在、首帧也在：r2v 排最前，i2v 次之，t2v 垫底。
+    expect(planVideoModels([t2v, i2v, r2v], true, true).candidates.map(c => c.model)).toEqual(['r2v-model', 'i2v-model', 't2v-model'])
+    // 只有定妆照、没有首帧：i2v 没有可花的输入不进计划，r2v 领跑，t2v 兜底。
+    expect(planVideoModels([t2v, i2v, r2v], false, true).candidates.map(c => c.model)).toEqual(['r2v-model', 't2v-model'])
+  })
+
+  it('drops r2v when the shot carries no asset sheets', () => {
+    const t2v = capability({ model: 't2v-model', modality: 't2v' })
+    const i2v = capability({ model: 'i2v-model', modality: 'i2v', acceptsFirstFrame: true })
+    const r2v = capability({ model: 'r2v-model', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 4 })
+    // 参考图给视频模型的硬前提（adapter 会拒无参考图的 r2v），计划层就把它挡下。
+    expect(planVideoModels([r2v, i2v, t2v], true, false).candidates.map(c => c.model)).toEqual(['i2v-model', 't2v-model'])
+  })
+
   it('allows t2v only for tasks without reference input', () => {
     const t2v = capability({ model: 't2v-model', modality: 't2v' })
     const plan = planVideoModels([t2v], false)

@@ -786,7 +786,17 @@ export async function triggerStage(
           .filter(link => link.asset.kind === 'character' && link.asset.status === 'APPROVED')
           .map(link => ({ name: link.asset.name, description: link.asset.description, mentioned: mentioned(link.asset.name) })),
       })
-      if (stage !== 'IMAGE') continue
+      if (stage !== 'IMAGE') {
+        // VIDEO(r2v)的参考图与首帧阶段同一过滤口径:只送画面文本点名的角色+场景
+        // (台词里说话的是画外音,送定妆照反而把不入场的人画进画面),顺序
+        // 角色→场景→道具,上限 3——与 IMAGE 的 referenced 同一条规则。
+        const referenced = shotLinks
+          .filter(link => link.asset.versions[0]?.artifactId)
+          .filter(link => link.asset.kind === 'scene' || mentioned(link.asset.name))
+          .slice(0, 3)
+        if (referenced.length > 0) assetReferences.set(storyboard.id, referenced.map(link => link.asset.versions[0]!.artifactId!))
+        continue
+      }
       let referenced = shotLinks
         .filter(link => link.asset.versions[0]?.artifactId)
         .filter(link => link.asset.kind === 'scene' || mentioned(link.asset.name))
@@ -868,6 +878,12 @@ export async function triggerStage(
   const conditioning = stage === 'VIDEO'
     ? await resolveSlotCandidates(db, organizationId, episode.projectId, 'video_i2v')
     : []
+  // VIDEO's identity half: with a video_r2v bound, a shot's approved asset sheets travel
+  // to the model as reference images — the character-board anchor the IMAGE stage already
+  // uses, now spent on the clip itself. Unbound installations never see it.
+  const referenceModeling = stage === 'VIDEO'
+    ? await resolveSlotCandidates(db, organizationId, episode.projectId, 'video_r2v')
+    : []
 
   // A voice task exists only to speak a line; voicing a silent shot would buy
   // audio of nothing, and composition never waits for it. AUDIO still connects
@@ -918,7 +934,7 @@ export async function triggerStage(
                 stage === 'IMAGE' && assetContexts.has(storyboard.id) ? `画面中出现的素材：\n${assetContexts.get(storyboard.id)}` : null,
               ].filter(Boolean).join('\n\n'),
           storyboardId: storyboard.id,
-          ...(stage === 'IMAGE' && assetReferences.has(storyboard.id) ? { assetReferenceArtifactIds: assetReferences.get(storyboard.id) } : {}),
+          ...((stage === 'IMAGE' || stage === 'VIDEO') && assetReferences.has(storyboard.id) ? { assetReferenceArtifactIds: assetReferences.get(storyboard.id) } : {}),
           // 场景主帧未就绪的镜不排队不烧钱，重试路径在首镜落位后复活它。
           ...(blockedByMaster.has(storyboard.id) ? { blockedReason: blockedByMaster.get(storyboard.id)! } : {}),
         }))
@@ -988,6 +1004,8 @@ export async function triggerStage(
 
   // A frame is only looked up when a model was bound that can take it: resolving one for a
   // request that would have to drop it spends a query to produce a number nobody reads.
+  // r2v 不吃首帧(能力行不向 worker 携带 acceptsFirstFrame),帧只为 i2v 解析——
+  // r2v 的主体锚是定妆照,与首帧同源(首帧本就是按定妆照生成的)。
   const frames = conditioning.length > 0
     ? await usableFirstFrames(db, organizationId, episode.id, promptedTargets.flatMap(target => target.storyboardId ? [target.storyboardId] : []))
     : new Map<string, string>()
@@ -1001,7 +1019,13 @@ export async function triggerStage(
   // 所以这里直接拦下并点名镜头，让人先补帧；只有从未绑定 video_i2v 的安装才保留纯文生视频路径。
   // 逐镜触发时 selected 只含那一镜，检查也就只针对它。
   if (stage === 'VIDEO' && conditioning.length > 0) {
-    const missing = selected.filter(storyboard => !frames.get(storyboard.id)).map(storyboard => `#${storyboard.number}`)
+    // 缺帧镜头若绑定 r2v 且带定妆照参考,不因缺帧拦下——定妆照就是它的主体锚,
+    // 拦了等于逼人先补帧再走一条不需要帧的路。其余缺帧照旧拦,理由不变:
+    // 静默退回文生视频会把额度烧在角色长相不锁定的片段上。
+    const missing = selected
+      .filter(storyboard => !frames.get(storyboard.id))
+      .filter(storyboard => !(referenceModeling.length > 0 && (assetReferences.get(storyboard.id)?.length ?? 0) > 0))
+      .map(storyboard => `#${storyboard.number}`)
     if (missing.length > 0) return { ok: false, code: 409, error: 'generations:videoMissingFrames', reasons: missing }
     // 首帧正在重新生成的镜头同样拦下:此刻放行,视频会按旧画面(或无画面)生成,
     // 新首帧落位后图文不符——又是一次白烧的额度。
@@ -1049,6 +1073,17 @@ export async function triggerStage(
     const blocked = list.filter(target => target.blockedReason).length
     return findings + blocked > 0 ? { guardFindings: findings, guardsBlocked: blocked } : {}
   }
+  // A reference is an id, not bytes: an approved 1080P frame encoded inline is
+  // megabytes, and the artifact row already carries its checksum and mime type.
+  // 首帧与定妆照是同一数组里的两种类型,必须合并而不是各自展开——两个分支都写
+  // referenceArtifacts 键,后写的会把先写的整个覆盖掉(带帧又带参考图的任务会丢帧)。
+  const referenceField = (target: GenerationTarget) => {
+    const references = [
+      ...(target.referenceArtifactId ? [{ type: 'first_frame', artifactId: target.referenceArtifactId }] : []),
+      ...(target.assetReferenceArtifactIds ?? []).map(artifactId => ({ type: 'reference_image', artifactId })),
+    ]
+    return references.length > 0 ? { referenceArtifacts: references } : {}
+  }
   const taskRow = (target: GenerationTarget, key: string) => ({
     organizationId,
     stage: dbStage,
@@ -1070,7 +1105,7 @@ export async function triggerStage(
     // A reference is an id, not bytes: an approved 1080P frame encoded inline is
     // megabytes, and the artifact row already carries its checksum and mime type.
     // The key is written last so a task without one serialises exactly as before.
-    requestSnapshot: JSON.stringify({ input: { prompt: target.prompt, ...localeField }, ...parametersField(key), ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}), ...(target.referenceArtifactId ? { referenceArtifacts: [{ type: 'first_frame', artifactId: target.referenceArtifactId }] } : {}), ...(target.assetReferenceArtifactIds?.length ? { referenceArtifacts: target.assetReferenceArtifactIds.map(id => ({ type: 'reference_image', artifactId: id })) } : {}), ...(target.guardFindings?.length ? { promptGuards: target.guardFindings } : {}) }),
+    requestSnapshot: JSON.stringify({ input: { prompt: target.prompt, ...localeField }, ...parametersField(key), ...(target.assetId ? { assetId: target.assetId } : {}), ...(target.scriptVersionId ? { scriptVersionId: target.scriptVersionId } : {}), ...referenceField(target), ...(target.guardFindings?.length ? { promptGuards: target.guardFindings } : {}) }),
   })
   // The candidates one task should try, in order. A shot holding its own frame tries the
   // conditioning model first and keeps text-to-video behind it; everyone else shares the
@@ -1088,9 +1123,13 @@ export async function triggerStage(
       )
       return ordered.map(toRunTaskCandidate)
     }
-    if (conditioning.length === 0) return candidates.map(toRunTaskCandidate)
+    if (conditioning.length === 0 && referenceModeling.length === 0) return candidates.map(toRunTaskCandidate)
     const target = promptedTargets.find((_, index) => idempotencyKeys[index] === key)
-    const plan = planVideoModels([...conditioning, ...candidates], target?.referenceArtifactId !== undefined)
+    const plan = planVideoModels(
+      [...conditioning, ...referenceModeling, ...candidates],
+      target?.referenceArtifactId !== undefined,
+      (target?.assetReferenceArtifactIds?.length ?? 0) > 0,
+    )
     return plan.candidates.map(toRunTaskCandidate)
   }
   try {

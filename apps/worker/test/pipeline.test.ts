@@ -1869,6 +1869,71 @@ describe('first-frame conditioning', () => {
     expect(audited[0]!.referenceDataUrl).toBe(wireUrl)
   })
 
+  it('routes a shot with approved sheets to the r2v model even without a frame (gate relaxed)', async () => {
+    // video_r2v 接线：定妆照直达视频模型（可灵主体库同路）。缺帧镜头绑了 r2v 且带
+    // 定妆照时不再被缺帧闸门拦下——定妆照就是它的主体锚。
+    const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '关师傅', description: '纸扎铺老师傅' } })
+    await approveScript(seed)
+    const t2v = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v')
+    const r2v = await bindVideoSlot(seed, 'VIDEO_R2V', 'mock-r2v')
+    const [shot] = seed.storyboardIds as [string]
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: 'a rainy night market, 关师傅 stands at the door' } })
+    const asset = await env.db.asset.findFirstOrThrow({ where: { episodeId: seed.episodeId } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: asset.id, role: 'character' } })
+    const sheet = await env.attachSucceededMedia(seed, { stage: 'ASSET', modality: 'image' })
+    await env.db.assetVersion.create({ data: { assetId: asset.id, version: 1, description: '角色板', status: 'APPROVED', artifactId: sheet.artifactId } })
+    await env.db.asset.update({ where: { id: asset.id }, data: { status: 'APPROVED' } })
+
+    // i2v 已绑而这一镜没有首帧：旧闸门会 409；现在 r2v+定妆照在，放行。
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    expect(JSON.parse(task.requestSnapshot!)).toMatchObject({
+      referenceArtifacts: [{ type: 'reference_image', artifactId: sheet.artifactId }],
+    })
+    const [payload] = await env.takeWaitingRunTasks()
+    // 无帧的 i2v 不进计划，r2v 领跑，t2v 垫底。
+    expect(payload!.candidates).toEqual([r2v, t2v])
+
+    const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+    await runTask(payload!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const calls = submitted.mock.calls.filter(([capability]) => capability.modality === 'r2v')
+    expect(calls).toHaveLength(1)
+    expect((calls[0]![1].input.media as { type: string }[]).map(media => media.type)).toEqual(['reference_image'])
+    const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(succeeded.status).toBe('SUCCEEDED')
+    expect(succeeded.model).toBe('mock-r2v')
+  })
+
+  it('keeps frame and sheets side by side in one snapshot (the merge bug), r2v first', async () => {
+    // 首帧与定妆照同镜共存:两个分支各写各的 referenceArtifacts 键时,后写的会覆盖
+    // 先写的——带帧又带参考图的任务丢数据。合并写入后两种类型并存,r2v 排最前。
+    const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '关师傅', description: '纸扎铺老师傅' } })
+    await approveScript(seed)
+    const t2v = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const i2v = await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v')
+    const r2v = await bindVideoSlot(seed, 'VIDEO_R2V', 'mock-r2v')
+    const [shot] = seed.storyboardIds as [string]
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: 'a rainy night market, 关师傅 stands at the door' } })
+    const asset = await env.db.asset.findFirstOrThrow({ where: { episodeId: seed.episodeId } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: asset.id, role: 'character' } })
+    const sheet = await env.attachSucceededMedia(seed, { stage: 'ASSET', modality: 'image' })
+    await env.db.assetVersion.create({ data: { assetId: asset.id, version: 1, description: '角色板', status: 'APPROVED', artifactId: sheet.artifactId } })
+    await env.db.asset.update({ where: { id: asset.id }, data: { status: 'APPROVED' } })
+    const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot })
+
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    expect(JSON.parse(task.requestSnapshot!)).toMatchObject({
+      referenceArtifacts: [
+        { type: 'first_frame', artifactId: frame.artifactId },
+        { type: 'reference_image', artifactId: sheet.artifactId },
+      ],
+    })
+    const [payload] = await env.takeWaitingRunTasks()
+    expect(payload!.candidates).toEqual([r2v, i2v, t2v])
+  })
+
   it('cuts each clip on the newest frame a review left alone, falling back within the same shot', async () => {
     const seed = await env.seed({ storyboards: 2 })
     const [refused, onlyFrame] = seed.storyboardIds as [string, string]
@@ -2144,8 +2209,10 @@ async function bindVideoSlot(seed: Seed, slot: CapabilitySlot, model: string, sp
       capabilities: {
         create: [{
           model,
-          modality: slot === 'VIDEO_I2V' ? 'i2v' : 't2v',
+          modality: slot === 'VIDEO_I2V' ? 'i2v' : slot === 'VIDEO_R2V' ? 'r2v' : 't2v',
           acceptsFirstFrame: slot === 'VIDEO_I2V',
+          acceptsReferenceImages: slot === 'VIDEO_R2V',
+          maxReferenceImages: slot === 'VIDEO_R2V' ? 4 : 0,
           entitlementVerifiedAt: new Date(),
           ...(spec ? { spec } : {}),
         }],
