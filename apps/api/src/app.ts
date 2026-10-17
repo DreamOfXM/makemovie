@@ -25,6 +25,7 @@ import { agentTokenRoutes } from './routes/agent-tokens.js'
 import { mcpRoutes } from './routes/mcp.js'
 import { recipeRoutes } from './routes/recipes.js'
 import { storyDraftRoutes } from './routes/story-drafts.js'
+import { creationReadinessRoutes } from './routes/creation-readiness.js'
 import { pipelineRoutes } from './routes/pipelines.js'
 import { assetRoutes } from './routes/assets.js'
 import { deliveryRoutes } from './routes/deliveries.js'
@@ -94,6 +95,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // 与 next 的反代规则一一对应。
   await app.register(recipeRoutes, { prefix: '/api' })
   await app.register(storyDraftRoutes, { prefix: '/api' })
+  await app.register(creationReadinessRoutes, { prefix: '/api' })
   await app.register(mcpRoutes)
 
   app.addHook('onClose', async () => {
