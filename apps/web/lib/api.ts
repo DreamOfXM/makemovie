@@ -905,3 +905,39 @@ export async function fetchCreationReadiness(token: string | null, projectId: st
 export async function autoBindProject(token: string | null, projectId: string): Promise<{ created: string[]; skipped: string[]; unfulfilled: string[] }> {
   return request<{ created: string[]; skipped: string[]; unfulfilled: string[] }>(`/projects/${projectId}/auto-bind`, { token, method: 'POST' })
 }
+
+export interface ShotControls {
+  framing: string | null
+  cameraAngle: string | null
+  cameraMovement: string | null
+  actionStart: string | null
+  actionEnd: string | null
+  mood: string | null
+  negativePrompt: string | null
+}
+
+export interface CreativeControlsResponse {
+  storyboardId: string
+  stateRevision: number
+  controls: ShotControls
+}
+
+export async function fetchCreativeControls(token: string | null, storyboardId: string): Promise<CreativeControlsResponse> {
+  return request<CreativeControlsResponse>(`/storyboards/${storyboardId}/creative-controls`, { token })
+}
+
+export async function patchCreativeControls(token: string | null, storyboardId: string, values: Partial<ShotControls> & { expectedStateRevision: number }): Promise<CreativeControlsResponse> {
+  return request<CreativeControlsResponse>(`/storyboards/${storyboardId}/creative-controls`, { token, method: 'PATCH', body: JSON.stringify(values) })
+}
+
+export interface SelectionLocks {
+  storyboardId: string
+  stateRevision: number
+  lockedVideoSelection: boolean
+  lockedVoiceSelection: boolean
+  lockedReferences: boolean
+}
+
+export async function patchSelectionLocks(token: string | null, storyboardId: string, values: Partial<Pick<SelectionLocks, 'lockedVideoSelection' | 'lockedVoiceSelection' | 'lockedReferences'>> & { expectedStateRevision: number }): Promise<SelectionLocks> {
+  return request<SelectionLocks>(`/storyboards/${storyboardId}/locks`, { token, method: 'PATCH', body: JSON.stringify(values) })
+}

@@ -1,3 +1,4 @@
+import { ShotControlPanel } from './shot-control-panel'
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
@@ -284,6 +285,7 @@ export function ShotEditor({
           )}
         </div>
       </div>
+      <ShotControlPanel storyboardId={shot.id} />
     </div>
   )
 }
