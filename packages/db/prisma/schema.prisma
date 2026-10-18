@@ -286,6 +286,13 @@ model ArtifactOperation {
   status           String        @default("QUEUED")
   requestSnapshot  String
   errorSnapshot    String?
+  /// US-019 采用策略:candidate_only(默认)/apply_if_empty/apply_if_unchanged。
+  applyPolicy      String        @default("candidate_only")
+  /// US-019 采用结果:pending/applied/skipped(+applyReason)。
+  applyStatus      String?
+  applyReason      String?
+  /// US-019 镜头 CAS:自动采用前校验,冲突只保留候选。
+  expectedShotRevision Int?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   organization     Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)

@@ -2414,9 +2414,12 @@ describe('video extend (artifact operation)', () => {
         capabilityId: candidate.capabilityId,
         provider: candidate.provider,
         model: candidate.model,
-        requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜' }, parameters: { durationMs: 5000 }, sourceArtifactId: clip.artifactId, storyboardId: shot }),
+        requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜' }, parameters: { durationMs: 5000 }, sourceArtifactId: clip.artifactId, storyboardId: shot, applyPolicy: 'apply_if_unchanged' }),
+        applyPolicy: 'apply_if_unchanged',
+        expectedShotRevision: (await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { stateRevision: true } })).stateRevision,
       },
     })
+    // 诊断:看操作行实际存了什么
     await runArtifactOperation(
       { kind: 'run-artifact-operation', operationId: operation.id, organizationId: seed.organizationId, attempt: 1, candidate },
       env.deps({ pollIntervalMs: 10 }),
@@ -2425,6 +2428,7 @@ describe('video extend (artifact operation)', () => {
     const done = await env.db.artifactOperation.findUniqueOrThrow({ where: { id: operation.id } })
     expect(done.status).toBe('SUCCEEDED')
     expect(done.outputArtifactId).toBeTruthy()
+    expect(done.applyStatus).toBe('applied')
     const output = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: done.outputArtifactId! } })
     expect(output.mimeType).toBe('video/mp4')
     expect(output.stage).toBe('VIDEO')
@@ -2455,7 +2459,9 @@ describe('video extend (artifact operation)', () => {
         capabilityId: candidate.capabilityId,
         provider: candidate.provider,
         model: candidate.model,
-        requestSnapshot: JSON.stringify({ input: { prompt: '再延长' }, parameters: { durationMs: 3000 }, sourceArtifactId: output.id, storyboardId: shot }),
+        requestSnapshot: JSON.stringify({ input: { prompt: '再延长' }, parameters: { durationMs: 3000 }, sourceArtifactId: output.id, storyboardId: shot, applyPolicy: 'apply_if_unchanged' }),
+        applyPolicy: 'apply_if_unchanged',
+        expectedShotRevision: (await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { stateRevision: true } })).stateRevision,
       },
     })
     await runArtifactOperation(

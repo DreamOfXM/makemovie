@@ -85,6 +85,14 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
 
       const requested = typeof request.body?.durationMs === 'number' ? request.body.durationMs : 5000
       const durationMs = Math.min(10_000, Math.max(1_000, Math.round(requested)))
+      // US-019 采用策略与镜头 CAS。
+      const applyPolicy = typeof (request.body as { applyPolicy?: unknown })?.applyPolicy === 'string'
+        ? (request.body as { applyPolicy: string }).applyPolicy : 'candidate_only'
+      if (!['candidate_only', 'apply_if_empty', 'apply_if_unchanged'].includes(applyPolicy)) {
+        return reply.code(400).send({ error: 'applyPolicy must be one of candidate_only, apply_if_empty, apply_if_unchanged' })
+      }
+      const expectedShotRevision = typeof (request.body as { expectedShotRevision?: unknown })?.expectedShotRevision === 'number'
+        ? (request.body as { expectedShotRevision: number }).expectedShotRevision : null
 
       const pool = [
         ...(await resolveSlotCandidates(app.db, auth.organizationId, projectId, 'video_t2v')),
@@ -102,7 +110,9 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
           capabilityId: candidate.capabilityId,
           provider: candidate.provider,
           model: candidate.model,
-          requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜：画面与动作延续原片结尾，不引入新内容' }, parameters: { durationMs }, sourceArtifactId: artifact.id, storyboardId }),
+          requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜：画面与动作延续原片结尾，不引入新内容' }, parameters: { durationMs }, sourceArtifactId: artifact.id, storyboardId, applyPolicy }),
+          applyPolicy,
+          expectedShotRevision,
         },
       })
       await enqueueJob({ kind: 'run-artifact-operation', operationId: operation.id, organizationId: auth.organizationId, attempt: 1, candidate: { connectionId: candidate.connectionId, capabilityId: candidate.capabilityId, provider: candidate.provider, model: candidate.model } })

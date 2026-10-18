@@ -79,8 +79,30 @@ export async function runArtifactOperation(payload: RunArtifactOperationPayload,
           durationMs: material.durationMs ?? (source.durationMs ?? 0) + (Number.isFinite((snapshot.parameters as { durationMs?: number } | undefined)?.durationMs) ? (snapshot.parameters as { durationMs: number }).durationMs : 5000),
         },
       })
-      await deps.db.artifactOperation.update({ where: { id: operation.id }, data: { status: 'SUCCEEDED', outputArtifactId: output.id } })
-      await deps.db.storyboard.update({ where: { id: shotContext.storyboardId }, data: { selectedVideoArtifactId: output.id } })
+      // US-019 采用策略:按 applyPolicy 决定是否自动钦定——默认 candidate_only
+      // (只产出候选,不替换选版),apply_if_unchanged 需 CAS 校验。
+      const policy = (JSON.parse(operation.requestSnapshot) as { applyPolicy?: string }).applyPolicy ?? operation.applyPolicy
+      let applyStatus = 'applied'
+      let applyReason: string | undefined
+      if (policy === 'candidate_only') {
+        applyStatus = 'skipped'
+        applyReason = 'candidate_only: result is a candidate, not auto-adopted'
+      } else if (policy === 'apply_if_unchanged' && operation.expectedShotRevision !== null && operation.expectedShotRevision !== undefined) {
+        const current = await deps.db.storyboard.findUnique({ where: { id: shotContext.storyboardId }, select: { stateRevision: true, lockedVideoSelection: true } })
+        if (current && (current.stateRevision !== operation.expectedShotRevision || current.lockedVideoSelection)) {
+          applyStatus = 'skipped'
+          applyReason = current.lockedVideoSelection
+            ? 'shot video selection is locked — result stays as candidate'
+            : `shot stateRevision changed (expected ${operation.expectedShotRevision}, now ${current.stateRevision})`
+        }
+      }
+      if (applyStatus === 'applied') {
+        await deps.db.storyboard.update({ where: { id: shotContext.storyboardId }, data: { selectedVideoArtifactId: output.id } })
+      }
+      await deps.db.artifactOperation.update({
+        where: { id: operation.id },
+        data: { status: 'SUCCEEDED', outputArtifactId: output.id, applyStatus, ...(applyReason ? { applyReason } : {}) },
+      })
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }
