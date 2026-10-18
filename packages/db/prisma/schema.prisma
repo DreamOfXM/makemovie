@@ -88,6 +88,10 @@ model Composition {
   artifactId         String?
   subtitleArtifactId String?
   scoreArtifactId    String?
+  /// US-027-029 编辑时间线链接:本次合成基于哪个编辑修订。
+  editRevisionId     String?
+  /// US-028 内容指纹:编辑/素材/设置任何变化→指纹不匹配→旧渲染不能冒充当前。
+  inputFingerprint   String?
   episode            Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 

@@ -163,9 +163,13 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
     // 声音来源同样留痕：母带里这一镜听到的是配音、原声、叠加还是导入文件，
     // 必须能从文件反查回去——否则「双声是哪来的」只能靠重抽猜。
     compositionManifest.audio = audio
+    // US-027-029:链接编辑时间线与内容指纹——旧渲染不能冒充当前修订。
+    const editHead = await deps.db.episodeEdit.findUnique({ where: { episodeId: composition.episodeId }, include: { revisions: { orderBy: { revision: 'desc' }, take: 1 } } })
+    const editRevisionId = editHead?.revisions[0]?.id ?? null
+    const inputFingerprint = editHead?.revisions[0]?.fingerprint ?? null
     await deps.db.composition.update({
       where: { id: composition.id },
-      data: { status: 'COMPLETED', manifest: JSON.stringify(compositionManifest), artifactId: artifact.id, subtitleArtifactId, scoreArtifactId: music?.id ?? null },
+      data: { status: 'COMPLETED', manifest: JSON.stringify(compositionManifest), artifactId: artifact.id, subtitleArtifactId, scoreArtifactId: music?.id ?? null, editRevisionId, inputFingerprint },
     })
   } catch (error) {
     // BLOCKED (not FAILED) keeps the composition retriggerable once the missing clip lands.
