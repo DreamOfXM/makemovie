@@ -977,11 +977,42 @@ export async function triggerStage(
   const MOTION_RULE = stage === 'VIDEO'
     ? '运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定或极缓慢推近。'
     : null
+  // US-016 结构化控制确定性注入:景别/机位/运动/动作/情绪/负面约束——与自由描述、
+  // 风格、参考、调整要求按固定顺序组合。null(=自动)不注入文本,不是写「自动」。
+  const CONTROL_LABELS: Record<string, string> = {
+    framing: '景别', cameraAngle: '机位', cameraMovement: '镜头运动',
+    actionStart: '动作起', actionEnd: '动作止', mood: '情绪与节奏', negativePrompt: '禁止出现',
+  }
+  const FRAMING_LABELS: Record<string, string> = { close_up: '特写', medium: '中景', wide: '远全景', extreme_close_up: '大特写' }
+  const ANGLE_LABELS: Record<string, string> = { eye_level: '平视', low: '低角度仰拍', high: '高角度俯拍', dutch: '倾斜机位', over_shoulder: '过肩' }
+  const MOVEMENT_LABELS: Record<string, string> = { static: '固定机位', pan: '横摇', tilt: '纵摇', dolly: '推拉', handheld: '手持' }
+  const controlsByShot = new Map<string, string | null>()
+  if (isVisualKind && perStoryboard) {
+    const shotIds = voiced.map(storyboard => storyboard.id)
+    if (shotIds.length > 0) {
+      const controls = await db.shotControl.findMany({ where: { storyboardId: { in: shotIds } } })
+      for (const control of controls) {
+        const parts: string[] = []
+        if (control.framing) parts.push(`${CONTROL_LABELS.framing}: ${FRAMING_LABELS[control.framing] ?? control.framing}`)
+        if (control.cameraAngle) parts.push(`${CONTROL_LABELS.cameraAngle}: ${ANGLE_LABELS[control.cameraAngle] ?? control.cameraAngle}`)
+        if (control.cameraMovement) parts.push(`${CONTROL_LABELS.cameraMovement}: ${MOVEMENT_LABELS[control.cameraMovement] ?? control.cameraMovement}`)
+        if (control.actionStart) parts.push(`${CONTROL_LABELS.actionStart}: ${control.actionStart}`)
+        if (control.actionEnd) parts.push(`${CONTROL_LABELS.actionEnd}: ${control.actionEnd}`)
+        if (control.mood) parts.push(`${CONTROL_LABELS.mood}: ${control.mood}`)
+        if (control.negativePrompt) parts.push(`${CONTROL_LABELS.negativePrompt}: ${control.negativePrompt}`)
+        controlsByShot.set(control.storyboardId, parts.length > 0 ? parts.join('; ') : null)
+      }
+    }
+  }
+
   const tailTargets = isVisualKind
-    ? targets.map(target => ({
-        ...target,
-        prompt: [target.prompt, TEXT_LANGUAGE_RULE, MOTION_RULE].filter(Boolean).join('\n\n'),
-      }))
+    ? targets.map(target => {
+        const controlLine = target.storyboardId ? controlsByShot.get(target.storyboardId) : undefined
+        return {
+          ...target,
+          prompt: [target.prompt, controlLine, TEXT_LANGUAGE_RULE, MOTION_RULE].filter(Boolean).join('\n\n'),
+        }
+      })
     : targets
   // 调整要求是人在这次重试里给的方向——必须真正压轴：拼在风格层之后。
   // 此前实现先拼 note 再叠风格，英文风格尾巴排到了最后，把人的方向压下去

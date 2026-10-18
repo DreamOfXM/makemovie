@@ -2489,3 +2489,43 @@ describe('video extend (artifact operation)', () => {
     expect(selections[shot].artifactId).toBe(clip.artifactId)
   })
 })
+
+describe('structured control injection (US-016)', () => {
+  it('injects framing/movement/mood into the VIDEO prompt and omits nulls', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    // 结构化控制:特写 + 手持 + 紧张;负面约束不出现人脸。
+    await env.db.shotControl.create({
+      data: { storyboardId: shot, framing: 'close_up', cameraMovement: 'handheld', mood: '紧张', negativePrompt: '文字水印' },
+    })
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    if (!result.ok) throw new Error(`VIDEO refused: ${result.error}`)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: result.batchId } })
+    const prompt = (JSON.parse(task.requestSnapshot!) as { input: { prompt: string } }).input.prompt
+    // 确定性注入:标签翻译为中文,字段分号分隔,跟在描述之后。
+    expect(prompt).toContain('景别: 特写')
+    expect(prompt).toContain('镜头运动: 手持')
+    expect(prompt).toContain('情绪与节奏: 紧张')
+    expect(prompt).toContain('禁止出现: 文字水印')
+    // null 字段不写「自动」——干净的不在比假的在更诚实。
+    expect(prompt).not.toContain('自动')
+  })
+
+  it('leaves prompts untouched when no controls exist (backward compatibility)', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    if (!result.ok) throw new Error(`VIDEO refused: ${result.error}`)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: result.batchId } })
+    const prompt = (JSON.parse(task.requestSnapshot!) as { input: { prompt: string } }).input.prompt
+    expect(prompt).not.toContain('景别:')
+    expect(prompt).not.toContain('机位:')
+    void shot
+  })
+})
