@@ -941,3 +941,58 @@ export interface SelectionLocks {
 export async function patchSelectionLocks(token: string | null, storyboardId: string, values: Partial<Pick<SelectionLocks, 'lockedVideoSelection' | 'lockedVoiceSelection' | 'lockedReferences'>> & { expectedStateRevision: number }): Promise<SelectionLocks> {
   return request<SelectionLocks>(`/storyboards/${storyboardId}/locks`, { token, method: 'PATCH', body: JSON.stringify(values) })
 }
+
+export interface EditClip {
+  clipId: string
+  storyboardId: string
+  artifactId: string
+  sourceInFrame: number
+  sourceOutFrame: number
+}
+
+export interface EditTrackElement {
+  elementId: string
+  sourceArtifactId: string
+  anchor: 'clip' | 'sequence'
+  clipId?: string
+  offsetFrame: number
+  gain: number
+  muted: boolean
+  locked: boolean
+}
+
+export interface EditRevision {
+  id: string
+  revision: number
+  fpsNum: number
+  fpsDen: number
+  clips: EditClip[]
+  tracks: EditTrackElement[]
+  outputSpec: Record<string, unknown>
+  fingerprint: string
+  author: string | null
+}
+
+export interface EpisodeEditResponse {
+  editId: string
+  headRevision: number
+  revision: EditRevision
+}
+
+export async function fetchEpisodeEdit(token: string | null, episodeId: string): Promise<EpisodeEditResponse> {
+  return request<EpisodeEditResponse>(`/episodes/${episodeId}/edit`, { token })
+}
+
+export async function saveEpisodeEdit(token: string | null, episodeId: string, body: {
+  expectedEditRevision: number
+  fps: { fpsNum: number; fpsDen: number }
+  clips: EditClip[]
+  tracks: EditTrackElement[]
+  outputSpec?: Record<string, unknown>
+}): Promise<{ editId: string; headRevision: number }> {
+  return request<{ editId: string; headRevision: number }>(`/episodes/${episodeId}/edit`, { token, method: 'PUT', body: JSON.stringify(body) })
+}
+
+export async function restoreEpisodeEdit(token: string | null, episodeId: string, revision: number): Promise<{ editId: string; headRevision: number; restoredFrom: number }> {
+  return request<{ editId: string; headRevision: number; restoredFrom: number }>(`/episodes/${episodeId}/edit/restore`, { token, method: 'POST', body: JSON.stringify({ revision }) })
+}
