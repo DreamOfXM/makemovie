@@ -117,6 +117,7 @@ model Episode {
   scriptVersions        ScriptVersion[]
   segmentAllocations    SegmentAllocation[]
   sourceVersions        SourceDocumentVersion[] @relation("EpisodeSourceVersions")
+  edit                  EpisodeEdit?
   storyboards           Storyboard[]
 
   @@unique([projectId, number])
@@ -611,6 +612,57 @@ model ShotControl {
   negativePrompt String?  // 负面约束:不出现的东西
   updatedAt      DateTime @updatedAt
   storyboard     Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+}
+
+
+// US-023 编辑时间线:集级编辑 head + 不可变修订 JSON 文档 + editMedia 规范化缓存。
+// EpisodeEdit 每集一个 head;EpisodeEditRevision 唯一 (editId, revision),不可变。
+model EpisodeEdit {
+  id             String   @id @default(cuid())
+  episodeId      String   @unique
+  organizationId String
+  headRevision   Int      @default(0)
+  schemaVersion  Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  episode        Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  revisions      EpisodeEditRevision[]
+
+  @@index([organizationId])
+}
+
+model EpisodeEditRevision {
+  id          String   @id @default(cuid())
+  editId      String
+  revision    Int
+  fpsNum      Int
+  fpsDen      Int
+  outputSpec  String   @default("{}")
+  clips       String   @default("[]")
+  tracks      String   @default("[]")
+  fingerprint String
+  author      String?
+  createdAt   DateTime @default(now())
+  edit        EpisodeEdit @relation(fields: [editId], references: [id], onDelete: Cascade)
+
+  @@unique([editId, revision])
+}
+
+// editMedia:进入精确剪辑的规范化介质——原画幅/方向,时间零点归一,CFR=序列帧率。
+// 缓存身份 = originalArtifactId + fpsNum/fpsDen + conformPolicyVersion。
+model EditMedia {
+  id                    String   @id @default(cuid())
+  originalArtifactId    String
+  normalizedArtifactId  String
+  conformPolicyVersion  Int      @default(1)
+  fpsNum                Int
+  fpsDen                Int
+  frameCount            Int
+  width                 Int?
+  height                Int?
+  createdAt             DateTime @default(now())
+
+  @@unique([originalArtifactId, fpsNum, fpsDen, conformPolicyVersion])
 }
 
 model StoryboardAsset {
