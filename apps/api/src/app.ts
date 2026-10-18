@@ -29,6 +29,7 @@ import { creationReadinessRoutes } from './routes/creation-readiness.js'
 import { creationPlanRoutes } from './routes/creation-plans.js'
 import { creativeControlsRoutes } from './routes/creative-controls.js'
 import { selectionLockRoutes } from './routes/selection-locks.js'
+import { episodeEditRoutes } from './routes/episode-edit.js'
 import { pipelineRoutes } from './routes/pipelines.js'
 import { assetRoutes } from './routes/assets.js'
 import { deliveryRoutes } from './routes/deliveries.js'
@@ -102,6 +103,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(creationPlanRoutes, { prefix: '/api' })
   await app.register(creativeControlsRoutes, { prefix: '/api' })
   await app.register(selectionLockRoutes, { prefix: '/api' })
+  await app.register(episodeEditRoutes, { prefix: '/api' })
   await app.register(mcpRoutes)
 
   app.addHook('onClose', async () => {
