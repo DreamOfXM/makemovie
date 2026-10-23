@@ -162,9 +162,13 @@ export function PreviewPanel({
             <>
               {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。 */}
               <ArtifactMedia artifact={shot.firstFrame} label={t('storyboards.firstFrame')} className="h-full max-h-none w-full object-cover" />
-              <span className="bg-background/75 text-muted-foreground absolute inset-x-0 bottom-0 truncate px-1.5 py-0.5 text-[10px] backdrop-blur-sm">
-                {t('shotboard.ph.videoOnlyFrame')}
-              </span>
+              {/* 这句话只说「成片还没有」，却挂在所有回退分支上：这一镜明明已有成片，
+                只是当前不在这条产物的页面上，屏下仍写着「还没抽成片」。成片真的没有才许说。 */}
+              {!shot.video && shot.videoCandidates.length === 0 && (
+                <span className="bg-background/75 text-muted-foreground absolute inset-x-0 bottom-0 truncate px-1.5 py-0.5 text-[10px] backdrop-blur-sm">
+                  {t('shotboard.ph.videoOnlyFrame')}
+                </span>
+              )}
             </>
           ) : stageBusy('FIRST_FRAME') || stageBusy('VIDEO') ? (
             <span className="text-primary absolute inset-0 flex items-center justify-center gap-1.5 text-xs">

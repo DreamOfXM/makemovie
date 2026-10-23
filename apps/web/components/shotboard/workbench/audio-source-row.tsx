@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { UploadIcon } from 'lucide-react'
 import type { ShotAudioSource, ShotboardShot } from '@/lib/api'
@@ -75,7 +75,14 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
       ? t('shotboard.audio.subtitleNone')
       : t('shotboard.audio.subtitleUnverified')
   const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
+  // 框里必须一进来就是这一镜真正在烧的那行字。字幕是硬烧的，空框加一枚可点的「保存字幕」
+  // 等于让用户在看不见内容的情况下把它清掉（2026-10-23 制作台实测 #14：屏上空框，库里「第 3 次」）。
+  const [draft, setDraft] = useState(shot.subtitleText ?? '')
+  // 换镜不重挂载，不重置就会把上一镜的字幕串进这一镜的框与请求里（同 SD-138）。
+  useEffect(() => {
+    setDraft(shot.subtitleText ?? '')
+    setEditing(false)
+  }, [shot.id, shot.subtitleText])
 
   async function pick(next: ShotAudioSource | null) {
     setBusy(next ?? 'clear')
