@@ -74,6 +74,47 @@ describe('creation readiness (US-009)', () => {
   })
 })
 
+describe('project-scoped readiness (R03: cross-project false ready)', () => {
+  it("project B must not inherit project A's project-scoped bindings", async () => {
+    // 现场复刻:组织必填全局绑定全部禁用;A 独有四个有效项目级绑定;B 无覆盖。
+    await env.db.capabilityBinding.updateMany({ where: { organizationId, projectId: null }, data: { enabled: false } })
+    const projectB = await env.app.inject({ method: 'POST', url: '/api/projects', headers: json(ownerToken), payload: { name: 'CR Project B' } })
+    const projectIdB = projectB.json().id as string
+    const projectABindings = await env.db.capabilityBinding.findMany({ where: { organizationId, projectId, enabled: true }, select: { slot: true, capabilityId: true } })
+    expect(projectABindings.length).toBeGreaterThan(0)
+
+    // B 的就绪:不允许把 A 的绑定算进来——必填 ready 必须少于全量,且不是 ready。
+    const readinessB = await env.app.inject({ method: 'GET', url: `/api/projects/${projectIdB}/creation-readiness`, headers: authHeaders(ownerToken) })
+    expect(readinessB.statusCode).toBe(200)
+    const bodyB = readinessB.json() as { nextStep: string; required: { ready: number; total: number } }
+    expect(bodyB.required.ready).toBe(0)
+    expect(bodyB.nextStep).not.toBe('ready')
+
+    // A 的就绪不受影响:自己的项目级绑定仍然算数。
+    const readinessA = await env.app.inject({ method: 'GET', url: `/api/projects/${projectId}/creation-readiness`, headers: authHeaders(ownerToken) })
+    const bodyA = readinessA.json() as { nextStep: string; required: { ready: number; total: number } }
+    expect(bodyA.required.ready).toBe(bodyA.required.total)
+    expect(bodyA.nextStep).toBe('ready')
+
+    // B 的 auto-bind 规划同样只看自己的缺口:会给出要补的槽,而不是「已齐」。
+    const autoB = await env.app.inject({ method: 'POST', url: `/api/projects/${projectIdB}/auto-bind`, headers: json(ownerToken) })
+    if (autoB.statusCode === 201) {
+      const created = (autoB.json() as { created: string[] }).created
+      // 全部落在 B 的项目作用域,不动 A 的绑定。
+      for (const row of created) expect(row).toBeTruthy()
+      const bRows = await env.db.capabilityBinding.findMany({ where: { organizationId, projectId: projectIdB } })
+      expect(bRows.length).toBe(created.length)
+    } else {
+      // nothing to bind 只允许发生在 B 真的无可补候选时,绝不能因为「已就绪」。
+      expect((autoB.json() as { error?: string }).error).not.toContain('ready')
+    }
+
+    // 复原全局绑定,避免污染同文件其他用例。
+    await env.db.capabilityBinding.updateMany({ where: { organizationId, projectId: null }, data: { enabled: true } })
+    await env.db.capabilityBinding.deleteMany({ where: { organizationId, projectId: projectIdB } })
+  })
+})
+
 function auth(token: string): Record<string, string> {
   return env.authHeaders(token)
 }

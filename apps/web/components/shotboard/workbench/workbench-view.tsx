@@ -51,7 +51,7 @@ interface WorkbenchViewProps {
   styleName: string | null
   onCreateShot(): void
   onChangeStatus(shot: Pick<Storyboard, 'id' | 'number' | 'title' | 'status'>): void
-  onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
+  onBindAssets(storyboardId: string, assets: { assetId: string }[]): Promise<void>
   onRegenerate(storyboardId: string, stage: 'FIRST_FRAME' | 'VIDEO' | 'AUDIO', note?: string, regenerate?: boolean): Promise<void>
   /** 外部变化（弹窗保存/绑定/推进）后让制作台立即重读，不等轮询。 */
   refreshToken: number
@@ -115,6 +115,9 @@ export function WorkbenchView({
     if (selectedId === null && shots.length > 0) setSelectedId(shots[0]!.id)
   }, [selectedId, shots])
   const [tab, setTab] = useState<'shots' | 'assets'>('shots')
+  // 镜头/素材清单的开合（UX-12）：<1440 三列放不下——1024~1439 清单是浮层轨道，
+  // <1024 是收在底部的折叠区；1440 起回归常驻首列。一个布尔同时驱动两种形态。
+  const [listOpen, setListOpen] = useState(false)
   const [focusAssetId, setFocusAssetId] = useState<string | null>(null)
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)
   const [requestingStage, setRequestingStage] = useState<'FIRST_FRAME' | 'VIDEO' | 'AUDIO' | null>(null)
@@ -230,7 +233,18 @@ export function WorkbenchView({
           图形版且更全（绿=齐、斜纹=欠画面、红=失败、蓝脉冲=在产、底线=钦定），
           数字行与条上下紧贴被用户判为重复（2026-09-28）。 */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground tabular-nums">
-        <div className="ml-auto flex items-center gap-1.5">
+        {/* 清单开合（UX-12）：≥1280 三列常驻、此钮退场；以下它是清单的唯一入口。 */}
+        <button
+          type="button"
+          aria-expanded={listOpen}
+          onClick={() => setListOpen(open => !open)}
+          className="text-muted-foreground hover:text-foreground min-[1280px]:hidden inline-flex min-w-0 items-center gap-1 text-xs font-medium"
+        >
+          <ChevronDownIcon className={cn('size-3.5 transition-transform', listOpen ? '' : '-rotate-90')} />
+          {t('workbench.listToggle')}
+        </button>
+        {/* 390px 下这排四枚钮合计 381px，不换行会把整页顶出 7px 横向滚动。 */}
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className="h-7 text-xs">
@@ -288,12 +302,28 @@ export function WorkbenchView({
         </div>
       </div>
 
-      <ShotStrip shots={shots} onOpen={shotId => { setTab('shots'); setSelectedId(shotId) }} />
+      <ShotStrip shots={shots} activeId={selected?.id ?? null} onOpen={shotId => { setTab('shots'); setSelectedId(shotId) }} />
 
-      {/* 三区 */}
-      <div className="border-border/60 grid min-h-0 flex-1 overflow-hidden rounded-xl border lg:grid-cols-[18.5rem_minmax(0,1fr)_23rem] lg:[height:calc(100dvh-19rem)]">
-        {/* 左列 */}
-        <div className="bg-sidebar/40 flex min-h-0 flex-col border-b lg:border-b-0 lg:border-r">
+      {/* 三区（UX-12）：≥1280 常驻三列；1024~1279 清单收进浮层轨道、主区两列
+          （编辑 | 预览）；<1024 单列堆叠且预览在最上（实测 390 的「预览排在长列表之后」）、
+          清单折叠收尾。断点逻辑在 globals.css 的 .workbench-shell 一处表达——
+          Tailwind 变体顺序曾把 lg:hidden 压在 min-[1440px]:block 之后（SD-023）。 */}
+      <div className="workbench-shell border-border/60 relative min-h-0 overflow-hidden rounded-xl border">
+        {/* 轨道态（1024~1279）点开清单时的遮罩：点外收起；1280 起不参与。 */}
+        {listOpen && (
+          <button
+            type="button"
+            aria-label={t('common.close')}
+            onClick={() => setListOpen(false)}
+            className="bg-background/40 absolute inset-0 z-20 hidden lg:max-[1279px]:block"
+          />
+        )}
+        {/* 左列：≥1280 常驻首列；1024~1279 浮层轨道（默认收）；<1024 底部折叠区。
+            页签行始终可见——素材页签的入口不随清单一起消失。 */}
+        <div
+          data-open={listOpen ? 'true' : 'false'}
+          className="workbench-list bg-sidebar/40 border-border/60 border-t lg:border-t-0 lg:border-r"
+        >
           <div className="border-border/60 flex items-center gap-1 border-b px-2 py-1.5">
             <button
               type="button"
@@ -320,26 +350,30 @@ export function WorkbenchView({
               {t('workbench.tabAssets', { count: board.data?.assets.length ?? 0 })}
             </button>
           </div>
-          {tab === 'shots' ? (
-            <ShotList shots={shots} selectedId={selected?.id ?? null} onSelect={setSelectedId} onCreate={onCreateShot} canWrite={canWrite} />
-          ) : assets.error && assets.data.assets.length === 0 ? (
-            <div className="p-3">
-              <ErrorState message={assets.error} onRetry={assets.reload} />
-            </div>
-          ) : (
-            <AssetList
-              episodeId={episodeId}
-              assets={assets.data.assets}
-              loading={assets.loading}
-              selectedId={selectedAsset?.id ?? null}
-              onSelect={setSelectedAssetId}
-              onAdded={reloadAssets}
-            />
-          )}
+          {/* 清单体：<1024 随 listOpen 折叠（收起时只剩页签行）；≥1024 常驻。
+              折叠不吞信号——在产/失败计数在 ShotList 行内的状态点与放映条上。 */}
+          <div className="workbench-list-body">
+            {tab === 'shots' ? (
+              <ShotList shots={shots} selectedId={selected?.id ?? null} onSelect={setSelectedId} onCreate={onCreateShot} canWrite={canWrite} />
+            ) : assets.error && assets.data.assets.length === 0 ? (
+              <div className="p-3">
+                <ErrorState message={assets.error} onRetry={assets.reload} />
+              </div>
+            ) : (
+              <AssetList
+                episodeId={episodeId}
+                assets={assets.data.assets}
+                loading={assets.loading}
+                selectedId={selectedAsset?.id ?? null}
+                onSelect={setSelectedAssetId}
+                onAdded={reloadAssets}
+              />
+            )}
+          </div>
         </div>
 
         {/* 中列：这一页签的主任务——镜头=改脚本（表单要宽）；素材=审参考图（图要宽）。 */}
-        <div className="flex min-h-0 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-col [grid-area:editor]">
           {tab === 'shots' ? (
             selected ? (
               <ShotEditor
@@ -365,7 +399,7 @@ export function WorkbenchView({
         </div>
 
         {/* 右列：配套面板——镜头=产物预览；素材=档案勘误（低频，窄列够用）。 */}
-        <div className="bg-sidebar/40 flex min-h-0 flex-col border-t lg:border-t-0 lg:border-l">
+        <div className="bg-sidebar/40 flex min-h-0 min-w-0 flex-col lg:border-l [grid-area:preview]">
           {tab === 'shots' ? (
             selected && (
               <PreviewPanel

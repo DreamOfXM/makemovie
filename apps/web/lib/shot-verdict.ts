@@ -104,7 +104,7 @@ export interface ShotVerdict {
 }
 
 /** 徽章那枚的全部取值。卡片与放映条共用同一张表，谁都不许自己再造一套口吻。 */
-export type CardStage = ShotStage | 'start' | 'complete' | 'retry' | 'failed'
+export type CardStage = ShotStage | 'start' | 'complete' | 'retry' | 'failed' | 'local'
 
 const FAILED = ['frame_failed', 'video_failed']
 
@@ -118,9 +118,13 @@ export function shotVerdict(shot: ShotboardShot): ShotVerdict {
   // 「这一镜还欠几件」按声音来源裁决，而不是按有没有台词：钦定「只用原声」的有台词镜
   // 本来就不欠配音，无台词却导入音频的镜反而欠一条音轨。否则卡片会一边写「已齐 2/2」
   // 一边在第三枚点上亮灰。
+  // 首帧那一格同理：分镜表把这一镜标成字卡/界面/录屏/合成时，平台永远不会给它出首帧，
+  // 把它算进「欠」的东西，画面一到手卡片就写「等你启动生成」——催用户去启动一次
+  // 根本不该发生的生成（SD-108 实拍：镜头 #7 渲染字卡后徽章翻成这句）。
+  const needsFrame = shot.production === 'video'
   const needsTrack = shotOwesVoice(shot)
-  const total = needsTrack ? 3 : 2
-  const done = [shot.firstFrame, shot.video, needsTrack ? shotVoiceTrack(shot) : null].filter(Boolean).length
+  const total = (needsFrame ? 1 : 0) + 1 + (needsTrack ? 1 : 0)
+  const done = [(needsFrame ? shot.firstFrame : null), shot.video, needsTrack ? shotVoiceTrack(shot) : null].filter(Boolean).length
 
   let stage: ShotStage = 'idle'
   if (reasons.some(reason => FAILED.includes(reason) || reason === 'shot_blocked' || reason === 'asset_gate')) stage = 'blocked'
@@ -140,6 +144,11 @@ export function cardStage(shot: ShotboardShot, verdict: ShotVerdict): CardStage 
     if (retryWithOutputLeft(shot)) return 'retry'
     return verdict.reasons.some(code => code === 'frame_failed' || code === 'video_failed') ? 'failed' : 'blocked'
   }
+  // 本机镜头（字卡/屏幕录制/合成/UI）永远不会有平台排产的首帧：它的空不是欠账，
+  // 是分镜表明写要人来做。这一档必须排在进度档位之前——不然画面一旦到手，徽章就会
+  // 从「手工 · 字卡」翻成「等你启动生成」，催用户去启动一次永远不会发生的生成。
+  // 有没有画面由那三枚点和详情里的「✓ 入片」说，徽章只说身份。
+  if (verdict.stage === 'idle' && shot.production !== 'video') return 'local'
   if (verdict.stage === 'idle' && verdict.done === verdict.total) return 'complete'
   if (verdict.stage === 'idle' && verdict.done > 0) return 'start'
   return verdict.stage
@@ -172,6 +181,18 @@ export function retryWordForError(t: TranslateFn, raw: string | null | undefined
 }
 
 /**
+ * 「上一笔提交到底成没成，平台自己也不知道」——报文全部出自 worker（run-task.ts 的
+ * 台账槽位冲突 / 提交结果未知、run-artifact-operation.ts 的同类）。这类镜不许走
+ * 「只补缺」：后端对同一幂等键只会回 `created:false`，按钮亮成功而什么都没发生。
+ * 唯一出口是核对后新建一版，所以它必须先被认出来、再问一次。
+ */
+export const UNKNOWN_SUBMISSION = /submission ledger slot|submission unknown|manual verification required/i
+
+export function isUnknownSubmission(raw: string | null | undefined): boolean {
+  return UNKNOWN_SUBMISSION.test(raw ?? '')
+}
+
+/**
  * 那一档写出来的话。compact 给放映条的窄格用，只许缩短、不许换词根——
  * 同一件事在两处用两个词，读的人就会认为是两件事。
  */
@@ -189,9 +210,22 @@ export function stageWord(t: TranslateFn, verdict: ShotVerdict, stage: CardStage
       return retryWord(t, failureKind, compact)
     case 'failed':
       return cardFailureCode(verdict) === 'video_failed' ? t('attention.video_failed') : t('attention.frame_failed')
+    case 'local':
+      // 分镜表写明这一镜由人做（字卡/界面/合成/录屏）。空不是欠账，所以不写「未开始」。
+      return compact ? t('shotboard.strip.local') : t('shotboard.stage.local')
+    case 'start':
+      // 手上已经有一件、还欠一件时徽章必须报数。只写「等你启动生成」，用户在一列里
+      // 分不清哪镜是画面齐了只差声音、哪镜真的还没动工（2026-10-22 实拍：#2/#6 首帧与
+      // 成片都已钦定，徽章仍是这句，而同样的句子挂在零产物的镜上无从对比）。
+      return t('shotboard.stage.start', { done: verdict.done, total: verdict.total })
     default:
       return t(`shotboard.stage.${stage}`)
   }
+}
+
+/** 分镜表「生成方式」列的人话档名，只给本机镜头用；生成镜不显示这一层。 */
+export function productionWord(t: TranslateFn, production: ShotboardShot['production']): string {
+  return t(`shotboard.production.${production}`)
 }
 
 /**
@@ -201,6 +235,9 @@ export function stageWord(t: TranslateFn, verdict: ShotVerdict, stage: CardStage
  * 出画面欠账（2026-09-28 用户实测：只跑了一批配音，12 格斜纹全灭）。
  */
 export function stripIsEmpty(shot: ShotboardShot, stage: CardStage): boolean {
+  // local 不画斜纹：放映条的斜纹是「平台还欠这一镜画面」，而本机镜头的画面从来
+  // 不走平台；给它斜纹等于把「没人生成」写成「生成失败」。
+  if (stage === 'local') return false
   return (stage === 'idle' || stage === 'start') && !shot.firstFrame && !shot.video
 }
 
@@ -258,7 +295,9 @@ export function shotDemandText(t: TranslateFn, shot: ShotboardShot, code: string
     case 'shot_blocked':
       return t('shotboard.reason.blocked')
     case 'selection_open':
-      return t('shotboard.reason.selectionOpen', { count: shot.videoCandidates.length })
+      // 与后端 selection_open 同口径：停在「等你裁决」上的那一版不是待选的成片，
+      // 把它算进「N 版待选」等于让人去选一个后端会拒绝的版本。
+      return t('shotboard.reason.selectionOpen', { count: shot.videoCandidates.filter(candidate => candidate.awaitingDecision !== true).length })
     case 'awaiting_review':
       return shot.video ? t('shotboard.reason.reviewClip') : shot.firstFrame ? t('shotboard.reason.reviewFrame') : t('shotboard.reason.reviewShot')
     default:

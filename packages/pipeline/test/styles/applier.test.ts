@@ -120,7 +120,8 @@ describe('StyleApplier', () => {
       // 版式（模型顺着 cinematic 词出单张场景剧照）。同一画风改由「质感同源」保证：
       // ASSET 取 visualStyle+colorPalette（色彩基因与首帧一致），并显式声明版式优先。
       expect(assetPrompt).toContain('视觉风格（只约束色彩与质感')
-      expect(assetPrompt).toContain('禁止输出单张剧照或场景背景')
+      expect(assetPrompt).toContain('不改变上方描述的构图与版式')
+      expect(assetPrompt).not.toContain('禁止输出单张剧照或场景背景')
       expect(assetPrompt).toContain('cinematic, film grain, dramatic lighting, rich contrast')
       expect(assetPrompt).not.toContain('视觉风格：cinematic')
     })

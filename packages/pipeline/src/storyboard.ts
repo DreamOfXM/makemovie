@@ -4,6 +4,8 @@
  * 逐段调用、落件、把合并结果交给既有的落库路径。
  */
 
+import { parseStoryboardContract } from './storyboard-contract.js'
+
 export interface StoryboardShot {
   title?: unknown
   description?: unknown
@@ -12,6 +14,20 @@ export interface StoryboardShot {
   sourceExcerpt?: unknown
   durationMs?: unknown
   scene?: unknown
+  location?: unknown
+  /** 剧本分镜表的「生成方式」列：视频/字卡/屏幕录制/合成/UI。 */
+  method?: unknown
+  /** 镜头类型：main/insert/reaction/ambience/card（也接受中文词表）。 */
+  shotRole?: unknown
+  /** 与上一镜的接法：cut/dissolve/fade_in/fade_out/black/flash。 */
+  transition?: unknown
+  transitionMs?: unknown
+  /** 镜内多句台词：[{speaker,text}]，后期配音下同一空间的双人对白可以一镜说完。 */
+  lines?: unknown
+  /** 剧本「声音」列：这一镜的环境音床。 */
+  ambience?: unknown
+  /** 模型可选的 `sound` 别名（与剧本「声音」列同名）。 */
+  sound?: unknown
   continuityIn?: unknown
   continuityOut?: unknown
   number?: unknown
@@ -113,6 +129,8 @@ export interface StoryboardSegment {
   content: string
   /** 该段的镜头数预算,按整集预算乘以本段字符占比折算。 */
   shotBudget: number
+  /** 该段应覆盖的时长,按整集目标时长乘以本段字符占比折算;没有集时长时缺省。 */
+  targetDurationMs?: number
 }
 
 export function shouldSplitStoryboard(scriptContent: string, targetDurationMs: number | undefined, shotMs: number): boolean {
@@ -125,6 +143,9 @@ export function shouldSplitStoryboard(scriptContent: string, targetDurationMs: n
  * 走原有的单次调用路径,那条路径的行为一个字节都不能变。
  */
 export function planStoryboardSegments(scriptContent: string, options: { targetDurationMs?: number; shotMs: number }): StoryboardSegment[] {
+  // 自带分镜表的剧本是一行一镜的确定性契约:按场切块会把表撕成几段,每段都看不到
+  // 完整行数,契约就失效了。这类剧本只能整篇一次调用,哪怕超过篇幅阈值。
+  if (parseStoryboardContract(scriptContent)) return []
   if (!shouldSplitStoryboard(scriptContent, options.targetDurationMs, options.shotMs)) return []
   const text = scriptContent.trim()
   // 场景标记是 4a 的剧本 prompt 钉下的锚点,切块优先按场。标记存在但整篇只切出
@@ -135,7 +156,13 @@ export function planStoryboardSegments(scriptContent: string, options: { targetD
   const blocks = packUnits(units)
   const totalChars = blocks.reduce((sum, block) => sum + block.length, 0)
   const totalBudget = totalShotBudget(totalChars, options.targetDurationMs, options.shotMs)
-  return blocks.map(content => ({ content, shotBudget: Math.max(1, Math.round((totalBudget * content.length) / totalChars)) }))
+  return blocks.map(content => ({
+    content,
+    shotBudget: Math.max(1, Math.round((totalBudget * content.length) / totalChars)),
+    ...(options.targetDurationMs === undefined
+      ? {}
+      : { targetDurationMs: Math.round((options.targetDurationMs * content.length) / totalChars) }),
+  }))
 }
 
 function totalShotBudget(totalChars: number, targetDurationMs: number | undefined, shotMs: number): number {

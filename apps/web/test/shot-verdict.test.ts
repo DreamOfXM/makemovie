@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerationArtifact, ShotboardShot } from '@/lib/api'
 import { dictionaries, type Locale } from '@/lib/i18n'
-import { cardFailureCode, cardStage, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
+import { cardFailureCode, cardStage, isUnknownSubmission, productionWord, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
 
 /**
  * 真文案，不是替身：断言直接读字典，所以键写错、少一门语言、或把「重抽无效」
@@ -39,6 +39,8 @@ function shot(over: Partial<ShotboardShot>): ShotboardShot {
     sourceExcerpt: '',
     continuityIn: '',
     continuityOut: '',
+    transition: 'cut',
+    transitionMs: 0,
     sceneNumber: null,
     status: 'DRAFT',
     assets: [],
@@ -56,12 +58,17 @@ function shot(over: Partial<ShotboardShot>): ShotboardShot {
     audioSource: null,
     importedVoice: null,
     importedAmbience: null,
+    ambience: null,
     videoCandidates: [],
     frameCandidates: [],
     voiceCandidates: [],
+    stateRevision: 0,
+    operations: [],
     usage: null,
     slot: 'empty',
+    production: 'video',
     attention: [],
+    storyboardGaps: [],
     waitingSince: null,
     ...over,
   }
@@ -151,6 +158,35 @@ describe('失败归因', () => {
     expect(shotFailureKind(idle)).toBe('unknown')
     expect(cardStage(idle, shotVerdict(idle))).toBe('idle')
   })
+
+  /**
+   * 分镜表写明「字卡/界面/合成/录屏」的镜头，平台永远不会给它出画面。此前它和普通
+   * 生成镜一样显示「还没开始」、放映条画斜纹，整集 30 个手工镜被读成 30 笔生成欠账。
+   */
+  it('手工制作的镜头写「手工制作」，不写「还没开始」，放映条也不画斜纹', () => {
+    const titleCard = shot({ production: 'title-card', slot: 'local' })
+    const stage = cardStage(titleCard, shotVerdict(titleCard))
+    expect(stage).toBe('local')
+    expect(badge(titleCard)).toBe('手工制作')
+    expect(badge(titleCard, true)).toBe('手工')
+    expect(stripIsEmpty(titleCard, stage)).toBe(false)
+    expect(productionWord(zh, titleCard.production)).toBe('字卡')
+  })
+
+  it('手工镜头一旦有了画面仍写「手工制作」，不翻成「等你启动生成」', () => {
+    // SD-108 实拍（镜头 #7 渲染字卡后）：徽章从「手工 · 字卡」翻成「等你启动生成」,
+    // 因为判定把首帧当成每个镜头都欠的一件东西——而分镜表明写这一镜平台永不拍首帧。
+    // 结果平台在用户刚做完它要他做的事之后，催他启动一次永远不会发生的生成。
+    const rendered = shot({ production: 'title-card', slot: 'local', video: anArtifact })
+    const verdict = shotVerdict(rendered)
+    expect(cardStage(rendered, verdict)).toBe('local')
+    expect(verdict.done).toBe(verdict.total)
+    expect(badge(rendered)).toBe('手工制作')
+    // 同一镜型在旧判据下会走 'start' 档，那句文案就是这次要消掉的谎。
+    // SD-112：'start' 档本身也必须报数——生成镜「首帧+成片都已在手、只差一条配音」时，
+    // 不报数的「等你启动生成」和零产物镜读起来是同一句话，用户分不清哪镜真的没动工。
+    expect(stageWord(zh, { ...verdict, done: 2, total: 3 }, 'start')).toBe('已出 2/3 · 等你启动生成')
+  })
 })
 
 /**
@@ -180,5 +216,62 @@ describe('放映条斜纹', () => {
 
     const reviewing = shot({ status: 'NEEDS_REVIEW' })
     expect(stripIsEmpty(reviewing, cardStage(reviewing, shotVerdict(reviewing)))).toBe(false)
+  })
+})
+
+/**
+ * 「上一笔提交成没成，平台自己也不知道」这一档必须被认出来（SD-128 / SD-130，
+ * 2026-10-22 #19、#20 两次现场）。认不出来的后果不是文案不准，是死按钮：
+ * 「只补缺」对同一幂等键只会拿到 created:false，屏上报成功而系统什么都没做。
+ * 三条报文逐字取自 worker 的写出点（run-task.ts:731 / :770 / :462）。
+ */
+describe('提交状态未知的报文', () => {
+  const LEDGER_SLOT =
+    'dashscope/qwen-image-3.0-pro: submission ledger slot (1/0) is already occupied — refusing to re-submit; manual verification required'
+  const SUBMIT_UNKNOWN =
+    'dashscope/qwen-image-3.0-pro: submission unknown — the provider may have accepted task (attempt 1, provider dashscope, model qwen-image-3.0-pro); manual verification required before any retry. fetch failed'
+  const ORPHAN_LEDGER =
+    'submission ledger row cmvjigeun000l1m9q has provider task 8f2c1 but no recorded connection/capability identity — manual verification required before any retry'
+
+  it.each([
+    ['台账槽位被自己那行未终局的 submitting 占住', LEDGER_SLOT],
+    ['提交超时、厂商可能已接单', SUBMIT_UNKNOWN],
+    ['台账行认不出连接身份', ORPHAN_LEDGER],
+  ])('%s → 进核对门', (_label, raw) => {
+    expect(isUnknownSubmission(raw)).toBe(true)
+  })
+
+  it('额度耗尽与没过线都不是「状态未知」，不许误开门多计费一次', () => {
+    expect(isUnknownSubmission(QUOTA_CHAIN)).toBe(false)
+    expect(isUnknownSubmission('visual-audit: threshold not met after 3 attempts')).toBe(false)
+    expect(isUnknownSubmission(null)).toBe(false)
+    expect(isUnknownSubmission('')).toBe(false)
+  })
+})
+
+/**
+ * 导入环境音的两句长度读数，必须说混音层真做的事。旧句写「尾巴空着」「切在这一镜末尾」，
+ * 那是 S4① 之前的行为；现在导入底会接上自己循环补满这一镜，并在切点后再拖 0.2 秒淡出
+ * （packages/media 的 planAudioBridges 与 AUDIO_BRIDGE_TAIL_MS，那边有真 ffmpeg 断言钉
+ * 行为）。这里钉的是界面别重新骗人。
+ */
+describe('导入环境音的长短读数', () => {
+  const bed = (key: string, audio: string, picture: string, gap: string) => zh(key, { audio, picture, gap })
+
+  it('短了说的是循环，不是尾巴空着', () => {
+    const line = bed('shotboard.audio.ambienceShorter', '1.0s', '3.0s', '2.0s')
+    expect(line).toContain('循环')
+    expect(line).not.toContain('配音底下是空的')
+  })
+
+  it('长了说的是切点后拖 0.2 秒淡出，不是切在这一镜末尾', () => {
+    const line = bed('shotboard.audio.ambienceLonger', '5.0s', '3.0s', '2.0s')
+    expect(line).toContain('0.2')
+    expect(line).not.toContain('不会进下一镜')
+  })
+
+  it('剧本点名的底，两处都带着那一列的原文', () => {
+    expect(zh('shotboard.audio.ambienceAskedEmpty', { bed: '雨打铁皮棚', mode: '只用原声' })).toContain('雨打铁皮棚')
+    expect(zh('shotboard.audio.ambienceAsked', { bed: '雨打铁皮棚' })).toContain('雨打铁皮棚')
   })
 })

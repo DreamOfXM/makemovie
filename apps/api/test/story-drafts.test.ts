@@ -52,7 +52,7 @@ describe('story drafts (US-006)', () => {
     const projectsBefore = await env.db.project.count({ where: { organizationId } })
     const id = await createDraft()
     const first = await env.app.inject({ method: 'POST', url: `/api/story-drafts/${id}/create-project`, headers: { ...authHeaders(ownerToken), 'content-type': 'application/json' }, payload: { format: 'short_drama' } })
-    expect(first.statusCode).toBe(201)
+    expect(first.statusCode, JSON.stringify(first.body)).toBe(201)
     expect(first.json().idempotentReplay).toBe(false)
     const projectId = (first.json() as { project: { id: string } }).project.id
 
@@ -71,6 +71,23 @@ describe('story drafts (US-006)', () => {
     const source = await env.db.sourceDocumentVersion.findFirstOrThrow({ where: { episodeId: episode.id } })
     expect(source.content).toContain('纸扎铺')
     expect(source.version).toBe(1)
+  })
+
+  it('concurrent create-project calls consume the draft exactly once (row-lock claim)', async () => {
+    // R07b 回归：并发双请求必须共用同一项目——条件 UPDATE 行锁挡住第二个
+    // 事务，等待提交后按已占用读到首个项目，而不是各自建一份。
+    const projectsBefore = await env.db.project.count({ where: { organizationId } })
+    const id = await createDraft()
+    const call = () => env.app.inject({ method: 'POST', url: `/api/story-drafts/${id}/create-project`, headers: { ...authHeaders(ownerToken), 'content-type': 'application/json' }, payload: { format: 'short_drama' } })
+    const [a, b] = await Promise.all([call(), call()])
+    const codes = [a.statusCode, b.statusCode].sort()
+    expect(codes, JSON.stringify([a.statusCode, a.body, b.statusCode, b.body])).toEqual([200, 201])
+    const projectA = (a.json() as { project: { id: string } }).project.id
+    const projectB = (b.json() as { project: { id: string } }).project.id
+    expect(projectA).toBe(projectB)
+    expect(await env.db.project.count({ where: { organizationId } })).toBe(projectsBefore + 1)
+    const draftRow = await env.db.storyDraft.findUniqueOrThrow({ where: { id } })
+    expect(draftRow.consumedProjectId).toBe(projectA)
   })
 
   it('keeps drafts org-scoped', async () => {

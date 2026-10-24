@@ -48,7 +48,7 @@ interface StoryboardCardProps {
   storyboard: Storyboard
   canWrite: boolean
   episodeAssets: Asset[]
-  onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
+  onBindAssets(storyboardId: string, assets: { assetId: string }[]): Promise<void>
   onEdit(): void
   onChangeStatus(): void
   /** 逐镜重生成:操作发生在分镜卡上(用户看镜头的地方),结果回写同卡片。 */
@@ -179,7 +179,7 @@ export function StoryboardCard({
       : [...links, { storyboardId: storyboard.id, assetId, role: 'appears' }]
     setSavingAsset(assetId)
     try {
-      await onBindAssets(storyboard.id, next.map(link => ({ assetId: link.assetId, role: link.role })))
+      await onBindAssets(storyboard.id, next.map(link => ({ assetId: link.assetId })))
     } finally {
       setSavingAsset(null)
     }

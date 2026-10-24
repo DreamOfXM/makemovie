@@ -3,9 +3,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { CheckIcon, Columns2Icon, LoaderCircleIcon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
-import { getToken, request } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
+import { useSession } from '@/lib/session'
+import { ArtifactLoadError, useArtifactUrl } from '@/components/generations/artifact-media'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -15,11 +17,15 @@ interface ArtifactOption {
   mimeType: string
   createdAt?: string
   downloadUrl: string
+  /** 来源词（生成/延长/定向修改，调用方已翻译）——选项里如实标注这一版怎么来的。 */
+  label?: string
 }
 
 /**
  * US-018 双版本比较与采用:并排播放两个候选,同步播放/暂停/进度,各自独立静音;
  * 「采用此版」走选版接口(带锁定提示)。选版后另一版保留为候选,可随时换回。
+ * 媒体取流复用 ArtifactMedia 的既有链路(带会话头取 blob URL,失败是独立第三态
+ * 并可原地重试)——媒体元素带不了 Bearer,绝不在 src 里裸放 downloadUrl。
  */
 export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
   storyboardId: string
@@ -27,6 +33,7 @@ export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
   onAdopted?: (artifactId: string) => void
 }) {
   const { t } = useI18n()
+  const { api } = useSession()
   const [leftId, setLeftId] = useState(artifacts[0]?.id ?? '')
   const [rightId, setRightId] = useState(artifacts[1]?.id ?? '')
   const [playing, setPlaying] = useState(false)
@@ -59,11 +66,9 @@ export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
   async function adopt(artifactId: string) {
     setAdopting(artifactId)
     try {
-      await request(`/storyboards/${storyboardId}/video-selection`, {
-        token: getToken(),
+      await api(`/storyboards/${storyboardId}/video-selection`, {
         method: 'POST',
         body: JSON.stringify({ artifactId }),
-        headers: { 'content-type': 'application/json' },
       })
       toast.success(t('compare.adopted'))
       onAdopted?.(artifactId)
@@ -96,27 +101,13 @@ export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
           if (!artifact) return null
           return (
             <div key={side} className="space-y-1">
-              <div className="relative overflow-hidden rounded-md border">
-                <video
-                  ref={ref}
-                  src={artifact.downloadUrl}
-                  muted={muted}
-                  className="aspect-[9/16] w-full"
-                  onTimeUpdate={side === 'left' ? onLeftTimeUpdate : undefined}
-                  controls={false}
-                />
-                <button
-                  type="button"
-                  onClick={() => setMuted(!muted)}
-                  className="bg-background/80 absolute right-1 top-1 rounded p-1 text-xs"
-                  aria-label={muted ? t('compare.unmute') : t('compare.mute')}
-                >
-                  {muted ? '🔇' : '🔊'}
-                </button>
-                <Badge variant="outline" className="absolute left-1 top-1 text-[10px]">
-                  v{artifact.version}
-                </Badge>
-              </div>
+              <CompareSide
+                artifact={artifact}
+                muted={muted}
+                onToggleMute={() => setMuted(!muted)}
+                videoRef={ref}
+                onTimeUpdate={side === 'left' ? onLeftTimeUpdate : undefined}
+              />
               <div className="flex items-center justify-between">
                 <select
                   value={id}
@@ -124,7 +115,7 @@ export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
                   className="bg-background border-input rounded border px-1 py-0.5 text-xs"
                 >
                   {artifacts.map(option => (
-                    <option key={option.id} value={option.id}>v{option.version}</option>
+                    <option key={option.id} value={option.id}>v{option.version}{option.label ? ` · ${option.label}` : ''}</option>
                   ))}
                 </select>
                 <Button
@@ -140,6 +131,60 @@ export function VersionCompare({ storyboardId, artifacts, onAdopted }: {
           )
         })}
       </div>
+    </div>
+  )
+}
+
+/** 一侧的播放面：blob URL 由 useArtifactUrl 以会话头取回；加载失败/被元素拒播
+ *  走 ArtifactLoadError 的原地重试，与全站产物渲染同一链路、同一语义。 */
+function CompareSide({ artifact, muted, onToggleMute, videoRef, onTimeUpdate }: {
+  artifact: ArtifactOption
+  muted: boolean
+  onToggleMute(): void
+  videoRef: React.RefObject<HTMLVideoElement | null>
+  onTimeUpdate?(): void
+}) {
+  const { t } = useI18n()
+  const { url, failed, reload } = useArtifactUrl(artifact.downloadUrl)
+  // blob 取回成功仍可能被元素拒播（编解码/截断），与 ArtifactMedia 同款第二层失败。
+  const [rejected, setRejected] = useState(false)
+  useEffect(() => { setRejected(false) }, [url])
+
+  if (failed || rejected) {
+    return (
+      <div className="relative overflow-hidden rounded-md border">
+        <div className="aspect-video w-full">
+          <ArtifactLoadError className="h-full w-full" onRetry={() => { setRejected(false); reload() }} />
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="relative overflow-hidden rounded-md border">
+      {url ? (
+        <video
+          ref={videoRef}
+          src={url}
+          muted={muted}
+          className="aspect-video w-full"
+          onTimeUpdate={onTimeUpdate}
+          onError={() => setRejected(true)}
+          controls={false}
+        />
+      ) : (
+        <Skeleton className="aspect-video w-full" />
+      )}
+      <button
+        type="button"
+        onClick={onToggleMute}
+        className="bg-background/80 absolute right-1 top-1 rounded p-1 text-xs"
+        aria-label={muted ? t('compare.unmute') : t('compare.mute')}
+      >
+        {muted ? '🔇' : '🔊'}
+      </button>
+      <Badge variant="outline" className="absolute left-1 top-1 text-[10px]">
+        v{artifact.version}
+      </Badge>
     </div>
   )
 }

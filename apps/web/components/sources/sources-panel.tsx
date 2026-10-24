@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
-import { ArchiveIcon, BookTextIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, CircleHelpIcon, FileTextIcon, KeyboardIcon, LoaderCircleIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, SparklesIcon, Trash2Icon, UploadIcon } from 'lucide-react'
+import { ArchiveIcon, BookTextIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, CircleHelpIcon, FileTextIcon, KeyboardIcon, LoaderCircleIcon, PencilIcon, RefreshCwIcon, ScrollTextIcon, SparklesIcon, Trash2Icon, TriangleAlertIcon, UploadIcon } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
@@ -20,12 +20,36 @@ import { Hint } from '@/components/ui/hint'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { LineageBadge } from '@/components/lineage-badge'
 import { apiErrorMessage } from '@/lib/api-error'
+
+/** 项目级节奏阈值、量测读数与门；字段口径抄 pipeline 的 content-audit。 */
+export interface ShotRhythm {
+  settings: { avgShotMs: number; longTakeMinMs: number; longTakeShareMin: number }
+  /** Null when the text carries no shot table — the gate then does not apply. */
+  readings: {
+    shotCount: number
+    totalMs: number
+    avgShotMs: number
+    maxShotMs: number
+    longTakeMinMs: number
+    longTakeCount: number
+    longTakeMs: number
+    longTakeShare: number
+    shortShotCount: number
+    shortShotShare: number
+  } | null
+  gate: { pass: boolean; failures: ('avgShot' | 'longTakeShare')[] }
+  measuredAt: string
+  accepted: boolean
+  /** Snapshot = frozen at approval; live = measured against the current text and settings. */
+  source: 'live' | 'snapshot'
+}
 
 /** Summary row shared by GET source-versions and GET script-versions. */
 export interface VersionSummary {
@@ -38,6 +62,8 @@ export interface VersionSummary {
   archivedAt?: string | null
   /** Only scripts carry lineage: the task that wrote the version, null when a human did. */
   generationTaskId?: string | null
+  /** Only scripts carry rhythm readings. */
+  rhythm?: ShotRhythm
 }
 
 /** The latest failed AI derivation for this episode, surfaced so silence never reads as success. */
@@ -64,6 +90,9 @@ interface ScriptApproveResponse {
 
 const EMPTY_VERSIONS: VersionSummary[] = []
 
+/** 与 pipeline 的 SHORT_SHOT_MS 同值；web 不能 import @studio/pipeline，故在此重述。 */
+const SHORT_SHOT_SECONDS = 3
+
 /** A small question mark that explains jargon on hover — terms users can't be expected to know. */
 function HelpHint({ text }: { text: string }) {
   return (
@@ -81,6 +110,105 @@ function HelpHint({ text }: { text: string }) {
 /** Version rows carry the SCREAMING workflow enum; StatusBadge speaks lowercase tones. */
 function toneFor(status: string): string {
   return status.toLowerCase()
+}
+
+function secondsOf(ms: number): string {
+  return (ms / 1000).toFixed(1)
+}
+
+/**
+ * 剧本行的紧凑节奏读数。门不过只是换一种颜色，不当错误弹窗——读数本来就该在
+ * 按「通过」之前可见，而不是用一次 409 才告诉写作者。
+ */
+function RhythmReadout({ rhythm }: { rhythm: ShotRhythm }) {
+  const { t } = useI18n()
+  const readings = rhythm.readings
+  if (!readings) {
+    return <p className="text-muted-foreground text-xs">{t('sources.rhythmNoTable')}</p>
+  }
+  const failed = !rhythm.gate.pass
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <p className={cn('cursor-help text-xs tabular-nums', failed ? 'text-warning-ink' : 'text-muted-foreground')}>
+          {t('sources.rhythmLine', {
+            shots: readings.shotCount,
+            avg: secondsOf(readings.avgShotMs),
+            long: readings.longTakeCount,
+            short: Math.round(readings.shortShotShare * 100),
+          })}
+          {failed && ` · ${t('sources.rhythmBelow')}`}
+          {rhythm.accepted && ` · ${t('sources.rhythmAcceptedBadge')}`}
+        </p>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs space-y-1">
+        <p>{t('sources.rhythmThresholds', {
+          avg: secondsOf(rhythm.settings.avgShotMs),
+          long: secondsOf(rhythm.settings.longTakeMinMs),
+          share: Math.round(rhythm.settings.longTakeShareMin * 100),
+        })}</p>
+        {rhythm.gate.failures.map(failure => (
+          <p key={failure} className="text-warning-ink">
+            {failure === 'avgShot'
+              ? t('sources.rhythmFailAvg', { min: secondsOf(rhythm.settings.avgShotMs) })
+              : t('sources.rhythmFailLong', {
+                  actual: Math.round(readings.longTakeShare * 100),
+                  min: secondsOf(rhythm.settings.longTakeMinMs),
+                  share: Math.round(rhythm.settings.longTakeShareMin * 100),
+                })}
+          </p>
+        ))}
+        <p className="text-muted-foreground">{t('sources.rhythmSourceHint')}</p>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** 读数在门未过时的完整摊开：数字、阈值、为什么被拦，一处看全。 */
+function RhythmDetail({ rhythm }: { rhythm: ShotRhythm }) {
+  const { t } = useI18n()
+  const readings = rhythm.readings
+  if (!readings) return <p className="text-sm">{t('sources.rhythmNoTable')}</p>
+  const failed = !rhythm.gate.pass
+  const cells: { label: string; value: string }[] = [
+    { label: t('sources.rhythmShots'), value: String(readings.shotCount) },
+    { label: t('sources.rhythmAvg'), value: t('sources.rhythmValueSeconds', { value: secondsOf(readings.avgShotMs) }) },
+    {
+      label: t('sources.rhythmLongLabel', { min: secondsOf(rhythm.settings.longTakeMinMs) }),
+      value: t('sources.rhythmLongValue', {
+        count: readings.longTakeCount,
+        share: Math.round(readings.longTakeShare * 100),
+      }),
+    },
+    { label: t('sources.rhythmShort', { max: String(SHORT_SHOT_SECONDS) }), value: `${readings.shortShotCount} · ${Math.round(readings.shortShotShare * 100)}%` },
+  ]
+  return (
+    <div className="space-y-2">
+      <dl className="grid grid-cols-2 gap-2 rounded-md border px-3 py-2 text-sm">
+        {cells.map(cell => (
+          <div key={cell.label}>
+            <dt className="text-muted-foreground text-xs">{cell.label}</dt>
+            <dd className={cn('tabular-nums', failed && 'text-warning-ink')}>{cell.value}</dd>
+          </div>
+        ))}
+      </dl>
+      {failed && (
+        <ul className="text-warning-ink space-y-1 text-xs">
+          {rhythm.gate.failures.map(failure => (
+            <li key={failure}>
+              {failure === 'avgShot'
+                ? t('sources.rhythmFailAvg', { min: secondsOf(rhythm.settings.avgShotMs) })
+                : t('sources.rhythmFailLong', {
+                    actual: Math.round(readings.longTakeShare * 100),
+                    min: secondsOf(rhythm.settings.longTakeMinMs),
+                    share: Math.round(rhythm.settings.longTakeShareMin * 100),
+                  })}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 interface SourcesPanelProps {
@@ -105,6 +233,9 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
   const [aiErrorDismissedAt, setAiErrorDismissedAt] = useState<string | null>(null)
   // Deletes are destructive and always confirmed; archive/unarchive is reversible and never confirmed.
   const [deleteConfirm, setDeleteConfirm] = useState<{ kind: 'script' | 'source'; version: VersionSummary } | null>(null)
+  // 节奏门没过时不直接提交：先把读数摊开，人勾了「我接受」才带着 acceptRhythm 再发。
+  const [rhythmGate, setRhythmGate] = useState<{ version: VersionSummary; rhythm: ShotRhythm } | null>(null)
+  const [rhythmAcknowledged, setRhythmAcknowledged] = useState(false)
   const [showArchivedScripts, setShowArchivedScripts] = useState(false)
   const [showArchivedSources, setShowArchivedSources] = useState(false)
   // 手工录入是次路径:整本书拆分生成的原文直接落在版本表里,粘贴框只在
@@ -236,21 +367,37 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
     }
   }
 
-  async function approveScript(version: VersionSummary) {
+  async function approveScript(version: VersionSummary, acceptRhythm = false) {
     if (!episodeId) return
+    // 门没过时先摊读数：这个门不判剧本好坏，只拦「没人看过节奏就放行」。
+    if (!acceptRhythm && version.rhythm?.readings && !version.rhythm.gate.pass) {
+      setRhythmGate({ version, rhythm: version.rhythm })
+      setRhythmAcknowledged(false)
+      return
+    }
     setBusy(`approve-script-${version.version}`)
     try {
       const result = await api<ScriptApproveResponse>(`/episodes/${episodeId}/script-versions/${version.version}/approve`, {
         method: 'POST',
+        body: JSON.stringify(acceptRhythm ? { acceptRhythm: true } : {}),
       })
       toast.success(
         result.cascaded
           ? t('sources.scriptApprovedRegenerating', { version: version.version })
-          : t('sources.scriptApproved', { version: version.version, count: result.storyboardsUpdated }),
+          : acceptRhythm
+            ? t('sources.scriptApprovedAccepted', { version: version.version, count: result.storyboardsUpdated })
+            : t('sources.scriptApproved', { version: version.version, count: result.storyboardsUpdated }),
       )
       reloadAll()
       onScriptApproved?.()
     } catch (error) {
+      // 列表里的读数可能比服务端旧（别的页面刚改过正文），所以 409 兜底再摊一次。
+      const gateBody = error instanceof ApiError && error.message === 'script:rhythmGate' ? error.body?.rhythm : undefined
+      if (gateBody && typeof gateBody === 'object' && 'gate' in gateBody) {
+        setRhythmGate({ version, rhythm: gateBody as ShotRhythm })
+        setRhythmAcknowledged(false)
+        return
+      }
       toast.error(apiErrorMessage(error, t))
       reloadAll()
     } finally {
@@ -662,6 +809,43 @@ export function SourcesPanel({ episodeId, projectId, onScriptApproved }: Sources
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={rhythmGate !== null} onOpenChange={open => !open && setRhythmGate(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <TriangleAlertIcon className="text-warning-ink size-4" />
+              {t('sources.rhythmGateTitle')}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{t('sources.rhythmGateBody')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {rhythmGate && <RhythmDetail rhythm={rhythmGate.rhythm} />}
+          <label className="flex cursor-pointer items-start gap-2 text-sm">
+            <Switch
+              checked={rhythmAcknowledged}
+              onCheckedChange={setRhythmAcknowledged}
+              disabled={busy === `approve-script-${rhythmGate?.version.version}`}
+            />
+            <span>{t('sources.rhythmAccept')}</span>
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!rhythmAcknowledged || busy === `approve-script-${rhythmGate?.version.version}`}
+              onClick={event => {
+                event.preventDefault()
+                if (!rhythmGate) return
+                const version = rhythmGate.version
+                setRhythmGate(null)
+                setRhythmAcknowledged(false)
+                void approveScript(version, true)
+              }}
+            >
+              {busy === `approve-script-${rhythmGate?.version.version}` ? t('sources.approving') : t('sources.rhythmGateConfirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   )
 }
@@ -794,6 +978,7 @@ function VersionTable({
                       </TooltipTrigger>
                       <TooltipContent className="break-all">{`${t('sources.checksum')} ${version.checksum}`}</TooltipContent>
                     </Tooltip>
+                    {kind === 'script' && version.rhythm && <RhythmReadout rhythm={version.rhythm} />}
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={toneFor(version.status)} label={t(`status.${toneFor(version.status)}`)} />

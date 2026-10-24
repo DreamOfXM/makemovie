@@ -39,10 +39,11 @@ import { GuardedButton, usePermission } from '@/components/permission'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
 import { AutomationNotice } from '@/components/AutomationTierSelector'
-import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog'
 import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
 import { DeliveryPanel } from '@/components/deliveries/delivery-panel'
+import { TimelineEditor } from '@/components/shotboard/workbench/timeline-editor'
+import { QualityFindingsPanel } from '@/components/episode/quality-findings-panel'
 import { StoryboardCard } from '@/components/storyboards/storyboard-card'
 import { StoryboardHistory } from '@/components/storyboards/storyboard-history'
 import { EpisodeFlow } from '@/components/episode/episode-flow'
@@ -115,11 +116,7 @@ function EpisodeWorkspace() {
   // what a run will look like is visible where the run is triggered.
   const [stylePresetId, setStylePresetId] = useState<string | null>(null)
   const [styleName, setStyleName] = useState<string | null>(null)
-  const [qcMaxAttempts, setQcMaxAttempts] = useState<number | null>(null)
-  const [audioMode, setAudioMode] = useState<'video_native' | 'voice_clone' | null>(null)
-  const [contentLocale, setContentLocale] = useState<'zh' | 'en' | null>(null)
   const [automationGate, setAutomationGate] = useState<Project['automationGate']>(null)
-  const [styleSettingsOpen, setStyleSettingsOpen] = useState(false)
   const [regenStoryboardOpen, setRegenStoryboardOpen] = useState(false)
   const [regenStoryboardBusy, setRegenStoryboardBusy] = useState(false)
   // 风格是项目级事实：徽章只读展示名字，变更仍走配置弹窗。
@@ -153,9 +150,6 @@ function EpisodeWorkspace() {
       .then(list => {
         const row = list.find(item => item.id === projectId)
         setStylePresetId(row?.stylePresetId ?? null)
-        setQcMaxAttempts(typeof row?.qcMaxAttempts === 'number' ? row.qcMaxAttempts : null)
-        setAudioMode(row?.audioMode === 'voice_clone' ? 'voice_clone' : 'video_native')
-        setContentLocale(row?.contentLocale === 'en' ? 'en' : row?.contentLocale === 'zh' ? 'zh' : null)
         setAutomationGate(row?.automationGate ?? null)
       })
       .catch(() => setStylePresetId(null))
@@ -163,6 +157,11 @@ function EpisodeWorkspace() {
   useEffect(() => {
     loadProjectStyle()
   }, [loadProjectStyle])
+
+  const openSettings = useCallback(
+    (hash: 'style' | 'automation') => router.push(`/settings?project=${projectId}#${hash}`),
+    [projectId, router],
+  )
 
   const view: EpisodeTab =
     readViewParam(searchParams.get(VIEW_PARAM)) ??
@@ -346,7 +345,9 @@ function EpisodeWorkspace() {
     const apiStage = stage === 'FIRST_FRAME' ? 'IMAGE' : stage
     setRegeneratingShot(`${storyboardId}:${stage}`)
     try {
-      await api(`/episodes/${episodeId}/generations`, {
+      // created:false 表示后端命中了同一幂等键上已有的那一笔（在途/已阻塞/停在问询），
+      // 既没新任务也没新花费。报成功会掩盖死按钮，这里如实分开（2026-10-22 #20 实测）。
+      const result = await api<{ created?: boolean }>(`/episodes/${episodeId}/generations`, {
         method: 'POST',
         body: JSON.stringify({
           stage: apiStage,
@@ -355,7 +356,11 @@ function EpisodeWorkspace() {
           promptNote: note?.trim() || undefined,
         }),
       })
-      toast.success(t('generations.shotRegenerated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
+      if (result?.created === false) {
+        toast.info(t('generations.shotNotCreated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
+      } else {
+        toast.success(t('generations.shotRegenerated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
+      }
       setGenerationsToken(token => token + 1)
       storyboardsMedia.reload()
       // 立即刷新批次数据:分镜卡"生成中"的判定源就是它,不等 3s 轮询。
@@ -387,7 +392,8 @@ function EpisodeWorkspace() {
     bumpBoard()
   }, [episodes.reload, storyboardsMedia.reload, episodeAssets.reload, bumpBoard])
 
-  async function bindStoryboardAssets(storyboardId: string, assets: { assetId: string; role: string }[]) {
+  // role 不再由客户端给：服务端按素材自己的 kind 归一（SD-123），一个词表只住在一处。
+  async function bindStoryboardAssets(storyboardId: string, assets: { assetId: string }[]) {
     try {
       await api(`/storyboards/${storyboardId}/assets`, { method: 'PUT', body: JSON.stringify({ assets }) })
       toast.success(t('storyboards.assetsUpdated'))
@@ -423,7 +429,7 @@ function EpisodeWorkspace() {
       {/* 档位预告：在任何按钮按下之前先说清楚接下来会自动跑还是等人。 */}
       <AutomationNotice
         value={automationGate ?? defaultAutomationGate}
-        onChangeClick={() => setStyleSettingsOpen(true)}
+        onChangeClick={() => openSettings('automation')}
       />
 
       {episodes.error && <ErrorState message={episodes.error} onRetry={episodes.reload} />}
@@ -442,7 +448,7 @@ function EpisodeWorkspace() {
           }}
           onOpenFlow={() => setView('flow')}
           onOpenStoryboardCard={() => { setFlowScrollTarget('step-storyboards'); setView('flow') }}
-          onOpenSettings={() => setStyleSettingsOpen(true)}
+          onOpenSettings={() => openSettings('style')}
           styleName={styleName}
           onCreateShot={() => setStoryboardDialog({ mode: 'create', nextNumber: nextStoryboardNumber })}
           onChangeStatus={shot => {
@@ -465,14 +471,24 @@ function EpisodeWorkspace() {
               { id: 'step-assets', steps: ['assets'] },
               { id: 'step-storyboards', steps: ['storyboards'] },
               { id: 'block-media', steps: ['media', 'composition'] },
+              // 质检队列不占流程步骤：它是合成之后、交付之前的一次人工过目，
+              // 完成与否由 findings 的裁决状态说话，不由步骤序号说话。
+              { id: 'step-quality', steps: [] },
               { id: 'step-delivery', steps: ['delivery'] },
             ]}
             revealTarget={flowScrollTarget}
             onAdvanced={refreshAfterAdvance}
           >
-            <SourcesPanel episodeId={episodeId} projectId={projectId} onScriptApproved={refreshAfterAdvance} />
-            <AssetsPanel episodeId={episodeId} projectId={projectId} />
-            <Card>
+            {/* 面板以 data-flow-step 声明自己属于哪个流程块（值=blocks[].id），
+                与数组位置无关；不声明的面板（时间线剪辑）渲染在流程下方，
+                不参与步骤折叠。 */}
+            <div data-flow-step="step-source">
+              <SourcesPanel episodeId={episodeId} projectId={projectId} onScriptApproved={refreshAfterAdvance} />
+            </div>
+            <div data-flow-step="step-assets">
+              <AssetsPanel episodeId={episodeId} projectId={projectId} />
+            </div>
+            <Card data-flow-step="step-storyboards">
               <CardHeader>
                 <CardTitle className="flex flex-wrap items-center gap-2">
                   <ClapperboardIcon className="text-muted-foreground size-4" />
@@ -596,14 +612,29 @@ function EpisodeWorkspace() {
                 </CardContent>
               )}
             </Card>
-            <GenerationsPanel
-              episodeId={episodeId}
-              reloadToken={generationsToken}
-              storyboards={storyboards}
-              stylePresetId={stylePresetId}
-              onStyleClick={() => setStyleSettingsOpen(true)}
-            />
-            <DeliveryPanel episodeId={episodeId} />
+            <div data-flow-step="block-media">
+              <GenerationsPanel
+                episodeId={episodeId}
+                reloadToken={generationsToken}
+                storyboards={storyboards}
+                stylePresetId={stylePresetId}
+                onStyleClick={() => openSettings('style')}
+              />
+            </div>
+            {/* 时间线是剪辑面，不是流程步骤的面板（§2.1 剪辑工作区属 B 批重组）：
+                不挂 data-flow-step，渲染在流程下方的非步骤区，始终可见——它服务
+                的正是合成已过、要改序列再重合成的时刻，跟着 block-media 折叠会把
+                工具藏到最需要它的时候。 */}
+            <TimelineEditor episodeId={episodeId} />
+            <div data-flow-step="step-quality">
+              <QualityFindingsPanel
+                episodeId={episodeId}
+                onLocateShot={storyboardId => setFlowScrollTarget(`shot-${storyboardId}`)}
+              />
+            </div>
+            <div data-flow-step="step-delivery">
+              <DeliveryPanel episodeId={episodeId} />
+            </div>
           </EpisodeFlow>
         </>
       )}
@@ -622,18 +653,6 @@ function EpisodeWorkspace() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <ProjectSettingsDialog
-        open={styleSettingsOpen}
-        projectId={projectId}
-        currentStyleId={stylePresetId}
-        qcMaxAttempts={qcMaxAttempts}
-        audioMode={audioMode}
-        contentLocale={contentLocale}
-        automationGate={automationGate}
-        onOpenChange={setStyleSettingsOpen}
-        onStyleChanged={loadProjectStyle}
-      />
 
       <StoryboardDialog
         state={storyboardDialog}

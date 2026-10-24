@@ -52,8 +52,54 @@ export interface ProviderAdapter {
    * 可选方法——不支持的适配器没有它,路由按方法存在与否选模型,而不是猜能力。
    */
   extend?(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult>
+  /**
+   * US-021 定向编辑:对已有视频下达具体修改指令(改颜色/换物体/加元素等),
+   * 保留未提及区域。input.media 携带 source_clip + reference_image(可选);
+   * prompt 是修改指令。适配器须声明支持范围,不保证逐像素保留。
+   *
+   * 能力表达以适配器实际行为为准(方法存在与否、抛错语义),不依赖目录 spec 里的
+   * 声明字段——spec 里若写 videoEdit: {preserveRange, maxDurationMs, supportMute}
+   * 一类键,只是给人看的注记,不参与选型判定。
+   */
+  editVideo?(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult>
+  /**
+   * US-033 ASR:把一段音频转成文本(带可选的分段时间)。同步语义——轮询型供应商
+   * 在适配器内部消化,调用方拿到的 Promise 落定时结果已在手上。可选方法:路由按
+   * 方法存在与否判「缺 asr 能力」,与 extend/editVideo 同一纪律。
+   */
+  transcribe?(capability: ModelCapability, request: TranscribeRequest): Promise<TranscribeResult>
   submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult>
   poll(capability: ModelCapability, taskId: string): Promise<PollResult>
+}
+
+export interface TranscribeSegment {
+  startMs: number
+  endMs: number
+  text: string
+}
+
+export interface TranscribeRequest {
+  /**
+   * 二选一:一段 `data:` URL,或裸字节加声明类型。真实适配器把它们喂给厂商端点,
+   * mock 只看时长元数据——它从未听过这段音频。
+   */
+  audio: { dataUrl?: string; bytes?: Uint8Array; mimeType?: string }
+  /** ISO 639-1 提示,如 'zh'/'en';厂商端点可选参数,原样透传。 */
+  language?: string
+  /** 音频时长(毫秒)。真实适配器从响应读分段时间,mock 按它均分 segments。 */
+  durationMs?: number
+  /**
+   * 请求元数据,不是协议字段:mock 按它构造确定性转写(差异测试用它驱动"应念的
+   * 文本"),真实适配器必须忽略——把期望文本回显成转写结果等于伪造通过。
+   */
+  expectedText?: string
+}
+
+export interface TranscribeResult {
+  transcript: string
+  segments?: TranscribeSegment[]
+  provider: string
+  model: string
 }
 
 export interface AdapterOptions {

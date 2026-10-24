@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import type { ShotboardShot } from '@/lib/api'
 import { cardStage, shotFailureKind, shotVerdict, stageTone, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
  * 点击一格=选中那一镜。不是时间线编辑器——剪辑仍是交付之后的事。
  * 一格三个通道，各说一件事：底色=能不能直接用上、底部亮线=钦定与否、格内文字=与镜头行同一个词。
  */
-export function ShotStrip({ shots, onOpen }: { shots: ShotboardShot[]; onOpen(shotId: string): void }) {
+export function ShotStrip({ shots, activeId, onOpen }: { shots: ShotboardShot[]; activeId: string | null; onOpen(shotId: string): void }) {
   const { t } = useI18n()
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -43,14 +43,33 @@ export function ShotStrip({ shots, onOpen }: { shots: ShotboardShot[]; onOpen(sh
     }
   }
 
-  useLayoutEffect(fitWords, [cells])
+  /**
+   * 首次布局时字体还没落定、fr 轨道也可能尚未收敛，量一次会把整条判成「放得下」。
+   * 这里连量三拍：下一帧、字体就绪、每一格尺寸变化（列宽变了要重判）。隐藏用
+   * visibility 而不是 display，词被藏起来后仍能继续量出真实宽度，窗口变宽时能恢复。
+   */
   useEffect(() => {
     const root = rootRef.current
-    if (!root || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(fitWords)
+    if (!root) return
+    let frame = 0
+    const schedule = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        fitWords()
+        frame = requestAnimationFrame(fitWords)
+      })
+    }
+    schedule()
+    void document.fonts?.ready.then(schedule)
+    if (typeof ResizeObserver === 'undefined') return () => cancelAnimationFrame(frame)
+    const observer = new ResizeObserver(schedule)
     observer.observe(root)
-    return () => observer.disconnect()
-  })
+    for (const cell of root.querySelectorAll('.strip-cell')) observer.observe(cell)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [cells])
 
   return (
     <div
@@ -62,15 +81,18 @@ export function ShotStrip({ shots, onOpen }: { shots: ShotboardShot[]; onOpen(sh
     >
       {cells.map(({ shot, tone, chosen, word, empty }) => {
         const label = `#${shot.number} ${shot.title} · ${formatDuration(shot.durationMs)} · ${word}${chosen ? ` · ${t('shotboard.strip.chosen')}` : ''}`
+        const active = shot.id === activeId
         return (
           <Tooltip key={shot.id}>
             <TooltipTrigger asChild>
               <button
                 type="button"
                 aria-label={label}
+                aria-pressed={active}
                 onClick={() => onOpen(shot.id)}
                 data-empty={empty ? '1' : undefined}
                 data-chosen={chosen ? '1' : undefined}
+                data-active={active ? '1' : undefined}
                 className={cn(
                   'strip-cell flex items-center justify-center overflow-hidden rounded-sm transition-opacity hover:opacity-70',
                   tone === 'ready' && 'bg-success/45 text-success-ink',

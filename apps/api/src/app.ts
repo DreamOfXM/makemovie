@@ -10,6 +10,7 @@ import { seedOfficialStyles } from '@studio/pipeline'
 import './types.js'
 import { authRoutes } from './routes/auth.js'
 import { projectRoutes } from './routes/projects.js'
+import { organizationRoutes } from './routes/organization.js'
 import { episodeRoutes } from './routes/episodes.js'
 import { memberRoutes } from './routes/members.js'
 import { auditRoutes } from './routes/audit.js'
@@ -27,10 +28,13 @@ import { recipeRoutes } from './routes/recipes.js'
 import { storyDraftRoutes } from './routes/story-drafts.js'
 import { creationReadinessRoutes } from './routes/creation-readiness.js'
 import { creationPlanRoutes } from './routes/creation-plans.js'
+import { batchRoutes } from './routes/batches.js'
 import { creativeControlsRoutes } from './routes/creative-controls.js'
 import { selectionLockRoutes } from './routes/selection-locks.js'
 import { episodeEditRoutes } from './routes/episode-edit.js'
 import { editFreshnessRoutes } from './routes/edit-freshness.js'
+import { qualityFindingRoutes } from './routes/quality-findings.js'
+import { audioReviewRoutes } from './routes/audio-review.js'
 import { pipelineRoutes } from './routes/pipelines.js'
 import { assetRoutes } from './routes/assets.js'
 import { deliveryRoutes } from './routes/deliveries.js'
@@ -80,6 +84,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // All API routes
   await app.register(authRoutes, { prefix: '/auth' })
   await app.register(projectRoutes, { prefix: '/api' })
+  await app.register(organizationRoutes, { prefix: '/api' })
   await app.register(episodeRoutes, { prefix: '/api' })
   await app.register(memberRoutes, { prefix: '/api' })
   await app.register(auditRoutes, { prefix: '/api' })
@@ -102,10 +107,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(storyDraftRoutes, { prefix: '/api' })
   await app.register(creationReadinessRoutes, { prefix: '/api' })
   await app.register(creationPlanRoutes, { prefix: '/api' })
+  await app.register(batchRoutes, { prefix: '/api' })
   await app.register(creativeControlsRoutes, { prefix: '/api' })
   await app.register(selectionLockRoutes, { prefix: '/api' })
   await app.register(episodeEditRoutes, { prefix: '/api' })
   await app.register(editFreshnessRoutes, { prefix: '/api' })
+  await app.register(qualityFindingRoutes, { prefix: '/api' })
+  await app.register(audioReviewRoutes, { prefix: '/api' })
   await app.register(mcpRoutes)
 
   app.addHook('onClose', async () => {

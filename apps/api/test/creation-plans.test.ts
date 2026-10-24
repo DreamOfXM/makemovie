@@ -67,6 +67,11 @@ describe('creation plans & production runs (US-011)', () => {
     expect(replay.json().idempotentReplay).toBe(true)
     expect(replay.json().batchId).toBe(batchId)
 
+    // V08:幂等占位落在数据库里(CreationRun),不是进程内 Map——重启/多实例同键
+    // 仍复用同一 batchId。
+    expect(await env.db.creationRun.count({ where: { requestKey: { endsWith: ':run:run-once' } } })).toBe(1)
+    expect((await env.db.creationRun.findFirstOrThrow({ where: { requestKey: { endsWith: ':run:run-once' } } })).batchId).toBe(batchId)
+
     // 同键异参:409 冲突,不是静默复用。
     const conflict = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/production-runs`, headers: { ...json(ownerToken), 'idempotency-key': 'run-once' }, payload: { stage: 'SCRIPT', fingerprint, promptNote: 'different' } })
     expect(conflict.statusCode).toBe(409)
@@ -74,6 +79,33 @@ describe('creation plans & production runs (US-011)', () => {
     // 不带键的重复提交:triggerStage 幂等键去重(同一镜已有成功任务不再新建)。
     const again = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/production-runs`, headers: json(ownerToken), payload: { stage: 'SCRIPT', fingerprint } })
     expect([200, 201]).toContain(again.statusCode)
+  })
+
+  it('binds the fingerprint to the resolved target set — adding a shot invalidates old plans (V08)', async () => {
+    // VIDEO 阶段按全集解析:先 1 镜计划,新增第 2 镜后指纹必须变化,旧指纹提交 409。
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: json(ownerToken), payload: { name: 'Plan Drift Drama' } })
+    const driftEpisode = await env.app.inject({ method: 'POST', url: `/api/projects/${project.json().id}/episodes`, headers: json(ownerToken), payload: { number: 1, title: 'EP1' } })
+    const driftEpisodeId = driftEpisode.json().id as string
+    const shot = await env.app.inject({ method: 'POST', url: `/api/episodes/${driftEpisodeId}/storyboards`, headers: json(ownerToken), payload: { number: 1, title: 'S1', durationMs: 5000, description: 'd', sourceExcerpt: 'x', continuityIn: '', continuityOut: '' } })
+    expect(shot.statusCode).toBe(201)
+
+    const planOne = await env.app.inject({ method: 'POST', url: `/api/episodes/${driftEpisodeId}/creation-plans`, headers: json(ownerToken), payload: { stage: 'VIDEO' } })
+    expect(planOne.statusCode).toBe(200)
+    const one = planOne.json() as { plan: { fingerprint: string; estimatedTasks: number } }
+    expect(one.plan.estimatedTasks).toBe(1)
+
+    const shotTwo = await env.app.inject({ method: 'POST', url: `/api/episodes/${driftEpisodeId}/storyboards`, headers: json(ownerToken), payload: { number: 2, title: 'S2', durationMs: 5000, description: 'd', sourceExcerpt: 'x', continuityIn: '', continuityOut: '' } })
+    expect(shotTwo.statusCode).toBe(201)
+    const planTwo = await env.app.inject({ method: 'POST', url: `/api/episodes/${driftEpisodeId}/creation-plans`, headers: json(ownerToken), payload: { stage: 'VIDEO' } })
+    const two = planTwo.json() as { plan: { fingerprint: string; estimatedTasks: number } }
+    expect(two.plan.estimatedTasks).toBe(2)
+    // 修复前:省略 storyboardIds 时两次指纹完全相同——任务量变了、凭据没变。
+    expect(two.plan.fingerprint).not.toBe(one.plan.fingerprint)
+
+    // 旧指纹提交:漂移被运行接口同样发现 → 409 replan。
+    const stale = await env.app.inject({ method: 'POST', url: `/api/episodes/${driftEpisodeId}/production-runs`, headers: json(ownerToken), payload: { stage: 'VIDEO', fingerprint: one.plan.fingerprint } })
+    expect(stale.statusCode).toBe(409)
+    expect(stale.json().code).toBe('version_conflict')
   })
 
   it('keeps planning readable but running privileged', async () => {
@@ -84,4 +116,14 @@ describe('creation plans & production runs (US-011)', () => {
     expect((await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/production-runs` })).statusCode).toBe(401)
     void fingerprint
   })
+})
+
+it('replays an already committed run after its generated script changes the current plan', async () => {
+  const prior = await env.db.creationRun.findUniqueOrThrow({ where: { requestKey: `${orgId}:run:run-once` } })
+  await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: 'generated script', checksum: 'generated', status: 'DRAFT' } })
+  const replay = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/production-runs`, headers: { ...json(ownerToken), 'idempotency-key': 'run-once' }, payload: { stage: 'SCRIPT', fingerprint: prior.fingerprint } })
+  expect(replay.statusCode).toBe(200)
+  expect(replay.json()).toMatchObject({ batchId: prior.batchId, idempotentReplay: true })
+  const changed = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/production-runs`, headers: { ...json(ownerToken), 'idempotency-key': 'run-once' }, payload: { stage: 'SCRIPT', fingerprint: prior.fingerprint, promptNote: 'new request' } })
+  expect(changed.statusCode).toBe(409)
 })

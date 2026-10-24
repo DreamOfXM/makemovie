@@ -89,6 +89,17 @@ export interface CatalogHiddenInfo {
   models: Array<{ provider: string; model: string; displayName: string }>
 }
 
+/** 单条模型的时长实测/文档留痕。只有 probe 会下调有效上限，doc/manual 只做标注。 */
+export interface DurationEvidence {
+  source: 'probe' | 'doc' | 'manual'
+  checkedAt: string
+  verifiedSeconds?: number
+  declaredSeconds?: number
+  url?: string
+  taskId?: string
+  note?: string
+}
+
 export interface Capability {
   id: string
   model: string
@@ -102,6 +113,21 @@ export interface Capability {
   entitlementVerifiedAt: string | null
   credentialVerifiedAt: string | null
   lastProbedAt: string | null
+  /** 厂商声明的能力参数（时长档位等）；手工添加的行可能为 null。 */
+  spec: unknown
+  durationEvidence: DurationEvidence | null
+}
+
+/** PATCH /providers/capabilities/:id/duration-evidence — 实测/文档核对留痕。 */
+export function patchDurationEvidence(
+  api: ApiClient,
+  capabilityId: string,
+  evidence: DurationEvidence | null,
+): Promise<{ capabilityId: string; durationEvidence: DurationEvidence | null }> {
+  return api(`/providers/capabilities/${capabilityId}/duration-evidence`, {
+    method: 'PATCH',
+    body: JSON.stringify({ durationEvidence: evidence }),
+  })
 }
 
 export interface Connection {
@@ -228,12 +254,24 @@ export interface Project {
   contentLocale: ContentLocale
   /** The project's default style preset for generation. */
   stylePresetId: string | null
-  /** 审计不过线时的自动重抽上限（1-3）；null = 默认 2。 */
-  qcMaxAttempts: number | null
+  /** 单镜时长上限（毫秒）：10000 / 15000 / 30000；null = 跟随绑定模型。 */
+  maxShotDurationMs: number | null
+  /** 每镜重抽上限（次数，不含首次，0-3）；null = 默认 1。 */
+  maxRetriesPerShot: number | null
+  /** 技术失败处置：auto2 / auto1 / ask；null = auto2。 */
+  retryTechnical: string | null
+  /** 一致性失败处置：ask / auto1 / auto2；null = ask。 */
+  retryConsistency: string | null
+  /** 创作性失败处置：ask / auto1；null = ask。 */
+  retryCreative: string | null
   /** 语音模式（r10）：video_native = 视频自带声音（默认），voice_clone = 用角色绑定音色。 */
   audioMode: 'video_native' | 'voice_clone' | null
   /** 制作档位：auto / beforeSpend / everyStage；null = beforeSpend（引入档位之前的行为）。 */
   automationGate: AutomationGate | null
+  /** 分镜节奏契约（JSON 字符串：avgShotMs / longTakeMinMs / longTakeShareMin）；null = 起始默认。 */
+  shotRhythm: string | null
+  /** 示例作品：只读展示，任何写入入口都必须关掉。 */
+  isExample: boolean
   createdAt: string
   updatedAt: string
   /** Episode status summary, carried so the lifecycle bar renders without a drill-down. */
@@ -311,6 +349,8 @@ export interface Storyboard {
   continuityOut: string
   /** 场次归属（r06·A 场景主帧）；null=旧数据。 */
   sceneNumber: number | null
+  /** 这一镜的画面要不要模型产出；流程页的生成动作只排 video 镜头。 */
+  production: 'video' | 'ui' | 'title-card' | 'composition' | 'screen-recording'
   status: DbWorkflowStatus
   /** Which of this shot's succeeded clips the human pinned; null means the selection gate is still open. */
   selectedVideoArtifactId?: string | null
@@ -392,6 +432,11 @@ export interface CreateEpisodeInput {
 
 export function createEpisode(api: ApiClient, projectId: string, input: CreateEpisodeInput): Promise<Episode> {
   return api<Episode>(`/projects/${projectId}/episodes`, { method: 'POST', body: JSON.stringify(input) })
+}
+
+/** Rewrites this episode's target only; existing shots keep the length they were planned at. */
+export function updateEpisode(api: ApiClient, episodeId: string, input: { targetDurationMs: number }): Promise<Episode> {
+  return api<Episode>(`/episodes/${episodeId}`, { method: 'PATCH', body: JSON.stringify(input) })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -603,16 +648,37 @@ export interface GenerationArtifact {
   filename?: string | null
 }
 
+/** 候选来源（UX-P04）：生成任务 / 延长操作 / 定向修改操作 / 本机渲染 / 人给的一段片，
+ *  版本行如实标注——后两种没有调用履历，报的是「这版是本地做出来的」而不是「第 N 次生成」。 */
+export type ShotCandidateOrigin = 'generation' | 'extend' | 'directed_edit' | 'local_render' | 'imported'
+
 /** One succeeded VIDEO version of a shot: the selection gate's raw material. */
 export interface ShotVideoCandidate {
   artifactId: string
-  taskId: string
+  /** 产生这条版本的生成任务；延长/定向编辑输出与本机产物都没有任务行，为 null。 */
+  taskId: string | null
+  origin: ShotCandidateOrigin
+  /** 本机画的字卡把卡上的话带回来，供编辑器沿用；其余来源没有这句话，为 null。 */
+  cardText?: string | null
   version: number
   mimeType: string
   durationMs: number | null
   createdAt: string
   selected: boolean
   qc: { kind: string; status: string; score: number | null; reasons?: string[] } | null
+  /** 这一版停在「等你裁决」上：任务失败但问询还没人答，被问的就是这件产物。
+   *  能看能播，但不能直接入片——先收下它（才成为可钦定的成功版本）或重抽。 */
+  awaitingDecision?: boolean
+}
+
+/** 延长/定向编辑操作的状态行：制作台轮询 shotboard，「延长中/修改中/待确认/失败」由它驱动。 */
+export interface ShotOperation {
+  id: string
+  kind: 'video_extend' | 'video_edit'
+  /** QUEUED / RUNNING / BLOCKED(待查询) / FAILED；SUCCEEDED 的结果就是候选本身。 */
+  status: string
+  error: string | null
+  createdAt: string
 }
 
 /** One live shot as the overview grid reads it: media, verdicts, spend and attention codes. */
@@ -630,8 +696,14 @@ export interface ShotboardShot {
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
+  /** 分镜表「转场」列：这一镜怎么进（cut/dissolve/fade_in/fade_out/black/flash）。 */
+  transition: string
+  /** 那一刀的过渡毫秒；硬切恒为 0。 */
+  transitionMs: number
   /** 场次归属（r06·A 场景主帧）；null=旧数据。 */
   sceneNumber: number | null
+  /** 这一镜怎么产出：video=平台生成，其余=按分镜表的生成方式由人完成。 */
+  production: 'video' | 'ui' | 'title-card' | 'composition' | 'screen-recording'
   status: string
   assets: { id: string; kind: string; name: string; status: string; role: string; hasVersions: boolean; reference: boolean }[]
   firstFrame: GenerationArtifact | null
@@ -650,13 +722,21 @@ export interface ShotboardShot {
   audioSource: ShotAudioSource | null
   importedVoice: GenerationArtifact | null
   importedAmbience: GenerationArtifact | null
+  /** 剧本「声音」列写的氛围底（文字，null=没写）。平台不生成环境音，它只告诉你该导哪条。 */
+  ambience: string | null
   videoCandidates: ShotVideoCandidate[]
   frameCandidates: ShotVideoCandidate[]
   voiceCandidates: ShotVideoCandidate[]
+  /** 镜头 CAS 依据（延长 apply_if_unchanged 需要它做 expectedShotRevision）。 */
+  stateRevision: number
+  /** 延长/定向编辑操作状态（新→旧）：QUEUED/RUNNING/BLOCKED/FAILED。 */
+  operations: ShotOperation[]
   usage: { inputUnits: number; outputUnits: number; models: string[]; calls: number } | null
-  /** 放映条与预映共用的占位裁决:钦定成片 > 成功片段 > 在产 > 仅分镜图 > 空。 */
-  slot: 'chosen' | 'video' | 'running' | 'frame' | 'empty'
+  /** 放映条与预映共用的占位裁决:钦定成片 > 成功片段 > 在产 > 仅分镜图 > 本机制作 > 空。 */
+  slot: 'chosen' | 'video' | 'running' | 'frame' | 'local' | 'empty'
   attention: string[]
+  /** 分镜文本的逐镜体检结论（代码，人话在 i18n）。刻意不进 attention：它说「写得不够清楚」，挡路的仍是人。 */
+  storyboardGaps: string[]
   /** 这件事从什么时候开始是你的：来自产物落地/失败/人推进状态的真时间戳，无从取就为 null。 */
   waitingSince: string | null
 }
@@ -709,6 +789,40 @@ export interface GenerationTask {
     candidateErrors: string[]
     reference: { model: string; conditioned: boolean; reason?: string }[]
   } | null
+  /** 三档重抽的「先问」快照：pending = 这个任务停在这里等人决定；
+   * retried / waived = 已裁决，保留原因与计数。 */
+  review: GenerationReview | null
+}
+
+export type GenerationRetryClass = 'technical' | 'consistency' | 'creative'
+export type GenerationRetryPolicy = 'ask' | 'auto1' | 'auto2'
+/** 停下来的那条原因：策略先问 / 每镜上限用完 / 每集额度用完。 */
+export type GenerationAskReason = 'policy' | 'cap' | 'budget'
+
+export interface GenerationReview {
+  state: 'pending' | 'retried' | 'waived'
+  retryClass: GenerationRetryClass
+  /** 触发点：质检器名、segment:N、provider-exhausted。 */
+  kind: string
+  reasons: string[]
+  findings: { dimension: string; message: string; severity?: string; evidenceTimeSeconds?: number | null }[]
+  score: number | null
+  /** 停下之前本任务跑过的尝试数（含首次）。 */
+  attempt: number
+  /** 每镜重抽上限（次数，不含首次）。 */
+  cap: number
+  retriesUsed: number
+  budgetLimit: number | null
+  budgetUsed: number
+  policy: GenerationRetryPolicy
+  autoRetries: number
+  askReason: GenerationAskReason
+  artifactId: string | null
+  error: string | null
+  createdAt: string
+  decidedAt?: string
+  decidedBy?: string | null
+  waiveReason?: string
 }
 
 export interface GenerationBatch {
@@ -724,7 +838,48 @@ export interface GenerationBatch {
 export interface GenerationPlanItem {
   id: string
   label: string
-  disposition: 'new' | 'retry' | 'skipped'
+  /** local = 分镜表写明由人做（字卡/屏幕录制/合成/UI），本次不排平台任务、不计费。 */
+  disposition: 'new' | 'retry' | 'skipped' | 'local'
+}
+
+/** 一镜的分镜文本体检结论，与镜头卡同一套代码。 */
+export interface GenerationPlanShotGap {
+  shotNumber: number
+  codes: string[]
+}
+
+/** 超长镜的一条出路：同镜拼接 / 拆镜（要人改分镜表）/ 换模型。 */
+export interface ShotDurationOption {
+  strategy: 'splice' | 'split' | 'switch_model'
+  available: boolean
+  /** 同镜拼接：要生成几段、每段多长。 */
+  takeCount?: number
+  perTakeMs?: number
+  /** 换模型：能覆盖这个意图的那条候选。 */
+  capabilityId?: string
+  connectionName?: string
+  provider?: string
+  model?: string
+  displayName?: string | null
+  maxMs?: number
+}
+
+/** 一颗镜头打算跑多久、当前上限多少、超了多少、能怎么走。 */
+export interface ShotDurationPreflight {
+  storyboardId: string
+  number: number
+  title: string
+  intentMs: number
+  ceilingMs: number
+  overByMs: number
+  options: ShotDurationOption[]
+}
+
+/** 触发前需要人拍板的超长镜决议；strategy=split 的镜头本次不生成。 */
+export interface ShotDurationDecision {
+  storyboardId: string
+  strategy: 'splice' | 'split' | 'switch_model'
+  capabilityId?: string
 }
 
 /** What a batch trigger would spend, read off the same gates the trigger itself applies. */
@@ -736,8 +891,20 @@ export interface GenerationPlan {
   newCount: number
   retryCount: number
   skippedCount: number
+  /** 本机制作、不花额度的镜头数。 */
+  localCount: number
   /** Physical runtime the plan would still produce, null for non-per-shot stages. */
   durationMs: number | null
+  /** VIDEO only: promised total, planned total, and the shortfall that needs a human's nod. */
+  targetDurationMs: number | null
+  plannedDurationMs: number | null
+  durationGapMs: number | null
+  /** 本次候选链的单镜有效上限（已按实测证据下调）；null = 没有视频候选。 */
+  durationCeilingMs: number | null
+  /** 分镜意图超过上限的镜头；空数组 = 本批没有要拍板的超长镜。 */
+  durationPreflight: ShotDurationPreflight[]
+  /** 首帧/视频：本次计划里分镜文本仍缺项的镜头。只提示、不拦路。 */
+  storyboardGaps: GenerationPlanShotGap[]
   revision: number
 }
 
@@ -833,7 +1000,7 @@ export interface Asset {
   /** Live shots binding this asset — the reach of its approval (absent when listed outside an episode). */
   usageCount?: number
   /** 最近一次定妆照任务的实况；null 表示没有待你看的任务（成功只体现为新版本）。 */
-  run?: { status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'; error: string | null } | null
+  run?: { status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'; error: string | null; reviewPending?: boolean } | null
   versions: AssetVersion[]
 }
 
@@ -884,8 +1051,8 @@ export async function listStoryDrafts(token: string | null): Promise<Array<Pick<
   return data.drafts
 }
 
-export async function createProjectFromStory(token: string | null, draftId: string, format: string): Promise<{ project: Project; idempotentReplay: boolean }> {
-  return request<{ project: Project; idempotentReplay: boolean }>(`/story-drafts/${draftId}/create-project`, { token, method: 'POST', body: JSON.stringify({ format }) })
+export async function createProjectFromStory(token: string | null, draftId: string, format: string): Promise<{ project: Project; idempotentReplay: boolean; firstEpisodeId: string | null }> {
+  return request<{ project: Project; idempotentReplay: boolean; firstEpisodeId: string | null }>(`/story-drafts/${draftId}/create-project`, { token, method: 'POST', body: JSON.stringify({ format }) })
 }
 
 export interface CreationReadiness {
@@ -971,16 +1138,47 @@ export interface EditRevision {
   outputSpec: Record<string, unknown>
   fingerprint: string
   author: string | null
+  /** 空壳形状(未初始化)时为 null。 */
+  createdAt?: string | null
+  editId?: string
 }
 
+/** SD-099 读侧素材实况:合成会用到的那条成片及其实测长度。只读——保存时不回传,
+ *  不参与指纹,所以素材更新不会让人工剪辑判成过期。 */
+export interface EditClipMaterial {
+  clipId: string
+  /** 镜头序号(界面显示「第 N 镜」用;clip-7 这种内部 id 不上屏)。 */
+  shotNumber: number | null
+  /** 合成会用的成片 id;'' = 这一格现在没有素材。 */
+  artifactId: string
+  /** 实测时长(毫秒);null = 没有实测读数。 */
+  durationMs: number | null
+  /** 本序列帧率下可用帧数,即 sourceOutFrame 的上限;null = 无素材。 */
+  maxFrame: number | null
+  /** clip 里的引用已解析不回本镜头成片(产物被删/串了镜头)。 */
+  unresolved: boolean
+}
+
+/** P03 空态契约:0 镜时后端不落库,editId=null/initialized=false(此时 revision 是
+ *  空壳形状,只有 fps 默认值可读);有分镜后正常形状多一个 initialized:true。 */
 export interface EpisodeEditResponse {
-  editId: string
+  editId: string | null
   headRevision: number
+  initialized?: boolean
+  reason?: string
+  materials?: EditClipMaterial[]
   revision: EditRevision
 }
 
 export async function fetchEpisodeEdit(token: string | null, episodeId: string): Promise<EpisodeEditResponse> {
   return request<EpisodeEditResponse>(`/episodes/${episodeId}/edit`, { token })
+}
+
+/** 显式构建默认序列(0 分镜 400;已有人工剪辑 409 state_conflict;已是同指纹 no-op)。 */
+export async function buildEpisodeEditDefault(token: string | null, episodeId: string, expectedEditRevision?: number): Promise<{ editId: string; headRevision: number; rebuilt: boolean }> {
+  return request<{ editId: string; headRevision: number; rebuilt: boolean }>(`/episodes/${episodeId}/edit/build-default`, {
+    token, method: 'POST', body: JSON.stringify(expectedEditRevision !== undefined ? { expectedEditRevision } : {}),
+  })
 }
 
 export async function saveEpisodeEdit(token: string | null, episodeId: string, body: {

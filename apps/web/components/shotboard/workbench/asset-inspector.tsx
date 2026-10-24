@@ -31,7 +31,13 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
   /** 手选的版本号；null=默认视图（已定稿版，否则最新一版有图的）。 */
   const [picked, setPicked] = useState<number | null>(null)
 
-  const inflight = Boolean(asset.run && asset.run.status !== 'FAILED')
+  // BLOCKED 是"停下来了"，不是"还在跑"：把它算作 inflight 会让失败永远转圈
+  //（SD-037）。只有真正排着或在跑的任务才占用"生成中"这一档。
+  const runFailed = asset.run?.status === 'FAILED' || asset.run?.status === 'BLOCKED'
+  const inflight = asset.run?.status === 'QUEUED' || asset.run?.status === 'RUNNING'
+  // 停在问询上的任务会被普通触发有意跳过（点击只会拿到一次空成功的 200），
+  // 所以这里改发重跑：新 revision 用当前绑定另起一跑。
+  const rerun = asset.versions.length > 0 || asset.run?.reviewPending === true
   const withArtifacts = asset.versions.filter(version => version.artifact)
   const current: AssetVersion | null = picked !== null
     ? asset.versions.find(version => version.version === picked) ?? null
@@ -66,16 +72,17 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
   async function regenerate() {
     setBusy(`regen-${asset.id}`)
     try {
-      await api(`/episodes/${episodeId}/generations`, {
+      const result = await api<{ created?: boolean }>(`/episodes/${episodeId}/generations`, {
         method: 'POST',
         body: JSON.stringify({
           stage: 'ASSET',
           assetIds: [asset.id],
-          ...(asset.versions.length > 0 ? { regenerate: true } : {}),
+          ...(rerun ? { regenerate: true } : {}),
           promptNote: noteDraft.trim() || undefined,
         }),
       })
-      toast.success(t(asset.versions.length > 0 ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
+      if (result.created === false) toast.message(t('assets.alreadyGenerated', { name: asset.name }))
+      else toast.success(t(rerun ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
       onChanged()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
@@ -126,8 +133,10 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
             {t('workbench.assetRunning')}
           </p>
         )}
-        {/* 已定稿＝人已裁决，旧任务的失败信号退场——定稿版本才是现在的事实。 */}
-        {asset.run?.status === 'FAILED' && asset.status !== 'APPROVED' && asset.run.error && (
+        {/* 已定稿＝人已裁决，旧任务的失败信号退场——定稿版本才是现在的事实。
+            「上一轮待裁决」不在这条豁免里：它说的是这一跑停在问询上，而「已定稿」
+            讲的是上一版，两件事不互相抵消（重跑一个已定稿素材时两者同时成立）。 */}
+        {runFailed && asset.status !== 'APPROVED' && asset.run?.error && (
           <div className="border-destructive/30 bg-destructive/5 rounded-md border px-3 py-2 text-xs">
             {/* 人话行说因去哪修（内容审查→改描述、额度→账上）；原文缩成小字留给排查。 */}
             <p className="text-destructive-ink flex items-start gap-1.5 leading-relaxed">
@@ -138,6 +147,12 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
               {t('shotboard.rawError')}: {asset.run.error}
             </p>
           </div>
+        )}
+        {asset.run?.reviewPending && (
+          <p className="text-muted-foreground flex items-center gap-1.5 text-[11px] leading-relaxed">
+            {t('workbench.reviewPending')}
+            <HelpHint text={t('workbench.reviewPendingHint')} />
+          </p>
         )}
 
         {/* 版本条：行=切换上图；批准就地。最新一版在最上。 */}
@@ -230,7 +245,7 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
               onClick={() => void regenerate()}
             >
               {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ImageIcon className="size-4" />}
-              {asset.versions.length > 0 ? t('workbench.rerunReference') : t('workbench.generateReference')}
+              {rerun ? t('workbench.rerunReference') : t('workbench.generateReference')}
             </GuardedButton>
           </div>
         )}

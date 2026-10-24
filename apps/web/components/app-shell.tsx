@@ -11,15 +11,12 @@ import {
   CheckIcon,
   ChevronDownIcon,
   ClapperboardIcon,
-  CpuIcon,
   FilmIcon,
   LogOutIcon,
   MenuIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
-  ReceiptTextIcon,
-  ScrollTextIcon,
-  UsersIcon,
+  SettingsIcon,
   XIcon,
 } from 'lucide-react'
 import type { Action } from '@studio/domain'
@@ -52,25 +49,26 @@ interface NavItem {
   labelKey: string
   icon: ReactNode
   action?: Action
+  count?: number
   // Query-scoped links (/models?tab=…) must still light up on their page,
   // so active-ness matches on the path part unless an override says otherwise.
   isActive?(pathname: string): boolean
 }
 
-/** Space-level rail: everything that belongs to the organization, not one project. */
+/**
+ * Space-level rail: everything that belongs to the organization, not one project.
+ * 连接/成员/用量/审计仍是独立路由，但入口统一收进设置页——侧栏只留用户真正
+ * 每天要去的两处，避免同一条目的两种按法(按工具 vs 按作用域)混在一列。
+ */
 const spaceItems: NavItem[] = [
   { href: '/projects', labelKey: 'nav.projects', icon: <ClapperboardIcon /> },
-  { href: '/models?tab=connections', labelKey: 'nav.connections', icon: <CpuIcon />, isActive: p => p === '/models' },
-  { href: '/members', labelKey: 'nav.members', icon: <UsersIcon /> },
-  { href: '/usage', labelKey: 'nav.usage', icon: <ReceiptTextIcon /> },
-  { href: '/audit', labelKey: 'nav.audit', icon: <ScrollTextIcon />, action: 'audit:read' },
+  { href: '/settings', labelKey: 'nav.settings', icon: <SettingsIcon />, count: 18 },
 ]
 
 function projectItems(projectId: string): NavItem[] {
   return [
     { href: `/projects/${projectId}`, labelKey: 'nav.episodes', icon: <FilmIcon /> },
-    { href: `/models?tab=bindings&project=${projectId}`, labelKey: 'nav.bindings', icon: <CpuIcon />, isActive: p => p === '/models' },
-    { href: `/usage?project=${projectId}`, labelKey: 'nav.usage', icon: <ReceiptTextIcon />, isActive: p => p === '/usage' },
+    { href: `/settings?project=${projectId}`, labelKey: 'nav.settings', icon: <SettingsIcon />, count: 18, isActive: p => p === '/settings' },
   ]
 }
 
@@ -87,11 +85,15 @@ function defaultActive(item: NavItem, pathname: string): boolean {
 /** The project in scope comes from the route itself, never from local state. */
 function projectIdFromPath(pathname: string): string | null {
   const match = /^\/projects\/([^/]+)/.exec(pathname)
-  return match ? decodeURIComponent(match[1]) : null
+  if (!match) return null
+  // /projects/new 是建项路由,不是某个 id 恰好叫 "new" 的项目——曾因此给
+  // 新建页挂上项目级导航,用户在表单里看到"本项目"的面包屑。
+  if (match[1] === 'new') return null
+  return decodeURIComponent(match[1])
 }
 
 /** Space surfaces that can also be pulled into one project's scope by the `project` query. */
-const QUERY_SCOPED_PATHS = new Set(['/models', '/usage'])
+const QUERY_SCOPED_PATHS = new Set(['/models', '/usage', '/settings'])
 
 function scopedProjectId(pathname: string, searchParams: URLSearchParams): string | null {
   const fromPath = projectIdFromPath(pathname)
@@ -322,7 +324,14 @@ function SidebarContent({ collapsed = false, onNavigate, onToggleCollapsed }: Si
                 <span className={cn('[&_svg]:size-4.5', active ? 'text-primary' : 'text-muted-foreground')}>
                   {item.icon}
                 </span>
-                {!collapsed && t(item.labelKey)}
+                {!collapsed && (
+                  <>
+                    <span className="min-w-0 truncate">{t(item.labelKey)}</span>
+                    {item.count !== undefined && (
+                      <span className="text-muted-foreground ml-auto text-xs tabular-nums">{item.count}</span>
+                    )}
+                  </>
+                )}
               </Link>
             )
             // An icon with nothing to read is only navigable if it says what it is.

@@ -1,9 +1,9 @@
 'use client'
 
-import { Children, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon, LoaderCircleIcon, MoreVerticalIcon, PlayIcon, SparklesIcon } from 'lucide-react'
-import { ApiError, isLiveStoryboard, toWorkflowStatus, type EpisodeComposition, type GenerationBatch, type GenerationStage, type Storyboard } from '@/lib/api'
+import { ApiError, isLiveStoryboard, toWorkflowStatus, type EpisodeComposition, type GenerationBatch, type GenerationPlan, type GenerationStage, type ShotDurationDecision, type Storyboard } from '@/lib/api'
 import { translateEnum, type TranslateFn, useI18n } from '@/lib/i18n'
 import { shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useSession } from '@/lib/session'
@@ -16,6 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { GuardedButton } from '@/components/permission'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { PlanDialog } from '@/components/generations/plan-dialog'
 import { apiErrorMessage } from '@/lib/api-error'
 
 const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'media', 'composition', 'delivery'] as const
@@ -68,6 +69,18 @@ export type NextAction =
   | { kind: 'review'; anchor: StepKey; labelKey: string; count?: number }
   | { kind: 'generate'; stage: GenerationStage; labelKey: string; count?: number; storyboardIds?: string[]; regenerate?: boolean }
   | { kind: 'compose'; labelKey: string; count?: number }
+
+/**
+ * 能排给平台的镜头：只有分镜表里标为「视频」的镜头走模型生成。字卡 / 录屏 /
+ * 合成 / UI 是人在剪辑里做的，混进来会让整批 POST 被后端拒绝，计数也会虚高。
+ */
+export function mediaQueue(storyboards: Storyboard[]) {
+  const generatable = storyboards.filter(storyboard => storyboard.production === 'video')
+  return {
+    frameless: generatable.filter(storyboard => !storyboard.firstFrame),
+    clipless: generatable.filter(storyboard => storyboard.firstFrame && !storyboard.video),
+  }
+}
 
 export function useEpisodeProgress(episodeId: string | null, storyboards: Storyboard[]) {
   const { api } = useSession()
@@ -161,8 +174,7 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
   // media 一步内部再按 帧→片→音→乐 的顺序拆,卡在哪就给哪个动作。
   let nextAction: NextAction | null = null
   if (data) {
-    const frameless = live.filter(storyboard => !storyboard.firstFrame)
-    const clipless = live.filter(storyboard => storyboard.firstFrame && !storyboard.video)
+    const { frameless, clipless } = mediaQueue(live)
     const voiceless = needVoice.filter(storyboard => !shotVoiceTrack(storyboard))
     if (!data.sourceApproved) nextAction = { kind: 'review', anchor: 'source', labelKey: 'stepper.action.reviewSource' }
     else if (!data.scriptApproved) {
@@ -222,14 +234,29 @@ interface RunPipelineResponse {
 export interface StageBlock {
   /** Anchor id of the wrapper, matching STEP_ANCHOR for the steps it owns. */
   id: string
-  /** Steps whose content lives in this block. */
+  /** Steps whose content lives in this block. Empty means the block is a fixed
+   *  slot in the flow (the quality queue) that the folding math must not govern. */
   steps: StepKey[]
+}
+
+/**
+ * The block id a panel declared on its own wrapper element:
+ * `<div data-flow-step="step-source"><SourcesPanel/></div>`. Reading it off the
+ * React element works for host wrappers regardless of what the panel inside does
+ * with its own props — the attribute only needs to reach EpisodeFlow, not the DOM.
+ */
+function declaredFlowStep(child: ReactNode): { id: string; element: ReactElement } | null {
+  if (!isValidElement(child)) return null
+  const id = (child.props as Record<string, unknown>)['data-flow-step']
+  return typeof id === 'string' && id.length > 0 ? { id, element: child } : null
 }
 
 interface EpisodeFlowProps {
   episodeId: string
   storyboards: Storyboard[]
-  /** One entry per panel rendered as a child, in the same order. */
+  /** The step blocks of the flow. Each block's panel is the child that declares
+   *  `data-flow-step="<block.id>"` on its wrapper; children without the attribute
+   *  are non-step panels rendered below the flow, outside the folding math. */
   blocks: StageBlock[]
   /** Set by the board view when a card asks to be shown; reveals the block holding it. */
   revealTarget?: string | null
@@ -256,9 +283,39 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
   const revealed = useRef<string | null>(null)
 
   const kids = Children.toArray(children)
-  // A child/block mismatch would silently drop panels, so the page falls back to the
-  // old always-open stack rather than hiding someone's work.
-  const shaped = kids.length === blocks.length
+  // Blocks and panels associate by the declared id, never by array position. The
+  // old `kids.length === blocks.length` check meant adding one non-step panel (the
+  // timeline editor) flipped the whole flow back to the always-open stack — the
+  // stepper, the next action and the folding all vanished (UX-05). Now: a child
+  // whose id matches a block mounts into that block; a child without an id is a
+  // non-step panel rendered below the flow; a block with no panel shows a readable
+  // placeholder instead of silently disappearing. Mismatches warn in dev.
+  const declared = new Map<string, ReactElement>()
+  const nonStep: ReactNode[] = []
+  const blockIds = new Set(blocks.map(block => block.id))
+  for (const child of kids) {
+    const step = declaredFlowStep(child)
+    if (step === null) {
+      nonStep.push(child)
+      continue
+    }
+    const { id, element } = step
+    if (!blockIds.has(id)) {
+      console.warn(`[episode-flow] data-flow-step="${id}" matches no block; that panel renders below the flow instead.`)
+      nonStep.push(child)
+      continue
+    }
+    if (declared.has(id)) {
+      console.warn(`[episode-flow] duplicate data-flow-step="${id}"; keeping the first panel, the extra renders below the flow.`)
+      nonStep.push(child)
+      continue
+    }
+    declared.set(id, element)
+  }
+  const missingPanels = blocks.filter(block => !declared.has(block.id))
+  if (missingPanels.length > 0) {
+    console.warn(`[episode-flow] no panel declared data-flow-step for: ${missingPanels.map(block => block.id).join(', ')}.`)
+  }
 
   const currentBlock = useMemo(() => {
     if (!nextStep) return -1
@@ -279,7 +336,8 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
   /** Open the group a step lives in, then jump once the panel is in the DOM. */
   function revealStep(key: StepKey) {
     const index = blocks.findIndex(block => block.steps.includes(key))
-    if (index >= 0) {
+    // A block with no steps is always rendered — there is nothing to expand for it.
+    if (index >= 0 && blocks[index].steps.length > 0) {
       if (blockState[index] === 'done') setOpenDone(true)
       else if (blockState[index] === 'todo') setOpenTodo(true)
     }
@@ -302,6 +360,9 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
       ? blocks.findIndex(block => block.steps.includes('storyboards'))
       : blocks.findIndex(block => block.id === target || block.steps.some(step => STEP_ANCHOR[step] === target))
     if (index < 0) return
+    // Step-less blocks render unconditionally, so a reveal target inside one is
+    // already visible — expanding the done group for it would be noise.
+    if (blocks[index].steps.length === 0) return
     if (blockState[index] === 'done') setOpenDone(true)
     else if (blockState[index] === 'todo') setOpenTodo(true)
   }, [loading, revealTarget, blockState, blocks])
@@ -330,7 +391,10 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
     return t(action.labelKey, action.count !== undefined ? { count: action.count } : undefined)
   }
 
-  // 下一步的执行体:审批类只做页面跳转(决定权在人),生成/合成类直接调后端。
+  // 下一步执行体的门面前置:生成类动作先取计划、弹预审,确认才 POST。
+  // 计划端点与触发端点是同一套门禁,所以确认框里承诺的数目与实际发生的不会分叉。
+  const [pendingPlan, setPendingPlan] = useState<{ action: Extract<NextAction, { kind: 'generate' }>; plan: GenerationPlan } | null>(null)
+
   async function runAction(action: NextAction) {
     if (action.kind === 'review') {
       revealStep(action.anchor)
@@ -342,16 +406,39 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
         await api<RunPipelineResponse>(`/episodes/${episodeId}/run-pipeline`, { method: 'POST' })
         toast.success(t('stepper.composed'))
       } else {
-        await api(`/episodes/${episodeId}/generations`, {
-          method: 'POST',
-          body: JSON.stringify({
-            stage: action.stage,
-            ...(action.storyboardIds ? { storyboardIds: action.storyboardIds } : {}),
-            ...(action.regenerate ? { regenerate: true } : {}),
-          }),
-        })
-        toast.success(t('stepper.actionQueued'))
+        const query = new URLSearchParams({ stage: action.stage, regenerate: action.regenerate ? '1' : '0' })
+        if (action.storyboardIds) query.set('storyboardIds', action.storyboardIds.join(','))
+        const { plan } = await api<{ plan: GenerationPlan }>(`/episodes/${episodeId}/generation-plan?${query.toString()}`)
+        if (plan.newCount + plan.retryCount === 0 && plan.localCount === 0) {
+          toast.message(t('generations.planNothingToDo'))
+        } else {
+          setPendingPlan({ action, plan })
+        }
       }
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setRunningAction(false)
+    }
+  }
+
+  async function confirmPlan(acceptDurationGap: boolean, durationDecisions: ShotDurationDecision[]) {
+    if (!pendingPlan) return
+    const { action } = pendingPlan
+    setPendingPlan(null)
+    setRunningAction(true)
+    try {
+      await api(`/episodes/${episodeId}/generations`, {
+        method: 'POST',
+        body: JSON.stringify({
+          stage: action.stage,
+          ...(action.storyboardIds ? { storyboardIds: action.storyboardIds } : {}),
+          ...(action.regenerate ? { regenerate: true } : {}),
+          ...(acceptDurationGap ? { acceptDurationGap: true } : {}),
+          ...(durationDecisions.length > 0 ? { durationDecisions } : {}),
+        }),
+      })
+      toast.success(t('stepper.actionQueued'))
       reload()
       onAdvanced?.()
     } catch (error) {
@@ -361,11 +448,16 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
     }
   }
 
-  if (!shaped) return <div className="space-y-8">{kids}</div>
-
   const allIndexes = blocks.map((_, i) => i)
   const doneBlocks = currentBlock < 0 ? allIndexes : allIndexes.filter(index => blockState[index] === 'done')
   const todoBlocks = currentBlock < 0 ? [] : allIndexes.filter(index => blockState[index] === 'todo')
+  // A block that owns no steps (the quality queue) is outside the folding math.
+  // blockState calls it done because `[].every()` is vacuously true, but counting it
+  // would print a "已完成 0 步" line over nothing, and folding a review queue behind
+  // a collapse would hide live findings. It renders in place, always — after the
+  // current block and before the not-yet group, which is its slot in block order.
+  const unsteppedBlocks = currentBlock < 0 ? [] : doneBlocks.filter(index => blocks[index].steps.length === 0)
+  const doneStepBlocks = doneBlocks.filter(index => blocks[index].steps.length > 0)
   // One block can own two steps (media + composition share the console table), so the
   // count in the line has to be steps, not blocks — otherwise it reads "后 4 步" above a
   // list of five names.
@@ -375,6 +467,16 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
       .flatMap(index => blocks[index].steps)
       .map(key => t(`stepper.step.${key}`))
       .join(' / ')
+
+  /** One block wrapper: the panel that declared this id, or a readable placeholder. */
+  function renderBlock(index: number) {
+    const block = blocks[index]
+    return (
+      <div key={block.id} id={block.id} className="scroll-mt-20">
+        {declared.get(block.id) ?? <MissingPanel blockId={block.id} />}
+      </div>
+    )
+  }
 
   const rail = <StageRail steps={steps} onJump={revealStep} />
 
@@ -412,16 +514,17 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
           />
         )}
 
-        {doneBlocks.length > 0 && (
+        {doneStepBlocks.length > 0 && (
           <GroupLine
             tone="done"
-            text={t('stepper.doneGroup', { count: stepCount(doneBlocks), names: stepNames(doneBlocks) })}
+            text={t('stepper.doneGroup', { count: stepCount(doneStepBlocks), names: stepNames(doneStepBlocks) })}
             open={openDone || currentBlock < 0}
             onToggle={() => setOpenDone(value => !value)}
           />
         )}
-        {(openDone || currentBlock < 0) && doneBlocks.map(index => <div key={blocks[index].id} id={blocks[index].id} className="scroll-mt-20">{kids[index]}</div>)}
-        {currentBlock >= 0 && <div id={blocks[currentBlock].id} className="scroll-mt-20">{kids[currentBlock]}</div>}
+        {(openDone || currentBlock < 0) && doneStepBlocks.map(renderBlock)}
+        {currentBlock >= 0 && renderBlock(currentBlock)}
+        {unsteppedBlocks.map(renderBlock)}
         {todoBlocks.length > 0 && (
           <GroupLine
             tone="todo"
@@ -430,7 +533,23 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
             onToggle={() => setOpenTodo(value => !value)}
           />
         )}
-        {openTodo && todoBlocks.map(index => <div key={blocks[index].id} id={blocks[index].id} className="scroll-mt-20">{kids[index]}</div>)}
+        {openTodo && todoBlocks.map(renderBlock)}
+
+        {nonStep.length > 0 && (
+          // Panels that are no step's content (the timeline editor) live below the
+          // flow with their own label — always visible, never folded, so an
+          // unsaved-edit signal on them cannot be swallowed by a collapse.
+          <section data-flow-nonstep className="space-y-4 pt-2">
+            <p className="text-faint-foreground text-[11px]">{t('stepper.nonStepTitle')}</p>
+            {nonStep}
+          </section>
+        )}
+
+        <PlanDialog
+          pending={pendingPlan && { stage: pendingPlan.action.stage, regenerate: pendingPlan.action.regenerate === true, plan: pendingPlan.plan }}
+          onClose={() => setPendingPlan(null)}
+          onConfirm={(acceptDurationGap, durationDecisions) => void confirmPlan(acceptDurationGap, durationDecisions)}
+        />
       </div>
     </div>
   )
@@ -614,6 +733,21 @@ function TurnCard({
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+/** A block whose panel never mounted. Loud on purpose — the spec's rule for UX-05 is
+ *  that an anomaly keeps the current action and shows a readable fault state, so the
+ *  step guide above keeps working and the gap names itself instead of vanishing. */
+function MissingPanel({ blockId }: { blockId: string }) {
+  const { t } = useI18n()
+  return (
+    <div
+      data-flow-missing={blockId}
+      className="text-muted-foreground rounded-lg border border-dashed border-border/60 px-3 py-2 text-xs"
+    >
+      {t('stepper.blockMissing', { id: blockId })}
+    </div>
   )
 }
 

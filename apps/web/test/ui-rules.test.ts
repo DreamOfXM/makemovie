@@ -17,6 +17,10 @@ import { describe, expect, it } from 'vitest'
  * 82 条里绝大多数是误伤——一条长期飘红的检查等于没有检查，所以重写。
  *
  * 条款二：空态框不得回到大内距撑高（py-14/py-16/py-20 曾把拆集框撑到 420px）。
+ *
+ * 条款三：「上一轮待裁决」是**这一跑**停下来的事实，不许挂在「已定稿」的豁免里——
+ * 「已定稿」讲的是上一版，两者能同时成立（SD-105：重跑一个已定稿素材、付费候选被 QC
+ * 拦停待裁决，制作台却三处零信号，人根本不知道有一笔钱卡在等自己裁决）。
  */
 
 /** 文案落在这些元素里 = 落在设计好的说明位。 */
@@ -109,6 +113,20 @@ function hintOffenders(file: string): string[] {
   return analyzeSource(readFileSync(file, 'utf8'), file)
 }
 
+/** 取 `{cond && (JSX)}` 里那段括号配平的 JSX：从 marker 之后第一个 `(` 起算。 */
+function guardedJsx(src: string, marker: RegExp): string {
+  const hit = marker.exec(src)
+  if (!hit) return ''
+  const open = src.indexOf('(', hit.index + hit[0].length)
+  if (open < 0) return ''
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '(') depth++
+    else if (src[i] === ')' && --depth === 0) return src.slice(open, i + 1)
+  }
+  return src.slice(open)
+}
+
 describe('UI 规范机器检查', () => {
   it('解释类（*Hint）文案落在说明位，不铺成常驻正文、不当 placeholder/aria-label', () => {
     const offenders = [...tsxFiles('components'), ...tsxFiles('app')].flatMap(hintOffenders)
@@ -130,5 +148,14 @@ describe('UI 规范机器检查', () => {
   it('空态框不再回到大内距撑高', () => {
     const src = readFileSync(join('components', 'ui', 'empty-state.tsx'), 'utf8')
     expect(src).not.toMatch(/py-(14|16|20)/)
+  })
+
+  it('待裁决信号不藏在「已定稿」豁免之后', () => {
+    const src = readFileSync(join('components', 'shotboard', 'workbench', 'asset-inspector.tsx'), 'utf8')
+    expect(src).toContain('reviewPending')
+    expect(guardedJsx(src, /asset\.status !== 'APPROVED'/)).not.toContain('reviewPending')
+    // 正向对照：把提示嵌回豁免块里必须被这套判据抓到，否则上面的绿灯是恒真。
+    const nested = "{runFailed && asset.status !== 'APPROVED' && (<div>{asset.run.reviewPending}</div>)}"
+    expect(guardedJsx(nested, /asset\.status !== 'APPROVED'/)).toContain('reviewPending')
   })
 })

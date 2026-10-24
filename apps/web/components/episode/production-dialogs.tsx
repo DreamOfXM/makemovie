@@ -63,6 +63,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   const [styleId, setStyleId] = useState('realistic')
   const [styleOptions, setStyleOptions] = useState<Array<{ id: string; name: string; nameEn?: string | null }>>([])
   const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
+  const [orgLocale, setOrgLocale] = useState<ContentLocale>('zh')
   const [format, setFormat] = useState<ProjectFormat>('short_drama')
   const [tier, setTier] = useState<AutomationTierValue>(defaultAutomationTier)
   // Minutes in the box, ms on the wire — kept as text so the field can be emptied
@@ -82,6 +83,13 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   useEffect(() => {
     if (state?.mode === 'create') void createStyleOptions()
   }, [state?.mode, createStyleOptions])
+
+  // 新建作品的默认语言来自空间设置；界面语言只影响这层壳，不决定生成语言。
+  useEffect(() => {
+    void api<{ defaultContentLocale?: string | null }>('/organization')
+      .then(org => setOrgLocale(org.defaultContentLocale === 'en' ? 'en' : 'zh'))
+      .catch(() => setOrgLocale('zh'))
+  }, [api])
   const durationRange = formatDurationRange[format]
   const durationMinutes = Number(durationText)
   const durationEmpty = durationText.trim() === ''
@@ -92,15 +100,13 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
   useEffect(() => {
     if (!state) return
     setName(state.mode === 'rename' ? state.project.name : '')
-    // The console language is the only hint available for a brand-new project, and it
-    // is a hint the field below can overrule — never a decision made for the user.
-    setContentLocale(state.mode === 'rename' ? state.project.contentLocale : locale)
+    setContentLocale(state.mode === 'rename' ? state.project.contentLocale : orgLocale)
     setFormat('short_drama')
     setTier(defaultAutomationTier)
     setDurationText(String(formatDefaults.short_drama.targetDurationMs / 60_000))
     setDurationError('')
     setError('')
-  }, [state, locale])
+  }, [state, orgLocale])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -128,7 +134,7 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
         })
         onDone('create', created.name)
       } else {
-        await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name, contentLocale }) })
+        await api(`/projects/${state.project.id}`, { method: 'PATCH', body: JSON.stringify({ name }) })
         onDone('rename', name)
       }
     } catch (err) {
@@ -157,20 +163,22 @@ export function ProjectDialog({ state, onOpenChange, onDone }: ProjectDialogProp
               autoFocus
             />
           </Field>
-          <Field label={t('projects.contentLanguageLabel')} htmlFor="projectContentLocale" hint={t('projects.contentLanguageHint')}>
-            <Select value={contentLocale} onValueChange={value => setContentLocale(value as ContentLocale)}>
-              <SelectTrigger id="projectContentLocale">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {contentLocales.map(item => (
-                  <SelectItem key={item} value={item}>
-                    {translateEnum(t, 'projects.contentLocale', item)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
+          {state?.mode === 'create' && (
+            <Field label={t('projects.contentLanguageLabel')} htmlFor="projectContentLocale" hint={t('projects.contentLanguageHint')}>
+              <Select value={contentLocale} onValueChange={value => setContentLocale(value as ContentLocale)}>
+                <SelectTrigger id="projectContentLocale">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {contentLocales.map(item => (
+                    <SelectItem key={item} value={item}>
+                      {translateEnum(t, 'projects.contentLocale', item)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           {state?.mode === 'create' && (
             <Field label={t('settings.style')} htmlFor="projectStyle" hint={t('projects.styleHint')}>
               <Select value={styleId} onValueChange={setStyleId} disabled={busy}>

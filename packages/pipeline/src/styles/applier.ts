@@ -57,8 +57,10 @@ export function applyStyleToPrompt(
       // 参考图是身份档案，不是风格源：完整剧照 directive（含镜头语言/海报质感）会压过
       // 设定板版式。ASSET 只取质感与色彩层并显式声明版式优先——同一画风靠色彩质感
       // 延续，而不是靠把剧照语言拍在设定板上。IMAGE/VIDEO 仍用完整 directive。
+      // 守卫必须与素材类型无关：角色板说「分区版式」，场景概念图说「无人物空镜」，
+      // 旧文案把「禁止输出场景背景」写进来，对 scene 素材是自相矛盾的。
       const texture = getStyleAssetDirective(style)
-      return `${originalPrompt}\n\n视觉风格（只约束色彩与质感；严格遵守上方的设定板分区版式与纯色背景，禁止输出单张剧照或场景背景）：${texture}`
+      return `${originalPrompt}\n\n视觉风格（只约束色彩与质感，不改变上方描述的构图与版式）：${texture}`
     }
 
     case 'IMAGE':

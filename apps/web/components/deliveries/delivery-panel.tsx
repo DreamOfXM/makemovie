@@ -42,6 +42,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton } from '@/components/permission'
+import type { ShotRhythm } from '@/components/sources/sources-panel'
 
 interface ManifestVersionRef {
   version: number
@@ -83,6 +84,46 @@ interface ManifestPostProcess {
   reason?: string
 }
 
+/** 验收三读数（S5）：与 @studio/pipeline 的 review-readings 同形，web 不能 import 该包，故在此重述。
+ *  节奏那一份直接借用「原文」面板已有的 ShotRhythm——同一把尺量出来的数，不许长成两个类型。 */
+interface ManifestReviewAxis {
+  present: boolean
+  gaps: string[]
+}
+
+interface ManifestRhythm extends ManifestReviewAxis, Pick<ShotRhythm, 'settings' | 'gate'> {
+  masterDurationMs: number | null
+  readings: ShotRhythm['readings']
+}
+
+interface ManifestTransition extends ManifestReviewAxis {
+  kinds: string[]
+  blendedSeamCount: number
+  requestedNonCutCount: number | null
+  blended: boolean
+  headFadeMs: number
+  tailFadeMs: number
+  fps: number | null
+  shotCount: number
+}
+
+interface ManifestSound extends ManifestReviewAxis {
+  dialogueShotCount: number
+  silentDialogueShots: number[]
+  bedCount: number
+  importedBedCount: number
+  hasMusic: boolean
+}
+
+interface ManifestReview {
+  rhythm: ManifestRhythm
+  transition: ManifestTransition
+  sound: ManifestSound
+  complete: boolean
+}
+
+const REVIEW_AXES = ['rhythm', 'transition', 'sound'] as const
+
 interface DeliveryManifest {
   schemaVersion: number
   packagedAt: string
@@ -100,6 +141,8 @@ interface DeliveryManifest {
   // an absent list as "not recorded" and an empty one as "the master is silent".
   composition: { objectKey: string; checksum: string; mimeType: string; durationMs: number | null; tracks?: ManifestArtifact[] }
   quality: { checks: number; approved: number; rejected: number; threshold: number }
+  // 缺这一行 = 清单打包于验收读数上线之前；界面按「未记录」读，不补一个假读数。
+  review?: ManifestReview
   acceptance?: { acceptedAt?: string; rejectedAt?: string; reason: string | null }
 }
 
@@ -127,6 +170,9 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
 
   const [packaging, setPackaging] = useState(false)
   const [notReadyReasons, setNotReadyReasons] = useState<string[] | null>(null)
+  const [notReadyShots, setNotReadyShots] = useState<number[]>([])
+  const [pendingAdjudications, setPendingAdjudications] = useState<number | null>(null)
+  const [reviewGaps, setReviewGaps] = useState<string[] | null>(null)
   const [manifestTarget, setManifestTarget] = useState<Delivery | null>(null)
   const [rejectTarget, setRejectTarget] = useState<Delivery | null>(null)
   const [acceptingId, setAcceptingId] = useState<string | null>(null)
@@ -146,12 +192,41 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
   // Stale rejection reasons belong to the previously selected episode.
   useEffect(() => {
     setNotReadyReasons(null)
+    setNotReadyShots([])
+    setPendingAdjudications(null)
+    setReviewGaps(null)
   }, [episodeId])
+
+  // 缺画面的镜头可能有三四十个，逐条列会把警告撑成一屏；报前 8 个 + 总数，
+  // 完整名单在镜头总览的待处理泳道里逐个可见。
+  const gapShotList = notReadyShots.length === 0
+    ? ''
+    : `${notReadyShots.slice(0, 8).map(number => `#${number}`).join('、')}${notReadyShots.length > 8 ? t('delivery.gap.shotsMore', { count: notReadyShots.length }) : ''}`
+
+  // 质检门禁拦下打包时，后端 reasons 是一条条 QC 结论原文——实测一集 55 条，整段上屏
+  // 等于把裁决队列倒进警告条，人一条也读不完；不接住则退成一句通用报错，等于没说。
+  // 这里只报「还差几条」，原文进 console 供排查，逐条裁决在「质检裁决」面板里做。
+  function handleQualityGate(error: unknown): boolean {
+    if (!(error instanceof ApiError) || error.message !== 'delivery:qualityGate') return false
+    const reasons = Array.isArray(error.body?.reasons) ? error.body.reasons : []
+    setPendingAdjudications(typeof error.body?.pendingCount === 'number' ? error.body.pendingCount : reasons.length)
+    console.warn('[delivery] quality gate findings:', reasons)
+    return true
+  }
+
+  function goToAdjudication() {
+    // 认 EpisodeFlow 给每个块挂的 `id` + `scroll-mt-20`（吸顶条要让位），
+    // 不是内层那个 data-flow-step 包装——它没有 scroll-margin，跳过去标题正压在天头下面。
+    document.getElementById('step-quality')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   async function packageDelivery() {
     if (!episodeId) return
     setPackaging(true)
     setNotReadyReasons(null)
+    setNotReadyShots([])
+    setPendingAdjudications(null)
+    setReviewGaps(null)
     try {
       await api<{ delivery: Delivery }>(`/episodes/${episodeId}/deliveries`, { method: 'POST' })
       toast.success(t('delivery.packaged'))
@@ -161,8 +236,14 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
         const reasons = Array.isArray(error.body?.reasons)
           ? error.body.reasons.filter((reason): reason is string => typeof reason === 'string')
           : []
+        const shots = Array.isArray(error.body?.shotNumbers)
+          ? error.body.shotNumbers.filter((n): n is number => typeof n === 'number')
+          : []
         setNotReadyReasons(reasons)
+        setNotReadyShots(shots)
         toast.error(t('delivery.notReady'))
+      } else if (handleQualityGate(error)) {
+        // 门禁结论已经摊在卡片上了，这里什么都不该再说一遍。
       } else {
         toast.error(apiErrorMessage(error, t))
       }
@@ -173,12 +254,26 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
 
   async function accept(delivery: Delivery) {
     setAcceptingId(delivery.id)
+    setReviewGaps(null)
+    setPendingAdjudications(null)
     try {
       await api(`/deliveries/${delivery.id}/accept`, { method: 'POST' })
       toast.success(t('delivery.accepted'))
       reload()
     } catch (error) {
-      toast.error(apiErrorMessage(error, t))
+      // 读数不全是「台账缺项」，不是一句报错：把缺的哪一项摊在行上方，
+      // 人才知道要回去重新合成，而不是再点一次验收。
+      if (error instanceof ApiError && error.message === 'delivery:reviewIncomplete') {
+        const gaps = Array.isArray(error.body?.reasons)
+          ? error.body.reasons.filter((reason): reason is string => typeof reason === 'string')
+          : []
+        setReviewGaps(gaps)
+        toast.error(t('delivery.review.incomplete'))
+      } else if (handleQualityGate(error)) {
+        // 打包之后重渲染过母带，旧裁决随指纹失效——同样摊在卡片上，不弹一句空话。
+      } else {
+        toast.error(apiErrorMessage(error, t))
+      }
       reload()
     } finally {
       setAcceptingId(null)
@@ -341,7 +436,35 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
               <AlertDescription className="justify-items-start">
                 <ul className="list-disc space-y-0.5 pl-4 text-xs">
                   {notReadyReasons.map(reason => (
-                    <li key={reason}>{reason}</li>
+                    <li key={reason}>{t(reason, { shots: gapShotList })}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {pendingAdjudications !== null && (
+            <Alert variant="warning">
+              <TriangleAlertIcon />
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2 justify-items-start">
+                <span className="text-sm">
+                  {t('delivery.qualityGate.pending', { count: pendingAdjudications })}
+                </span>
+                <Button variant="outline" size="sm" onClick={goToAdjudication}>
+                  {t('delivery.qualityGate.go')}
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {reviewGaps && (
+            <Alert variant="warning">
+              <TriangleAlertIcon />
+              <AlertTitle>{t('delivery.review.incomplete')}</AlertTitle>
+              <AlertDescription className="justify-items-start">
+                <ul className="list-disc space-y-0.5 pl-4 text-xs">
+                  {reviewGaps.map(gap => (
+                    <li key={gap}>{t(gap)}</li>
                   ))}
                 </ul>
               </AlertDescription>
@@ -389,6 +512,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
                           rejected: delivery.manifest.quality.rejected,
                           threshold: Math.round(delivery.manifest.quality.threshold * 100),
                         })}
+                        <ReviewChips review={delivery.manifest.review} />
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap items-center justify-end gap-1">
@@ -523,6 +647,138 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
   )
 }
 
+/** 三枚读数徽章：齐=绿、缺=黄、这份清单打包于读数上线之前=灰。
+ *  行里常驻的只有「三轴各齐不齐」这一眼，具体数字与缺项全进 Tooltip——
+ *  缺哪一格只说「没记上」是不够的，人才需要知道要回去补什么。 */
+function ReviewChips({ review }: { review: ManifestReview | undefined }) {
+  const { t } = useI18n()
+  if (!review) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="muted" className="mt-1">{t('delivery.review.unrecorded')}</Badge>
+        </TooltipTrigger>
+        <TooltipContent>{t('delivery.review.unrecordedHint')}</TooltipContent>
+      </Tooltip>
+    )
+  }
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {REVIEW_AXES.map(axis => {
+        const reading = review[axis]
+        return (
+          <Tooltip key={axis}>
+            <TooltipTrigger asChild>
+              <Badge variant={reading.present ? 'success' : 'warning'}>{t(`delivery.review.axis.${axis}`)}</Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              {reading.present
+                ? t(`delivery.review.hint.${axis}`)
+                : reading.gaps.map(gap => t(gap)).join(t('apiError.listSeparator'))}
+            </TooltipContent>
+          </Tooltip>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 秒数口径与「原文」面板同一把尺（sources-panel 的 secondsOf）。 */
+function secondsOf(ms: number): string {
+  return (ms / 1000).toFixed(1)
+}
+
+function ReviewAxis({ axis, gaps, children }: { axis: 'rhythm' | 'transition' | 'sound'; gaps: string[]; children?: ReactNode }) {
+  const { t } = useI18n()
+  return (
+    <div className="space-y-0.5">
+      <p className="font-medium">{t(`delivery.review.axis.${axis}`)}</p>
+      {children}
+      {gaps.map(gap => (
+        <p key={gap} className="text-warning-ink">{t(gap)}</p>
+      ))}
+    </div>
+  )
+}
+
+/** 清单里的验收三读数（S5）：只摆这条母带台账里真的记下的数。
+ *  拦验收的是「台账有没有」，不是「节奏好不好」——与 S1 同口径：碎不等于错，
+ *  所以节奏过不过线用颜色标出来，不当错误。 */
+function ReviewDetail({ review }: { review: ManifestReview }) {
+  const { t } = useI18n()
+  const { rhythm, transition, sound } = review
+  const readings = rhythm.readings
+  return (
+    <div className="space-y-3 text-xs">
+      <ReviewAxis axis="rhythm" gaps={rhythm.gaps}>
+        {readings && (
+          <>
+            <p className="text-muted-foreground">
+              {t('delivery.review.masterDuration')}{' '}
+              <span className="tabular-nums">{t('sources.rhythmValueSeconds', { value: secondsOf(readings.totalMs) })}</span>
+              {' · '}
+              {t('sources.rhythmAvg')}{' '}
+              <span className="tabular-nums">{t('sources.rhythmValueSeconds', { value: secondsOf(readings.avgShotMs) })}</span>
+              {' · '}
+              {t('sources.rhythmLongLabel', { min: secondsOf(rhythm.settings.longTakeMinMs) })}{' '}
+              <span className="tabular-nums">
+                {t('sources.rhythmLongValue', {
+                  count: readings.longTakeCount,
+                  share: Math.round(readings.longTakeShare * 100),
+                })}
+              </span>
+            </p>
+            <p className={rhythm.gate.pass ? 'text-success-ink' : 'text-warning-ink'}>
+              {rhythm.gate.pass
+                ? t('delivery.review.gatePass')
+                : rhythm.gate.failures.map(failure => (failure === 'avgShot'
+                    ? t('sources.rhythmFailAvg', { min: secondsOf(rhythm.settings.avgShotMs) })
+                    : t('sources.rhythmFailLong', {
+                        actual: Math.round(readings.longTakeShare * 100),
+                        min: secondsOf(rhythm.settings.longTakeMinMs),
+                        share: Math.round(rhythm.settings.longTakeShareMin * 100),
+                      }))).join(t('apiError.listSeparator'))}
+            </p>
+          </>
+        )}
+      </ReviewAxis>
+
+      <ReviewAxis axis="transition" gaps={transition.gaps}>
+        {transition.present && (
+          <p className="text-muted-foreground">
+            {t('delivery.review.blended', { count: transition.blendedSeamCount })}
+            {' · '}
+            {transition.requestedNonCutCount === null
+              ? t('delivery.review.requestedUnknown')
+              : t('delivery.review.requested', { count: transition.requestedNonCutCount })}
+            {!transition.blended && ` · ${t('delivery.review.streamCopy')}`}
+          </p>
+        )}
+      </ReviewAxis>
+
+      <ReviewAxis axis="sound" gaps={sound.gaps}>
+        {sound.present && (
+          <>
+            <p className="text-muted-foreground">{t('delivery.review.dialogue', { count: sound.dialogueShotCount })}</p>
+            {sound.silentDialogueShots.length > 0 && (
+              <p className="text-warning-ink">
+                {t('delivery.review.silent', { shots: sound.silentDialogueShots.map(shot => `#${shot}`).join(t('apiError.listSeparator')) })}
+              </p>
+            )}
+            <p className="text-muted-foreground">
+              {sound.bedCount === 0
+                ? t('delivery.review.noBeds')
+                : t('delivery.review.beds', { count: sound.bedCount, imported: sound.importedBedCount })}
+              {' · '}
+              {t(sound.hasMusic ? 'delivery.review.musicYes' : 'delivery.review.musicNo')}
+            </p>
+          </>
+        )}
+      </ReviewAxis>
+    </div>
+  )
+}
+
 interface ManifestDialogProps {
   delivery: Delivery | null
   onOpenChange(open: boolean): void
@@ -641,6 +897,18 @@ function ManifestDialog({ delivery, onOpenChange }: ManifestDialogProps) {
                     threshold: Math.round(manifest.quality.threshold * 100),
                   })}
                 </span>
+              </DetailRow>
+              <DetailRow label={t('delivery.review')}>
+                {manifest.review ? (
+                  <ReviewDetail review={manifest.review} />
+                ) : (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge variant="muted">{t('delivery.review.unrecorded')}</Badge>
+                    </TooltipTrigger>
+                    <TooltipContent>{t('delivery.review.unrecordedHint')}</TooltipContent>
+                  </Tooltip>
+                )}
               </DetailRow>
               {manifest.acceptance && (
                 <DetailRow label={t('delivery.acceptance')}>

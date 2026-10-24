@@ -119,3 +119,18 @@ export async function loadOrgModelPool(db: PrismaClient, organizationId: string)
     bindings: bindings.map(binding => ({ ...binding, slot: binding.slot.toLowerCase() })),
   }
 }
+
+/**
+ * 目标项目的有效配置视图：组织继承（projectId=null）+ 本项目覆盖，其他项目的专属
+ * 绑定不可见——与执行器 resolveSlotCandidates 的取数语义逐条一致（2026-10-19 R03：
+ * 曾把全组织绑定直接喂 slotReadiness，A 的项目级绑定让 B 误报 4/4 就绪、实际零候选）。
+ * 项目级就绪、自动绑定规划一律从这里取数；组织控制台的全量视图继续用 loadOrgModelPool。
+ */
+export async function loadProjectModelPool(
+  db: PrismaClient,
+  organizationId: string,
+  projectId: string | null,
+): Promise<{ connections: ConnectionLike[]; bindings: BindingLike[] }> {
+  const pool = await loadOrgModelPool(db, organizationId)
+  return { connections: pool.connections, bindings: pool.bindings.filter(binding => binding.projectId === null || binding.projectId === projectId) }
+}

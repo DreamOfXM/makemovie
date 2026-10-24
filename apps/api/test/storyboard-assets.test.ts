@@ -96,13 +96,13 @@ describe('storyboard asset binding', () => {
 
     const put = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
-      payload: { assets: [{ assetId: protagonistId, role: 'lead' }, { assetId: umbrellaId, role: 'prop' }] },
+      payload: { assets: [{ assetId: protagonistId }, { assetId: umbrellaId }] },
     })
     expect(put.statusCode).toBe(200)
     const bound = put.json().assets as StoryboardAssetDto[]
     expect(bound).toHaveLength(2)
     expect(bound.map(item => item.id).sort()).toEqual([protagonistId, umbrellaId].sort())
-    expect(bound.find(item => item.id === protagonistId)).toEqual({ id: protagonistId, kind: 'character', name: '小雨', status: 'DRAFT', role: 'lead' })
+    expect(bound.find(item => item.id === protagonistId)).toEqual({ id: protagonistId, kind: 'character', name: '小雨', status: 'DRAFT', role: 'character' })
 
     const get = await env.app.inject({ method: 'GET', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(viewerToken) })
     expect(get.statusCode).toBe(200)
@@ -114,7 +114,7 @@ describe('storyboard asset binding', () => {
   it('replaces the previous set on every PUT', async () => {
     const replace = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(ownerToken),
-      payload: { assets: [{ assetId: umbrellaId, role: 'prop' }] },
+      payload: { assets: [{ assetId: umbrellaId }] },
     })
     expect(replace.statusCode).toBe(200)
     expect(replace.json().assets).toEqual([{ id: umbrellaId, kind: 'prop', name: '黑伞', status: 'DRAFT', role: 'prop' }])
@@ -136,19 +136,22 @@ describe('storyboard asset binding', () => {
 
     const missingId = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
-      payload: { assets: [{ role: 'lead' }] },
+      payload: { assets: [{}] },
     })
     expect(missingId.statusCode).toBe(400)
 
-    const badRole = await env.app.inject({
+    // role 不再由客户端给：服务端按素材自己的 kind 归一（SD-123）。旧客户端多传的
+    // role 被忽略，而不是拿两套词表写进同一列。
+    const strayRole = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
       payload: { assets: [{ assetId: protagonistId, role: 42 }] },
     })
-    expect(badRole.statusCode).toBe(400)
+    expect(strayRole.statusCode).toBe(200)
+    expect(strayRole.json().assets).toEqual([{ id: protagonistId, kind: 'character', name: '小雨', status: 'DRAFT', role: 'character' }])
 
     const unknownAsset = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
-      payload: { assets: [{ assetId: 'does-not-exist', role: 'lead' }] },
+      payload: { assets: [{ assetId: 'does-not-exist' }] },
     })
     expect(unknownAsset.statusCode).toBe(400)
     expect(unknownAsset.json().error).toMatch(/does not belong to this episode/)
@@ -158,12 +161,12 @@ describe('storyboard asset binding', () => {
     otherEpisodeAssetId = foreignEpisode.json().asset.id as string
     const crossEpisode = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
-      payload: { assets: [{ assetId: protagonistId, role: 'lead' }, { assetId: otherEpisodeAssetId, role: 'scene' }] },
+      payload: { assets: [{ assetId: protagonistId }, { assetId: otherEpisodeAssetId }] },
     })
     expect(crossEpisode.statusCode).toBe(400)
     expect(crossEpisode.json().error).toMatch(/does not belong to this episode/)
-    // The failed replace must not touch the existing set.
-    expect(await env.db.storyboardAsset.count({ where: { storyboardId } })).toBe(0)
+    // The failed replace must not touch the existing set (the strayRole binding above).
+    expect(await env.db.storyboardAsset.findMany({ where: { storyboardId } })).toMatchObject([{ assetId: protagonistId }])
   })
 
   it('404s on unknown storyboards and storyboards of another organization', async () => {
@@ -176,7 +179,7 @@ describe('storyboard asset binding', () => {
   it('refuses viewers on PUT but allows them to read bindings', async () => {
     const forbidden = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(viewerToken),
-      payload: { assets: [{ assetId: protagonistId, role: 'lead' }] },
+      payload: { assets: [{ assetId: protagonistId }] },
     })
     expect(forbidden.statusCode).toBe(403)
     expect(forbidden.json().error).toMatch(/storyboard:write/)
@@ -188,14 +191,14 @@ describe('storyboard asset binding', () => {
   it('exposes the bindings on the storyboard list and records an audit event', async () => {
     const put = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${storyboardId}/assets`, headers: authHeaders(editorToken),
-      payload: { assets: [{ assetId: protagonistId, role: 'lead' }] },
+      payload: { assets: [{ assetId: protagonistId }] },
     })
     expect(put.statusCode).toBe(200)
 
     const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(viewerToken) })
     expect(list.statusCode).toBe(200)
     const shot = (list.json() as { id: string; assets: { assetId: string; role: string }[] }[]).find(item => item.id === storyboardId)
-    expect(shot?.assets).toEqual([{ storyboardId, assetId: protagonistId, role: 'lead' }])
+    expect(shot?.assets).toEqual([{ storyboardId, assetId: protagonistId, role: 'character' }])
 
     const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events', headers: authHeaders(ownerToken) })
     expect(audit.statusCode).toBe(200)

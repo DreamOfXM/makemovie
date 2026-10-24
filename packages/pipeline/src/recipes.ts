@@ -54,3 +54,19 @@ export const OFFICIAL_RECIPES: readonly OfficialRecipe[] = [
 export function recipeChecksum(recipe: OfficialRecipe): string {
   return createHash('sha256').update(JSON.stringify({ recipeKey: recipe.recipeKey, version: recipe.version, spec: recipe.spec })).digest('hex')
 }
+
+/**
+ * The frame a project delivers. The pinned snapshot wins because a recipe is frozen at
+ * creation; a project created before recipes existed falls back to the same mapping new
+ * projects get — FILM is the only widescreen format.
+ */
+export function projectAspect(recipeSnapshot: string | null, format: string): '9:16' | '16:9' {
+  const fallback = format === 'FILM' ? '16:9' : '9:16'
+  if (!recipeSnapshot) return fallback
+  try {
+    const aspect = (JSON.parse(recipeSnapshot) as { aspect?: unknown }).aspect
+    return aspect === '9:16' || aspect === '16:9' ? aspect : fallback
+  } catch {
+    return fallback
+  }
+}

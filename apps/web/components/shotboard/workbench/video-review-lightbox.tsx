@@ -11,11 +11,13 @@ import { cn, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { useArtifactUrl } from '@/components/generations/artifact-media'
+import { AcceptTakeDialog } from './accept-take-dialog'
 
 interface VideoReviewLightboxProps {
   shot: ShotboardShot
-  /** 打开时落在哪一版（点哪条候选缩略图就从哪版看起）；null＝已钦定版，其次最新一版。 */
-  initialVersion: number | null
+  /** 打开时落在哪一版（点哪条候选缩略图就从哪版看起）；null＝已钦定版，其次最新一版。
+   *  按 artifactId 寻址：延长/定向修改产物与生成产物会同版本号，同号不同片。 */
+  initialArtifactId: string | null
   onClose(): void
   /** 与右栏同一刷新链：钦定后镜头列表/候选行/钦定徽章全部回读。 */
   onChanged(): void
@@ -27,12 +29,14 @@ interface VideoReviewLightboxProps {
  * 看完不用退出去点。选中语义分两轨：紫边＝正在看（唯一），绿字✓＝已钦定（标签层，
  * 不上第二道描边——同帧双色描边会打架，盲评点名过）。
  */
-export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }: VideoReviewLightboxProps) {
+export function VideoReviewLightbox({ shot, initialArtifactId, onClose, onChanged }: VideoReviewLightboxProps) {
   const { t } = useI18n()
   const { api } = useSession()
   const { can } = usePermission()
-  const [viewVersion, setViewVersion] = useState<number | null>(initialVersion)
+  const [viewArtifactId, setViewArtifactId] = useState<string | null>(initialArtifactId)
   const [busy, setBusy] = useState(false)
+  // 「收下这版」的落点（SD-120）：停在「等你裁决」上的那一版在这里也要能裁决掉。
+  const [accept, setAccept] = useState<{ taskId: string; label: string } | null>(null)
 
   const candidates = shot.videoCandidates
 
@@ -40,20 +44,20 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
   // 最新=[0]，取末位会把最旧一版当成最新（实测抓到过）。
   const current: ShotVideoCandidate | null = useMemo(() => {
     if (candidates.length === 0) return null
-    if (viewVersion !== null) return candidates.find(item => item.version === viewVersion) ?? candidates[0]
+    if (viewArtifactId !== null) return candidates.find(item => item.artifactId === viewArtifactId) ?? candidates[0]
     return candidates.find(item => item.selected) ?? candidates[0]
-  }, [candidates, viewVersion])
+  }, [candidates, viewArtifactId])
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape') onClose()
       if (candidates.length < 2) return
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-      const index = current ? candidates.findIndex(item => item.version === current.version) : -1
+      const index = current ? candidates.findIndex(item => item.artifactId === current.artifactId) : -1
       if (index < 0) return
       event.preventDefault()
       const next = event.key === 'ArrowLeft' ? index - 1 : index + 1
-      if (next >= 0 && next < candidates.length) setViewVersion(candidates[next].version)
+      if (next >= 0 && next < candidates.length) setViewArtifactId(candidates[next].artifactId)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -105,7 +109,8 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
         </p>
         <span className="text-subtle-foreground text-xs tabular-nums">
           {formatDuration(artifact.durationMs ?? shot.durationMs)}
-          {current?.qc && ` · QC ${current.qc.kind} ${current.qc.score !== null ? Math.round(current.qc.score * 100) : '—'}`}
+          {/* 审计器名（visual-audit）不上扫描面（SD-121）：这里要的是分数，来路全文在右栏证据区。 */}
+          {current?.qc?.score != null && ` · ${t('workbench.qcScore', { score: Math.round(current.qc.score * 100) })}`}
         </span>
         <button
           type="button"
@@ -122,10 +127,10 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
           <button
             type="button"
             aria-label="previous"
-            disabled={candidates.findIndex(item => item.version === current?.version) <= 0}
+            disabled={candidates.findIndex(item => item.artifactId === current?.artifactId) <= 0}
             onClick={() => {
-              const index = candidates.findIndex(item => item.version === current?.version)
-              if (index > 0) setViewVersion(candidates[index - 1].version)
+              const index = candidates.findIndex(item => item.artifactId === current?.artifactId)
+              if (index > 0) setViewArtifactId(candidates[index - 1].artifactId)
             }}
             className="bg-muted hover:opacity-80 mr-3.5 flex size-10 shrink-0 items-center justify-center rounded-full disabled:opacity-30"
           >
@@ -137,10 +142,10 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
           <button
             type="button"
             aria-label="next"
-            disabled={candidates.findIndex(item => item.version === current?.version) >= candidates.length - 1}
+            disabled={candidates.findIndex(item => item.artifactId === current?.artifactId) >= candidates.length - 1}
             onClick={() => {
-              const index = candidates.findIndex(item => item.version === current?.version)
-              if (index >= 0 && index < candidates.length - 1) setViewVersion(candidates[index + 1].version)
+              const index = candidates.findIndex(item => item.artifactId === current?.artifactId)
+              if (index >= 0 && index < candidates.length - 1) setViewArtifactId(candidates[index + 1].artifactId)
             }}
             className="bg-muted hover:opacity-80 ml-3.5 flex size-10 shrink-0 items-center justify-center rounded-full disabled:opacity-30"
           >
@@ -149,9 +154,13 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
         )}
       </div>
 
-      {/* 胶片条：≥2 版才有（单版没有可裁决的对象，退化为纯放大）。 */}
-      {!single && (
-        <div className="mt-3 flex items-center gap-3">
+      {/* 裁决条常驻：只有一版也可能停在那一版「等你裁决」（SD-120 实拍：放大后整块随单版
+          隐藏，屏上说要你决定，界面上一个决定按钮都没有）。胶片条与方向键提示才真的需要
+          ≥2 版——只有一版时没有可比较的对象。 */}
+      <div className="mt-3 flex items-center gap-3">
+        {single ? (
+          <div className="min-w-0 flex-1" />
+        ) : (
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1">
             {candidates.map(candidate => {
               const viewing = current?.version === candidate.version
@@ -161,7 +170,7 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
                   key={candidate.artifactId}
                   type="button"
                   aria-pressed={viewing}
-                  onClick={() => setViewVersion(candidate.version)}
+                  onClick={() => setViewArtifactId(candidate.artifactId)}
                   className="shrink-0 text-left"
                 >
                   <span className={cn(
@@ -173,31 +182,55 @@ export function VideoReviewLightbox({ shot, initialVersion, onClose, onChanged }
                   <span className={cn(
                     'mt-1 flex items-center justify-center gap-1 text-[11px] tabular-nums',
                     viewing ? 'text-foreground font-medium' : 'text-subtle-foreground',
+                    !chosen && candidate.awaitingDecision === true && 'text-warning-ink',
                   )}>
                     {chosen && <CheckIcon className="text-success size-3" />}
-                    {chosen ? t('shotboard.chosen') : `v${candidate.version}`}
+                    {chosen ? t('shotboard.chosen') : candidate.awaitingDecision === true ? `v${candidate.version} · ${t('workbench.awaitingDecision')}` : `v${candidate.version}`}
                   </span>
                 </button>
               )
             })}
           </div>
-          {can('storyboard:write') && current && !current.selected && (
-            <GuardedButton action="storyboard:write" variant="default" size="sm" disabled={busy} onClick={() => void choose(current)}>
-              {t('shotboard.choose')}
-            </GuardedButton>
-          )}
-          {current?.selected && (
-            <Badge variant="success" className="shrink-0 font-normal">
-              <CheckIcon className="size-3" />
-              {t('shotboard.chosen')}
-            </Badge>
-          )}
+        )}
+        {can('storyboard:write') && current && !current.selected && current.awaitingDecision !== true && (
+          <GuardedButton action="storyboard:write" variant="default" size="sm" disabled={busy} onClick={() => void choose(current)}>
+            {t('shotboard.choose')}
+          </GuardedButton>
+        )}
+        {current?.awaitingDecision === true && current.taskId && can('generation:trigger') && (
+          <GuardedButton
+            action="generation:trigger"
+            variant="default"
+            size="sm"
+            onClick={() => setAccept({
+              taskId: current.taskId!,
+              label: `#${shot.number} ${t('storyboards.video')} v${current.version}${current.durationMs !== null ? ` · ${formatDuration(current.durationMs)}` : ''}`,
+            })}
+          >
+            {t('generations.review.waive')}
+          </GuardedButton>
+        )}
+        {current?.selected && (
+          <Badge variant="success" className="shrink-0 font-normal">
+            <CheckIcon className="size-3" />
+            {t('shotboard.chosen')}
+          </Badge>
+        )}
+        {!single && (
           <span className="text-subtle-foreground hidden shrink-0 items-center gap-1 text-[11px] sm:flex">
             <kbd className="border-border/70 rounded border px-1 font-sans">←</kbd>
             <kbd className="border-border/70 rounded border px-1 font-sans">→</kbd>
             {t('workbench.reviewKbdHint')}
           </span>
-        </div>
+        )}
+      </div>
+      {accept && (
+        <AcceptTakeDialog
+          taskId={accept.taskId}
+          label={accept.label}
+          onClose={() => setAccept(null)}
+          onChanged={onChanged}
+        />
       )}
     </div>
   )

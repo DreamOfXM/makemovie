@@ -1,5 +1,6 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
 import type { AdapterOptions, MediaReference, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { vendorDurationField } from './duration.js'
 import { parseDataUrl, probeModel, readMediaReferences, sanitizeError } from './types.js'
 
 export const GOOGLE_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com'
@@ -135,9 +136,12 @@ function applyVeoReferences(instance: Record<string, unknown>, media: MediaRefer
 
 /** Veo takes the prompt inside an `instances` array and answers with an operation, not a clip. */
 export function buildGoogleVideoSubmitRequest(baseUrl: string, apiKey: string, request: ProviderRequest): GoogleHttpRequest {
-  const parameters: Record<string, unknown> = {}
-  if (typeof request.parameters.aspectRatio === 'string') parameters.aspectRatio = request.parameters.aspectRatio
-  if (typeof request.parameters.durationSeconds === 'number' && Number.isFinite(request.parameters.durationSeconds)) parameters.durationSeconds = request.parameters.durationSeconds
+  // Veo names the length `durationSeconds`, which is why that string is the platform's
+  // canonical field; the slot still owns the mapping so no builder reads a raw key.
+  const parameters: Record<string, unknown> = {
+    ...(typeof request.parameters.aspectRatio === 'string' ? { aspectRatio: request.parameters.aspectRatio } : {}),
+    ...vendorDurationField('google', request.parameters),
+  }
   const instance: Record<string, unknown> = { prompt: promptOf(request) }
   applyVeoReferences(instance, readMediaReferences(request.input.media))
   return {

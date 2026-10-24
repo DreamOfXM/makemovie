@@ -128,7 +128,7 @@ export function AssetVoiceTrack({ asset, episodeId, onChanged }: { asset: Asset;
             className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-[11px]"
           />
           <div className="flex gap-1">
-            <Button variant="default" size="sm" className="h-6 flex-1 text-[10px]" disabled={transcript.trim() === ''} onClick={() => void uploadVoice(pendingFile, transcript.trim())}>
+            <Button variant="default" size="sm" className="h-6 text-[10px]" disabled={transcript.trim() === ''} onClick={() => void uploadVoice(pendingFile, transcript.trim())}>
               {t('assets.voiceConfirmUpload')}
             </Button>
             <Button variant="ghost" size="sm" className="h-6 text-[10px]" onClick={() => { setPendingFile(null); setTranscript('') }}>
@@ -165,12 +165,14 @@ export function AssetVoiceTrack({ asset, episodeId, onChanged }: { asset: Asset;
           <p className="text-subtle-foreground text-[10px]">{t('assets.voiceEmpty')}</p>
           {error ? <p className="text-destructive text-[10px]">{error}</p> : null}
           <VoiceEngineStatus compact />
+          {/* 空态入口按内容宽度并排——flex-1 会把两字按钮拉成 500px 通栏长条，
+              在角色卡的小节里边框套边框，视觉重量远超"低频次要入口"该有的样子。 */}
           <div className="flex gap-1">
-            <Button variant="outline" size="sm" className="h-6 flex-1 text-[10px]" disabled={busy} onClick={() => void recordVoice()}>
+            <Button variant="outline" size="sm" className="h-6 text-[10px]" disabled={busy} onClick={() => void recordVoice()}>
               <MicIcon className="size-3" />
               {t('assets.voiceRecord')}
             </Button>
-            <Button variant="outline" size="sm" className="h-6 flex-1 text-[10px]" disabled={busy} onClick={() => fileInput.current?.click()}>
+            <Button variant="outline" size="sm" className="h-6 text-[10px]" disabled={busy} onClick={() => fileInput.current?.click()}>
               <UploadIcon className="size-3" />
               {t('assets.voiceImport')}
             </Button>

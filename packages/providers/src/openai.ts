@@ -1,5 +1,6 @@
 import type { ModelCapability, ModelModality } from '@studio/domain'
 import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { vendorDurationField } from './duration.js'
 import { probeModel, sanitizeError } from './types.js'
 
 export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com'
@@ -20,7 +21,7 @@ const IMAGE_FORMATS: Record<string, string> = { png: 'image/png', jpeg: 'image/j
 const AUDIO_FORMATS: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', opus: 'audio/opus', pcm: 'audio/pcm' }
 
 /** Only these ride along in the video create form; the vendor rejects unknown fields. */
-const VIDEO_FIELDS = ['seconds', 'size', 'resolution'] as const
+const VIDEO_FIELDS = ['size', 'resolution'] as const
 
 export interface OpenAIHttpRequest {
   url: string
@@ -167,6 +168,9 @@ export function buildOpenAIVideoCreateRequest(baseUrl: string, apiKey: string, r
   const form = new FormData()
   form.set('model', request.model)
   form.set('prompt', promptOf(request))
+  // Sora calls the length `seconds` and wants it quoted; the slot owns both facts.
+  const seconds = vendorDurationField('openai', request.parameters).seconds
+  if (seconds !== undefined) form.set('seconds', String(seconds))
   for (const field of VIDEO_FIELDS) {
     const value = request.parameters[field]
     if (typeof value === 'string' || typeof value === 'number') form.set(field, String(value))

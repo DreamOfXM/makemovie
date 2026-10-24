@@ -17,6 +17,7 @@ interface BindingRow {
     modality: string
     acceptsReferenceImages: boolean
     spec: unknown
+    durationEvidence: unknown
     entitlementVerifiedAt: Date | null
     connection: { id: string; name: string; provider: string; enabled: boolean }
   }
@@ -50,6 +51,7 @@ function binding(
       modality: 't2v',
       acceptsReferenceImages: false,
       spec: null,
+      durationEvidence: null,
       entitlementVerifiedAt: overrides.verified === false ? null : VERIFIED,
       connection: {
         id: `conn-${capabilityId}`,
@@ -157,9 +159,11 @@ describe('resolveSlotCandidates', () => {
     expect(candidates).toHaveLength(1)
     const [candidate] = candidates
     // 排序与请求装配都要用到的两个能力字段:参考图标志(图像候选按需排序)
-    // 与 spec(时长/分辨率档位的唯一事实来源)。
+    // 与 spec(时长/分辨率档位的唯一事实来源)。durationEvidence 是它的留痕:开烧前的
+    // 时长预检要分清「厂商文档/人工核对的上限」和「实测过的上限」,不带上这一列,
+    // 预检就只能相信 spec,超长镜的三选一会因为读不到证据而给错选项。
     expect(Object.keys(candidate).sort()).toEqual([
-      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
+      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'durationEvidence', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
     ])
     expect(candidate).toEqual({
       bindingId: 'b-1',
@@ -174,6 +178,7 @@ describe('resolveSlotCandidates', () => {
       modality: 't2v',
       acceptsReferenceImages: false,
       spec: null,
+      durationEvidence: null,
     })
   })
 })

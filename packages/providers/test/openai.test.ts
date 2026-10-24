@@ -135,7 +135,7 @@ describe('openai request building', () => {
   })
 
   it('creates a video from form fields and leaves the content type to FormData', () => {
-    const req = buildOpenAIVideoCreateRequest(base, API_KEY, request({ model: 'sora-2', parameters: { seconds: 8, size: '1280x720', resolution: '720p', unknown: 'dropped' } }))
+    const req = buildOpenAIVideoCreateRequest(base, API_KEY, request({ model: 'sora-2', parameters: { durationSeconds: 8, size: '1280x720', resolution: '720p', unknown: 'dropped' } }))
     expect(req.url).toBe(`${base}/v1/videos`)
     expect(req.headers).toEqual({ Authorization: `Bearer ${API_KEY}` })
     expect('Content-Type' in req.headers).toBe(false)
@@ -143,7 +143,9 @@ describe('openai request building', () => {
     expect(form).toBeInstanceOf(FormData)
     expect(form.get('model')).toBe('sora-2')
     expect(form.get('prompt')).toBe('a rainy night market, neon reflections')
+    // Sora's own name for the length, quoted, and the platform's name nowhere in the form.
     expect(form.get('seconds')).toBe('8')
+    expect(form.get('durationSeconds')).toBeNull()
     expect(form.get('size')).toBe('1280x720')
     expect(form.get('unknown')).toBeNull()
   })

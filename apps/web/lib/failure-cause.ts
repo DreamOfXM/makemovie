@@ -36,9 +36,14 @@ export function auditAttempts(raw: string | null | undefined): number | null {
  *  与「审了 N 次没过线」分开说——前者重跑通常就过，后者要改描述。 */
 const AUDITOR_SILENT_RE = /no parseable verdict|could not judge|call failed|reported failure/i
 
+/** 绑定本身是坏的：厂商侧根本没有这个模型。重跑再多次也不会变好，
+ *  必须先改模型中心里的审核绑定——归成「服务波动」等于让人白花钱（SD-038）。 */
+const AUDIT_MODEL_MISSING_RE = /model not exist|model not found|model_not_found|unknown model|not served|deployment .*not found/i
+
 export function assetFailureCopy(t: TranslateFn, raw: string | null): string {
   const kind = classifyFailure(raw)
   if (kind === 'audit') {
+    if (raw && AUDIT_MODEL_MISSING_RE.test(raw)) return t('assets.failure.auditModelMissing')
     if (raw && AUDITOR_SILENT_RE.test(raw)) return t('assets.failure.auditorSilent')
     const count = auditAttempts(raw)
     return count === null ? t('assets.generateFailedHint') : t('assets.failure.audit', { count })

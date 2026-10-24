@@ -23,9 +23,11 @@ import {
   type GenerationArtifact,
   type GenerationBatch,
   type GenerationPlan,
+  type GenerationReview,
   type GenerationStage,
   type GenerationTask,
   type GenerationsResponse,
+  type ShotDurationDecision,
   type Storyboard,
 } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -33,7 +35,7 @@ import { HelpHint } from '@/components/ui/help-hint'
 import { Hint } from '@/components/ui/hint'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
-import { cn, formatDateTime } from '@/lib/utils'
+import { cn, formatDateTime, formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -51,6 +53,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { Skeleton, TableSkeleton } from '@/components/ui/skeleton'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Textarea } from '@/components/ui/textarea'
 import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { ArtifactLoadError, ArtifactMedia, useArtifactUrl } from '@/components/generations/artifact-media'
@@ -174,7 +177,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
     try {
       const query = `stage=${next}&regenerate=${isRegenerate ? 1 : 0}`
       const { plan } = await api<{ plan: GenerationPlan }>(`/episodes/${episodeId}/generation-plan?${query}`)
-      if (plan.newCount + plan.retryCount === 0) {
+      if (plan.newCount + plan.retryCount === 0 && plan.localCount === 0) {
         toast.message(isRegenerate ? t('generations.planRegenerateEmpty') : t('generations.planNothingToDo'))
       } else {
         setPendingPlan({ stage: next, regenerate: isRegenerate, plan })
@@ -187,14 +190,22 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
     }
   }
 
-  async function confirmTrigger() {
+  async function confirmTrigger(acceptDurationGap: boolean, durationDecisions: ShotDurationDecision[]) {
     if (!episodeId || !pendingPlan) return
     const { stage, regenerate } = pendingPlan
     setPendingPlan(null)
     if (regenerate) setRegenerating(true)
     else setTriggering(true)
     try {
-      await api(`/episodes/${episodeId}/generations`, { method: 'POST', body: JSON.stringify({ stage, ...(regenerate ? { regenerate: true } : {}) }) })
+      await api(`/episodes/${episodeId}/generations`, {
+        method: 'POST',
+        body: JSON.stringify({
+          stage,
+          ...(regenerate ? { regenerate: true } : {}),
+          ...(acceptDurationGap ? { acceptDurationGap: true } : {}),
+          ...(durationDecisions.length > 0 ? { durationDecisions } : {}),
+        }),
+      })
       toast.success(
         regenerate
           ? t('generations.regenerated', { stage: translateEnum(t, 'generations.stage', stage) })
@@ -209,19 +220,20 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
     }
   }
 
-  // 一键重试失败项:走触发端点的幂等路径——同幂等键撞库时 SUCCEEDED/QUEUED/RUNNING
-  // 不动、只把 FAILED 重置排队，所以点了不会重烧已经成功的镜头。
-  // busy 必须盖过「请求返回→数据刷新」的空窗，否则按钮转圈一闪界面纹丝不动。
+  // 一键重试失败项也走预审:触发端点的幂等路径会重置 FAILED、不动已成功的镜头,
+  // 但视频批次同样可能带时长缺口——确认框必须先把缺口摊开,不能从侧门绕过去。
   const [retryingStage, setRetryingStage] = useState<GenerationStage | null>(null)
 
   async function retryFailed(stage: GenerationStage) {
     if (!episodeId || retryingStage) return
     setRetryingStage(stage)
     try {
-      await api(`/episodes/${episodeId}/generations`, { method: 'POST', body: JSON.stringify({ stage }) })
-      toast.success(t('generations.retryQueued', { stage: translateEnum(t, 'generations.stage', stage) }))
-      reload()
-      await new Promise(resolve => setTimeout(resolve, 900))
+      const { plan } = await api<{ plan: GenerationPlan }>(`/episodes/${episodeId}/generation-plan?stage=${stage}&regenerate=0`)
+      if (plan.newCount + plan.retryCount === 0) {
+        toast.message(t('generations.planNothingToDo'))
+        return
+      }
+      setPendingPlan({ stage, regenerate: false, plan })
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
     } finally {
@@ -234,9 +246,34 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
   const [regenAllStage, setRegenAllStage] = useState<'IMAGE' | 'VIDEO' | 'AUDIO' | null>(null)
   const [confirmRegenAll, setConfirmRegenAll] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  // 整集重跑也含一道视频批,缺口同样要在开跑前摊开;确认框打开时先读一次视频预审。
+  const [regenAllPlan, setRegenAllPlan] = useState<GenerationPlan | null>(null)
+  const [regenAllPlanError, setRegenAllPlanError] = useState<string | null>(null)
+  const [regenAllPlanLoading, setRegenAllPlanLoading] = useState(false)
+  const [regenAllGapAccepted, setRegenAllGapAccepted] = useState(false)
 
-  async function triggerStageRegenerate(stage: ShotStage): Promise<void> {
-    await api(`/episodes/${episodeId}/generations`, { method: 'POST', body: JSON.stringify({ stage, regenerate: true }) })
+  async function requestRegenAll() {
+    if (!episodeId || regenAllPlanLoading) return
+    setConfirmRegenAll(true)
+    setRegenAllPlan(null)
+    setRegenAllPlanError(null)
+    setRegenAllGapAccepted(false)
+    setRegenAllPlanLoading(true)
+    try {
+      const { plan } = await api<{ plan: GenerationPlan }>(`/episodes/${episodeId}/generation-plan?stage=VIDEO&regenerate=1`)
+      setRegenAllPlan(plan)
+    } catch (error) {
+      setRegenAllPlanError(apiErrorMessage(error, t))
+    } finally {
+      setRegenAllPlanLoading(false)
+    }
+  }
+
+  async function triggerStageRegenerate(stage: ShotStage, acceptDurationGap = false): Promise<void> {
+    await api(`/episodes/${episodeId}/generations`, {
+      method: 'POST',
+      body: JSON.stringify({ stage, regenerate: true, ...(acceptDurationGap ? { acceptDurationGap: true } : {}) }),
+    })
   }
 
   async function waitForStageSettled(stage: 'IMAGE' | 'VIDEO' | 'AUDIO', maxMs = 15 * 60 * 1000): Promise<boolean> {
@@ -254,14 +291,14 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
     return false
   }
 
-  async function regenerateAllMedia() {
+  async function regenerateAllMedia(acceptDurationGap: boolean) {
     if (!episodeId) return
     setConfirmRegenAll(false)
     const stages: Array<'IMAGE' | 'VIDEO' | 'AUDIO'> = ['IMAGE', 'VIDEO', 'AUDIO']
     try {
       for (const stage of stages) {
         setRegenAllStage(stage)
-        await triggerStageRegenerate(stage)
+        await triggerStageRegenerate(stage, stage === 'VIDEO' && acceptDurationGap)
         const settled = await waitForStageSettled(stage)
         if (!settled) throw new Error(t('generations.regenAllTimeout'))
       }
@@ -326,6 +363,17 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
       {regenAllStage ? t(`generations.regenAllStage.${regenAllStage}`) : t('generations.more')}
     </>
   )
+
+  const regenAllGapMs = regenAllPlan?.durationGapMs ?? null
+  const regenAllGap = regenAllGapMs !== null && regenAllGapMs > 0 ? regenAllGapMs : null
+  // 整集重跑不替人逐颗决定超长镜的出路：拼接/换模型/拆镜必须在那批视频的预审门里选。
+  const regenAllOverflow = regenAllPlan?.durationPreflight ?? []
+  const regenAllBlocked =
+    regenAllPlanLoading
+    || regenAllPlanError !== null
+    || !regenAllPlan
+    || regenAllOverflow.length > 0
+    || (regenAllGap !== null && !regenAllGapAccepted)
 
   return (
     <>
@@ -399,7 +447,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                       <DropdownMenuItem
                         className="text-destructive focus:text-destructive"
                         disabled={regenAllStage !== null}
-                        onSelect={() => setConfirmRegenAll(true)}
+                        onSelect={() => void requestRegenAll()}
                       >
                         <RotateCwIcon />
                         <span className="min-w-0">
@@ -469,6 +517,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                         onCancel={cancelTask}
                         onRetry={() => void retryFailed(batch.stage)}
                         retrying={retryingStage === batch.stage}
+                        onReviewed={reload}
                         onStop={() => void stopBatch(batch)}
                         stopping={stoppingBatchId === batch.id}
                       />
@@ -531,6 +580,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                               onCancel={cancelTask}
                               onRetry={() => void retryFailed(batch.stage)}
                               retrying={retryingStage === batch.stage}
+                              onReviewed={reload}
                               onStop={() => void stopBatch(batch)}
                               stopping={stoppingBatchId === batch.id}
                             />
@@ -559,16 +609,68 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
             <AlertDialogTitle>{t('generations.regenAllTitle')}</AlertDialogTitle>
             <AlertDialogDescription>{t('generations.regenAllConfirm')}</AlertDialogDescription>
           </AlertDialogHeader>
+          {regenAllPlanLoading ? (
+            <p className="text-muted-foreground flex items-center gap-2 text-xs">
+              <LoaderCircleIcon className="size-3.5 animate-spin" />
+              {t('generations.regenAllPlanLoading')}
+            </p>
+          ) : regenAllPlanError ? (
+            <p className="text-destructive text-xs">{regenAllPlanError}</p>
+          ) : regenAllPlan?.targetDurationMs != null && regenAllPlan.plannedDurationMs != null ? (
+            <div className="rounded-lg border px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="text-muted-foreground">
+                  {t('generations.planRuntimeTarget')} <span className="text-foreground font-medium tabular-nums">{formatDuration(regenAllPlan.targetDurationMs)}</span>
+                </span>
+                <span className="text-muted-foreground">
+                  {t('generations.planRuntimePlanned')} <span className="text-foreground font-medium tabular-nums">{formatDuration(regenAllPlan.plannedDurationMs)}</span>
+                </span>
+                {regenAllGap !== null && (
+                  <span className="text-warning-ink font-medium tabular-nums">
+                    {t('generations.planRuntimeGap', { duration: formatDuration(regenAllGap) })}
+                  </span>
+                )}
+              </div>
+              {regenAllGap !== null && (
+                <p className="text-muted-foreground mt-1 leading-relaxed">
+                  {t('generations.planGapExplain', {
+                    target: formatDuration(regenAllPlan.targetDurationMs),
+                    planned: formatDuration(regenAllPlan.plannedDurationMs),
+                    gap: formatDuration(regenAllGap),
+                  })}
+                </p>
+              )}
+            </div>
+          ) : null}
+          {regenAllOverflow.length > 0 && (
+            <p className="text-warning-ink text-xs leading-relaxed">
+              {t('generations.regenAllOverflow', {
+                count: regenAllOverflow.length,
+                shots: regenAllOverflow.map(item => `#${item.number}`).join('、'),
+              })}
+            </p>
+          )}
+          {regenAllGap !== null && (
+            <label className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-relaxed">
+              <input
+                type="checkbox"
+                checked={regenAllGapAccepted}
+                onChange={event => setRegenAllGapAccepted(event.target.checked)}
+                className="accent-primary mt-0.5 size-4 shrink-0"
+              />
+              <span>{t('generations.planGapAccept')}</span>
+            </label>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void regenerateAllMedia()}>
+            <AlertDialogAction disabled={regenAllBlocked} onClick={() => void regenerateAllMedia(regenAllGapAccepted)}>
               {t('generations.regenAllMedia')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <PlanDialog pending={pendingPlan} onClose={() => setPendingPlan(null)} onConfirm={() => void confirmTrigger()} />
+      <PlanDialog pending={pendingPlan} onClose={() => setPendingPlan(null)} onConfirm={(acceptDurationGap, durationDecisions) => void confirmTrigger(acceptDurationGap, durationDecisions)} />
     </>
   )
 }
@@ -696,6 +798,169 @@ export interface TaskLogEntry {
   createdAt: string
 }
 
+const reviewDimensions: Record<string, string> = {
+  content: 'generations.review.dimension.content',
+  aesthetic: 'generations.review.dimension.aesthetic',
+  continuity: 'generations.review.dimension.continuity',
+}
+
+/**
+ * 停在问询上的任务:自动重抽已经走完它能走的路(策略/上限/额度),现在该人回答。
+ * 这里只放两个出口——重抽一次、或带理由豁免;两个都是描边,与全站"重复行不得用实心"一致。
+ */
+function ReviewAskCard({ task, review, storyboards, qcThreshold, onReviewed }: {
+  task: GenerationTask
+  review: GenerationReview
+  storyboards: Storyboard[]
+  qcThreshold?: number
+  onReviewed(): void
+}) {
+  const { t } = useI18n()
+  const { api } = useSession()
+  const [busy, setBusy] = useState<'retry' | 'waive' | null>(null)
+  const [waiveOpen, setWaiveOpen] = useState(false)
+  const [waiveReason, setWaiveReason] = useState('')
+
+  const headline =
+    review.kind === 'provider-exhausted'
+      ? t('generations.review.kind.providerExhausted')
+      : review.kind === 'content-rejected'
+        ? t('generations.review.kind.contentRejected')
+        : t('generations.review.kind.qc')
+  const stopReason =
+    review.askReason === 'policy'
+      ? review.policy === 'ask'
+        ? t('generations.review.ask.policyAsk')
+        : t('generations.review.ask.policyAuto', { auto: review.autoRetries, used: review.retriesUsed })
+      : review.askReason === 'cap'
+        ? t('generations.review.ask.cap', { cap: review.cap })
+        : t('generations.review.ask.budget', { used: review.budgetUsed, limit: review.budgetLimit ?? 0 })
+
+  async function decide(action: 'retry' | 'waive', reason?: string) {
+    setBusy(action)
+    try {
+      await api(`/generations/tasks/${task.id}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ action, ...(reason ? { reason } : {}) }),
+      })
+      toast.success(action === 'retry' ? t('generations.review.retried') : t('generations.review.waived'))
+      setWaiveOpen(false)
+      setWaiveReason('')
+      onReviewed()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="border-warning/40 bg-warning/10 space-y-2 rounded-lg border px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="secondary" className="font-normal">
+          {t(`generations.review.class.${review.retryClass}`)}
+        </Badge>
+        <span className="text-warning-ink text-xs font-medium">{headline}</span>
+        <span className="text-muted-foreground text-xs">
+          {task.storyboardId ? `#${storyboardNumber(task.storyboardId, storyboards)} · ` : ''}
+          {t('generations.review.meta', { attempt: review.attempt, used: review.retriesUsed, cap: review.cap })}
+          {review.budgetLimit !== null
+            ? ` · ${t('generations.review.budget', { used: review.budgetUsed, limit: review.budgetLimit })}`
+            : ''}
+          {review.score !== null
+            ? ` · ${t('generations.review.score', { score: Math.round(review.score * 100) })}${
+                qcThreshold === undefined ? '' : ` (${t('generations.qcLine', { line: Math.round(qcThreshold * 100) })})`
+              }`
+            : ''}
+        </span>
+      </div>
+      {review.findings.length > 0 ? (
+        <ul className="max-h-28 space-y-1 overflow-y-auto text-xs leading-relaxed">
+          {review.findings.map((finding, index) => (
+            <li key={`${finding.dimension}:${index}`} className="break-words">
+              <span className="text-muted-foreground">
+                {reviewDimensions[finding.dimension] ? t(reviewDimensions[finding.dimension]) : finding.dimension}
+              </span>
+              {' · '}
+              {finding.message}
+              {finding.evidenceTimeSeconds != null && (
+                <span className="text-subtle-foreground tabular-nums"> · {formatDuration(finding.evidenceTimeSeconds * 1000)}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : review.reasons.length > 0 ? (
+        <ul className="max-h-28 space-y-1 overflow-y-auto text-xs leading-relaxed">
+          {review.reasons.map((reason, index) => (
+            <li key={index} className="text-muted-foreground break-all">
+              {reason}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="text-muted-foreground text-xs leading-relaxed">{stopReason}</p>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <GuardedButton
+          action="generation:trigger"
+          variant="outline"
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => void decide('retry')}
+        >
+          {busy === 'retry' ? <LoaderCircleIcon data-slot="icon" className="animate-spin" /> : <RotateCwIcon data-slot="icon" />}
+          {t('generations.review.retry')}
+        </GuardedButton>
+        {review.artifactId === null ? (
+          <Hint text={t('generations.review.waiveNoArtifact')}>
+            <GuardedButton action="generation:trigger" variant="outline" size="sm" disabled>
+              {t('generations.review.waive')}
+            </GuardedButton>
+          </Hint>
+        ) : (
+          <GuardedButton
+            action="generation:trigger"
+            variant="outline"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => setWaiveOpen(true)}
+          >
+            {t('generations.review.waive')}
+          </GuardedButton>
+        )}
+      </div>
+      <Dialog open={waiveOpen} onOpenChange={open => { setWaiveOpen(open); if (!open) setWaiveReason('') }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('generations.review.waiveTitle')}</DialogTitle>
+            <DialogDescription>{t('generations.review.waiveHint')}</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={waiveReason}
+            onChange={event => setWaiveReason(event.target.value)}
+            placeholder={t('generations.review.waivePlaceholder')}
+            rows={4}
+            maxLength={500}
+            autoFocus
+          />
+          <DialogFooter>
+            <Button variant="outline" disabled={busy !== null} onClick={() => setWaiveOpen(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => void decide('waive', waiveReason.trim())}
+            >
+              {busy === 'waive' && <LoaderCircleIcon data-slot="icon" className="animate-spin" />}
+              {t('generations.review.waiveConfirm')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 interface BatchCardProps {
   batch: GenerationBatch
   storyboards: Storyboard[]
@@ -709,13 +974,15 @@ interface BatchCardProps {
   onRetry(): void
   /** True while the retry POST + data refresh is in flight (request-segment spinner). */
   retrying: boolean
+  /** Reload after a pending review is decided, so the task's new status reaches the table. */
+  onReviewed(): void
   /** 停止本批:把还在排队的任务一次性转为已取消。 */
   onStop(): void
   /** True while the stop POST + data refresh is in flight. */
   stopping: boolean
 }
 
-function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold, onCancel, onRetry, retrying, onStop, stopping }: BatchCardProps) {
+function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold, onCancel, onRetry, retrying, onReviewed, onStop, stopping }: BatchCardProps) {
   const { t, locale } = useI18n()
   const { api } = useSession()
   const [open, setOpen] = useState(defaultOpen)
@@ -727,6 +994,11 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold,
 
   const runningTasks = batch.tasks.filter(task => task.status === 'QUEUED' || task.status === 'RUNNING').length
   const failedTasks = batch.tasks.filter(task => task.status === 'FAILED').length
+  // 停在问询上的 FAILED 不算"失败待重试":它要的是裁决,不是一键重抽。
+  const reviewTasks = batch.tasks.filter(
+    (task): task is GenerationTask & { review: GenerationReview } => task.review?.state === 'pending',
+  )
+  const retryableFailed = batch.tasks.filter(task => task.status === 'FAILED' && task.review?.state !== 'pending').length
 
   async function openLogs(task: GenerationTask) {
     setLogTask(task)
@@ -785,15 +1057,25 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold,
           </GuardedButton>
         </div>
       )}
-      {failedTasks > 0 && (
+      {retryableFailed > 0 && (
         <div className="bg-destructive/5 flex items-center justify-between gap-2 rounded-md border border-destructive/20 px-3 py-2">
-          <p className="text-destructive-ink text-xs">{t('generations.batchFailed', { count: failedTasks })}</p>
+          <p className="text-destructive-ink text-xs">{t('generations.batchFailed', { count: retryableFailed })}</p>
           <GuardedButton action="generation:trigger" variant="outline" size="sm" disabled={retrying} onClick={onRetry}>
             {retrying ? <LoaderCircleIcon data-slot="icon" className="animate-spin" /> : <RotateCwIcon data-slot="icon" />}
             {t('generations.retryFailed')}
           </GuardedButton>
         </div>
       )}
+      {reviewTasks.map(task => (
+        <ReviewAskCard
+          key={task.id}
+          task={task}
+          review={task.review}
+          storyboards={storyboards}
+          qcThreshold={qcThreshold}
+          onReviewed={onReviewed}
+        />
+      ))}
       {open && (
       <Table>
         <TableHeader>

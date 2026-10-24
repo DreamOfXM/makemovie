@@ -114,6 +114,29 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 
 Common issues / 常见问题: Postgres is on host port **5433** and Redis on **6380**, not the defaults / Postgres 用宿主端口 5433、Redis 6380,不是默认端口; a slim ffmpeg build silently drops subtitle burning — `pnpm check` names the missing filters / 精简版 ffmpeg 会静默丢字幕烧录,`pnpm check` 会点名缺失滤镜; the all-zero master key is dev-only and production refuses to boot on it / 全零主密钥仅限开发,生产拒绝启动.
 
+## What's inside / 里头有什么
+
+| Capability / 能力 | Status / 状态 |
+| --- | --- |
+| Story-to-project creation with autosave drafts / 故事建项与草稿自动保存 | ✅ |
+| Versioned production recipes (9:16 & 16:9) / 版本化制作配方 | ✅ |
+| Distributed example projects (read-only, cloneable) / 可分发示例项目 | ✅ |
+| Creation readiness guidance / 创作就绪度引导 | ✅ |
+| Structured shot controls (framing, angle, movement, mood) / 镜头结构化控制 | ✅ |
+| Selection locks (video/voice/references) / 选版锁定 | ✅ |
+| Video extend (artifact operations) / 视频延长 | ✅ (mock; real adapter pending) |
+| SFX slot for dialogue-free shots / 音效槽位 | ✅ |
+| Technical quality checks (probe, black frame detection) / 技术质量检查 | ✅ |
+| Multi-point visual audit frame extraction / 多时点视觉审核抽帧 | ✅ |
+| Edit timeline (reorder, trim, tracks, undo/redo) / 编辑时间线 | ✅ |
+| Content freshness tracking / 内容新鲜度 | ✅ |
+| Agent/MCP access with scoped tokens / Agent 接入 | ✅ |
+| Directed video editing / 定向视频编辑 | 🚧 pending real adapter |
+| ASR transcription / 语音转写 | 🚧 pending real ASR |
+
+Known limitations / 已知限制: real provider adapters for extend and directed editing require account setup; NLE import verification requires Premiere/Resolve testing.
+
+
 ## Architecture
 
 | Component | Purpose |

@@ -6,11 +6,23 @@ export function isWorkflowStatus(value: unknown): value is WorkflowStatus {
 }
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled'
 
-export const modelModalities = ['text', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'sfx', 'vlm'] as const
+export const modelModalities = ['text', 'image', 't2v', 'i2v', 'r2v', 'tts', 'music', 'sfx', 'vlm', 'asr'] as const
 export type ModelModality = typeof modelModalities[number]
 
 export function isModelModality(value: unknown): value is ModelModality {
   return (modelModalities as readonly string[]).includes(value as string)
+}
+
+/**
+ * Which input-capability switches a hand-entered model row may declare. Reference
+ * images are not a video-only dialect — the qwen-image editing models draw the approved
+ * character sheet — so an `image` row must be able to declare them: a form narrower
+ * than this strands rows whose shots then hit the pipeline's missing-reference guard.
+ * A first frame stays video conditioning, so only an i2v row is offered one.
+ */
+export function modalityInputs(modality: string): { takesInput: boolean; firstFrame: boolean } {
+  const video = modality === 'i2v' || modality === 'r2v'
+  return { takesInput: video || modality === 'image', firstFrame: modality === 'i2v' }
 }
 
 /**
@@ -103,6 +115,7 @@ export const capabilitySlots = [
   'music_gen',
   'visual_audit',
   'sfx',
+  'audio_transcribe',
 ] as const
 
 export type CapabilitySlot = typeof capabilitySlots[number]
@@ -122,6 +135,7 @@ export const slotModality: Record<CapabilitySlot, ModelModality> = {
   music_gen: 'music',
   visual_audit: 'vlm',
   sfx: 'sfx',
+  audio_transcribe: 'asr',
 }
 
 /**
@@ -174,6 +188,8 @@ export const slotStageUsage: Record<CapabilitySlot, SlotStageUsage> = {
   // AUDIO-stage rows for silent shots only, so voice resolution for voiced shots
   // never sees them; the cut takes an sfx through the shot's ambience pin.
   sfx: { stages: ['AUDIO'], qcOnly: false, required: false },
+  // US-033 ASR:独立转写能力,不进生成链(它检查已有音频,不产出新素材)。
+  audio_transcribe: { stages: [], qcOnly: true, required: false },
   music_gen: { stages: ['MUSIC'], qcOnly: false, required: false },
   visual_audit: { stages: [], qcOnly: true, required: false },
 }
@@ -396,7 +412,7 @@ export type FailureKind = (typeof failureKinds)[number]
 const FAILURE_PATTERNS: readonly [FailureKind, RegExp][] = [
   ['audit', /threshold not met|visual-audit:/i],
   ['moderation', /DataInspectionFailed|Green net check rejected|inappropriate content/i],
-  ['quota', /AllocationQuota|FreeTierOnly|free quota exhausted|insufficient balance|arrearage/i],
+  ['quota', /AllocationQuota|FreeTierOnly|free quota exhausted|insufficient balance|arrearage|insufficient_user_quota|预扣费额度失败/i],
   ['access', /AccessDenied|NoPermission|Forbidden|Unauthorized|InvalidApiKey/i],
   ['param', /InvalidParameter|BadRequest|url error/i],
   ['network', /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up/i],
@@ -478,6 +494,25 @@ export function reduceCallEvidence(rows: Iterable<CallEvidenceRow>): Map<string,
 }
 
 /**
+ * 分镜表「转场」列的词表。落库值（Storyboard.transition）、写入校验
+ * （pipeline 的 normalizeTransition）、合成侧那一刀的形状（media 的 cutKindOf）
+ * 与界面选择器都读这一份——本处是事实源，另几处只是别名；改名要一起改。
+ * 界面若自己另抄六个词，就会出现「叠化」在格子里、硬切在母带上的假值。
+ */
+export const shotTransitions = ['cut', 'dissolve', 'fade_in', 'fade_out', 'black', 'flash'] as const
+export type ShotTransition = (typeof shotTransitions)[number]
+
+/** 每档的缺省毫秒：人只换档没填数时，母带上那一刀吃这个值。硬切没有重叠，恒 0。 */
+export const shotTransitionDefaultMs: Record<ShotTransition, number> = {
+  cut: 0,
+  dissolve: 400,
+  fade_in: 400,
+  fade_out: 400,
+  black: 500,
+  flash: 60,
+}
+
+/**
  * 一镜的人声来源档。与 DB 的 AudioSource 枚举、web 的 ShotAudioSource 同名同集
  * ——本处是事实源，另两处只是别名；改名要一起改。
  */
@@ -527,6 +562,56 @@ export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | nu
   return audioSource == null ? dialogue !== '' : audioSource !== 'NATIVE'
 }
 
+/**
+ * 剧本「声音」列里表示「这一镜不垫氛围底」的写法。分镜 prompt 明确允许作者写「无」
+ * （packages/pipeline prompts.ts 的节奏契约与转录规则），英文项目按输出语言指令会写
+ * none；「—」是同一张分镜表既有的「这列没填」记号。库里存作者原话，消费侧统一按这一份
+ * 判「作者说不要」——否则「声床：无（跨接缝不停）」这种自相矛盾的话会进付费请求。
+ */
+const SOUND_BED_NONE = ['无', 'none', 'no', 'n/a', '-', '—']
+
+/** 分镜「声音」列的原文 → 这一镜真正欠的声床；没写或写「不要」都是 null。 */
+export function normalizeSoundBed(raw: string | null | undefined): string | null {
+  const trimmed = (raw ?? '').trim()
+  if (trimmed === '') return null
+  return SOUND_BED_NONE.includes(trimmed.toLowerCase()) ? null : trimmed
+}
+
+/**
+ * 非角色声源。分镜表的「台词/VO」列里，VO 是画外音标记而不是说话人的名字：
+ * 配音解析不能拿它去匹配角色素材，界面也不能把它裸显示成一个名字。
+ * 系统音 / 创作者同样是来源标记，三者与角色名共用 speaker 一列。
+ */
+export const VOICE_OVER_SPEAKER = 'VO'
+export const SYSTEM_SPEAKER = '系统音'
+export const CREATOR_SPEAKER = '创作者'
+
+const SPEAKER_ALIASES: Record<string, string> = {
+  vo: VOICE_OVER_SPEAKER,
+  'v.o.': VOICE_OVER_SPEAKER,
+  'v.o': VOICE_OVER_SPEAKER,
+  'voice-over': VOICE_OVER_SPEAKER,
+  voiceover: VOICE_OVER_SPEAKER,
+  画外音: VOICE_OVER_SPEAKER,
+  旁白: VOICE_OVER_SPEAKER,
+  内心独白: VOICE_OVER_SPEAKER,
+  系统: SYSTEM_SPEAKER,
+}
+
+/**
+ * speaker 的唯一规范化入口：写库（API/worker）、读界面、配音解析都过这里。
+ * 只做来源别名归并与尾部冒号剥离，不猜测剧本里没写的角色名。
+ */
+export function normalizeSpeaker(value: string | null | undefined): string | null {
+  const trimmed = value?.trim().replace(/[：:]+$/, '')
+  if (!trimmed) return null
+  return SPEAKER_ALIASES[trimmed.toLowerCase()] ?? trimmed
+}
+
+export function isVoiceOverSpeaker(value: string | null | undefined): boolean {
+  return normalizeSpeaker(value) === VOICE_OVER_SPEAKER
+}
+
 
 // Readiness rules (slot states, catalog coverage, auto-bind planning). readiness.ts
 // imports this file back for `slotStageUsage` and the bind rules, so this is a cycle —
@@ -536,3 +621,5 @@ export function masterNeedsVoice(dialogue: string, audioSource: AudioSource | nu
 export * from './readiness.js'
 
 export * from './contracts.js'
+
+export * from './duration.js'

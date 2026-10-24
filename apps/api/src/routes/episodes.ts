@@ -1,10 +1,11 @@
 import { basename, extname, join } from 'node:path'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { resolveVideoArtifactShot, AudioSource, Prisma, type PrismaClient, type WorkflowStatus as DbWorkflowStatus } from '@studio/db'
-import { can, canTransition, durationOutOfRange, formatDefaults, formatDurationRange, isWorkflowStatus, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
-import { buildObjectKey, probeDuration } from '@studio/media'
+import { can, canTransition, durationOutOfRange, formatDefaults, formatDurationRange, isWorkflowStatus, normalizeSpeaker, workflowStatuses, type Action, type WorkflowStatus } from '@studio/domain'
+import { buildObjectKey, probeDuration, probeMediaMeta, renderTitleCard, TitleCardTooLongError, titleCardCanvas, titleCardCapability } from '@studio/media'
+import { inspectStoryboardGaps, normalizeShotLines, normalizeShotRole, normalizeTransition, parseGenerationReview, projectAspect, resolveTransition, shotProduction, type ShotLine, type ShotProduction } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { authenticate, requirePermission } from '../plugins/auth.js'
 import type { AuthContext } from '../types.js'
@@ -110,7 +111,7 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
   const landedAt = new Map<string, Date>()
   const errorAt = new Map<string, Date>()
   const tasks = await db.generationTask.findMany({
-    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO', 'AUDIO'] }, storyboardId: { not: null }, status: { in: ['SUCCEEDED', 'FAILED', 'QUEUED', 'RUNNING'] } },
+    where: { batch: { episodeId }, stage: { in: ['FIRST_FRAME', 'VIDEO', 'AUDIO'] }, storyboardId: { not: null }, status: { in: ['SUCCEEDED', 'FAILED', 'BLOCKED', 'QUEUED', 'RUNNING'] } },
     include: { mediaArtifacts: { orderBy: { version: 'desc' }, take: 1 } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   })
@@ -138,7 +139,10 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
         voice.set(task.storyboardId, toArtifactDto(artifact))
       }
       landedAt.set(task.storyboardId, artifact.createdAt)
-    } else if (task.status === 'FAILED' && task.errorSnapshot) {
+    } else if ((task.status === 'FAILED' || task.status === 'BLOCKED') && task.errorSnapshot) {
+      // BLOCKED 的理由同样是这一阶段欠结果的现状:守卫拦下的任务若不把原因带出来,
+      // 界面上只剩「未生成」,「生成」又会把同一任务原样重排一次再被拦回——用户
+      // 点了没反应、也看不到该先补什么(#19 台账死结 2026-10-22 实测)。
       let message = task.errorSnapshot
       try {
         const parsed: unknown = JSON.parse(task.errorSnapshot)
@@ -183,6 +187,19 @@ async function storyboardMedia(db: PrismaClient, episodeId: string): Promise<{ f
       if (ambienceArtifact) importedAmbience.set(pointer.id, ambienceArtifact)
     }
   }
+  const localVideos = await db.mediaArtifact.findMany({
+    where: { stage: 'VIDEO', taskId: null, importedFor: { episodeId } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  })
+  // 本机画面（字卡渲染 / 人工导入）不属于任何生成任务，上面那场遍历拿不到它。
+  // 只在镜头没有模型片段时补位：镜头若改回「视频」并成功生成过，生效的那条是
+  // 模型产物，早前那张字卡是废稿，不能反过来盖住它。
+  for (const artifact of localVideos) {
+    const shotId = artifact.storyboardId
+    if (!shotId || video.has(shotId)) continue
+    video.set(shotId, toArtifactDto(artifact))
+    landedAt.set(shotId, artifact.createdAt)
+  }
   return { firstFrame, video, voice, importedVoice, importedAmbience, frameError, videoError, inflight, inflightAttempt, taskIds, landedAt, errorAt }
 }
 
@@ -197,13 +214,33 @@ interface StoryboardAssetDto {
 /** One succeeded VIDEO version of a shot, newest first — the raw material of the selection gate. */
 interface VideoCandidateDto {
   artifactId: string
-  taskId: string
+  /** 产生这条版本的生成任务；延长/定向编辑的输出没有任务行，为 null。 */
+  taskId: string | null
+  /** 来源：生成任务 / 延长操作 / 定向修改操作 / 本机画的字卡 / 人导入的画面（UX-P04，版本行如实标注）。 */
+  origin: 'generation' | 'extend' | 'directed_edit' | 'local_render' | 'imported'
+  /** 本机画的字卡把卡上的话回传给界面：字卡默认要还是那句话，不能退成镜号占位名。
+   *  其余来源没有这句话，为 null。 */
+  cardText?: string | null
   version: number
   mimeType: string
   durationMs: number | null
   createdAt: string
   selected: boolean
   qc: { kind: string; status: string; score: number | null; reasons: string[] } | null
+  /** 这一版停在「等你裁决」上：任务失败但问询未决，被裁的就是这件产物。能看能播，
+   *  但不能直接入片——要么重抽，要么带理由收下；收下之后它才成为可钦定的成功版本。 */
+  awaitingDecision?: boolean
+}
+
+/** 延长/定向编辑操作的状态行（UX-P04）：制作台对板数据无条件轮询，「延长中/修改中/
+ *  待确认/失败」的界面反馈全部由它数据驱动，不另开操作状态轮询端点。 */
+interface ShotOperationDto {
+  id: string
+  kind: 'video_extend' | 'video_edit'
+  /** QUEUED/RUNNING/BLOCKED(待查询)/FAILED；SUCCEEDED 的结果就是候选本身，不进这张表。 */
+  status: string
+  error: string | null
+  createdAt: string
 }
 
 type StoryboardAssetLink = { role: string; asset: { id: string; kind: string; name: string; status: string } }
@@ -231,6 +268,17 @@ interface StoryboardDto {
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
+  /** 镜头类型（main/insert/reaction/ambience/card）。null = 旧数据或自由拆解。 */
+  shotRole: string | null
+  /** 与上一镜的接法，默认 cut（硬切）。 */
+  transition: string
+  transitionMs: number
+  /** 镜内多句台词；不足两句时为 null，单句仍看 dialogue。 */
+  lines: ShotLine[] | null
+  /** 这一镜的环境音床（剧本「声音」列）。 */
+  ambience: string | null
+  /** 这一镜的画面要不要模型产出。流程页的「生成首帧」只排视频镜，手工镜不进计费队列。 */
+  production: ShotProduction
   status: DbWorkflowStatus
   supersededAt: string | null
   /** Which of this shot's succeeded clips the human pinned. Null means the selection gate is still open. */
@@ -265,6 +313,12 @@ function toStoryboardDto(storyboard: StoryboardRow, media: { firstFrame: Map<str
     continuityIn: storyboard.continuityIn,
     sceneNumber: storyboard.sceneNumber,
     continuityOut: storyboard.continuityOut,
+    shotRole: storyboard.shotRole,
+    transition: storyboard.transition,
+    transitionMs: storyboard.transitionMs,
+    lines: Array.isArray(storyboard.lines) ? (storyboard.lines as unknown as ShotLine[]) : null,
+    ambience: storyboard.ambience,
+    production: shotProduction(storyboard.method),
     status: storyboard.status,
     supersededAt: storyboard.supersededAt?.toISOString() ?? null,
     selectedVideoArtifactId: storyboard.selectedVideoArtifactId,
@@ -313,8 +367,10 @@ async function selectStageArtifact(
   }
   const updated = await app.db.storyboard.update({
     where: { id: storyboard.id },
-    data: { [column]: artifactId },
-    select: { id: true, [column]: true },
+    // V02:人工钦定是镜头状态变化——必须推进 stateRevision,否则自动采用的
+    // apply_if_unchanged 只比较旧 revision 永远查不出人工改选。
+    data: { [column]: artifactId, stateRevision: { increment: 1 } },
+    select: { id: true, [column]: true, stateRevision: true },
   })
   await recordAudit(app.db, {
     organizationId: auth.organizationId,
@@ -440,6 +496,44 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
     },
   )
 
+  // The target lives on the episode because the split and the pipeline both read
+  // it there. Until now it could only be set at creation, so a first episode
+  // seeded from a story draft (target null) had no way to state how long it
+  // should run. Editing it does not touch existing shots: the next breakdown
+  // reads the new target, the current plan stays as paid for.
+  app.patch<{ Params: { episodeId: string }; Body: { targetDurationMs?: number } }>(
+    '/episodes/:episodeId',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const episode = await app.db.episode.findFirst({
+        where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
+        include: { project: { select: { format: true } } },
+      })
+      if (!episode) return reply.code(404).send({ error: 'Episode not found' })
+      const { targetDurationMs } = request.body ?? {}
+      if (targetDurationMs === undefined) return reply.code(400).send({ error: 'targetDurationMs is required' })
+      if (!Number.isInteger(targetDurationMs) || targetDurationMs <= 0) {
+        return reply.code(400).send({ error: 'targetDurationMs must be a positive integer' })
+      }
+      const fmt = episode.project.format.toLowerCase() as 'short_drama' | 'series' | 'film'
+      if (durationOutOfRange(fmt, targetDurationMs)) {
+        const range = formatDurationRange[fmt]
+        return reply.code(400).send({ error: `targetDurationMs must be between ${range.minMs} and ${range.maxMs} for format ${episode.project.format}` })
+      }
+      const updated = await app.db.episode.update({ where: { id: episode.id }, data: { targetDurationMs } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'episode.updateTarget',
+        entityType: 'Episode',
+        entityId: episode.id,
+        payload: { from: episode.targetDurationMs, to: targetDurationMs },
+      })
+      return updated
+    },
+  )
+
   // An episode is deletable while it is still a shell: text drafts (source,
   // script) cascade away, but anything generated, composed or delivered — work
   // that was paid for — refuses the delete instead of silently dying with it.
@@ -480,7 +574,23 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
   app.post<{
     Params: { episodeId: string }
-    Body: { number?: number; title?: string; durationMs?: number; description?: string; dialogue?: string; speaker?: string; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string; scriptVersionId?: string }
+    Body: {
+      number?: number
+      title?: string
+      durationMs?: number
+      description?: string
+      dialogue?: string
+      speaker?: string
+      sourceExcerpt?: string
+      continuityIn?: string
+      continuityOut?: string
+      scriptVersionId?: string
+      shotRole?: string | null
+      transition?: string
+      transitionMs?: number
+      lines?: unknown
+      ambience?: string | null
+    }
   }>(
     '/episodes/:episodeId/storyboards',
     { preHandler: requirePermission('storyboard:write') },
@@ -493,6 +603,15 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       if (!body.title?.trim()) return reply.code(400).send({ error: 'title is required' })
       if (!Number.isInteger(body.durationMs) || (body.durationMs as number) <= 0) return reply.code(400).send({ error: 'durationMs must be a positive integer' })
       if (!body.description?.trim()) return reply.code(400).send({ error: 'description is required' })
+      const shotRole = body.shotRole === undefined || body.shotRole === null || body.shotRole === '' ? null : normalizeShotRole(body.shotRole)
+      if (body.shotRole !== undefined && body.shotRole !== null && body.shotRole !== '' && shotRole === null) {
+        return reply.code(400).send({ error: 'shotRole must be one of: main, insert, reaction, ambience, card' })
+      }
+      if (body.transition !== undefined && body.transition !== '' && normalizeTransition(body.transition) === null) {
+        return reply.code(400).send({ error: 'transition must be one of: cut, dissolve, fade_in, fade_out, black, flash' })
+      }
+      const transition = resolveTransition(body.transition, body.transitionMs)
+      const lines = normalizeShotLines(body.lines)
       if (body.scriptVersionId) {
         const script = await app.db.scriptVersion.findFirst({ where: { id: body.scriptVersionId, episodeId: episode.id } })
         if (!script) return reply.code(400).send({ error: 'scriptVersionId does not belong to this episode' })
@@ -518,10 +637,15 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
             // An empty line is a silent shot, not an unfilled one: AUDIO looks at this
             // field to decide which shots are worth buying voice for.
             dialogue: body.dialogue?.trim() ?? '',
-            speaker: body.speaker?.trim() || null,
+            speaker: normalizeSpeaker(body.speaker),
             sourceExcerpt: body.sourceExcerpt ?? '',
             continuityIn: body.continuityIn ?? '',
             continuityOut: body.continuityOut ?? '',
+            shotRole,
+            transition: transition.transition,
+            transitionMs: transition.transitionMs,
+            lines: lines === null ? Prisma.DbNull : (lines as unknown as Prisma.InputJsonValue),
+            ambience: body.ambience?.trim() || null,
           },
         })
         await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'storyboard.create', entityType: 'Storyboard', entityId: storyboard.id, payload: { revision: storyboard.revision, number: storyboard.number, title: storyboard.title } })
@@ -556,7 +680,21 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch<{
     Params: { storyboardId: string }
-    Body: { title?: string; durationMs?: number; description?: string; dialogue?: string; speaker?: string | null; sourceExcerpt?: string; continuityIn?: string; continuityOut?: string }
+    Body: {
+      title?: string
+      durationMs?: number
+      description?: string
+      dialogue?: string
+      speaker?: string | null
+      sourceExcerpt?: string
+      continuityIn?: string
+      continuityOut?: string
+      shotRole?: string | null
+      transition?: string
+      transitionMs?: number
+      lines?: unknown
+      ambience?: string | null
+    }
   }>(
     '/storyboards/:storyboardId',
     { preHandler: requirePermission('storyboard:write') },
@@ -576,10 +714,31 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       }
       if (body.description !== undefined) data.description = body.description
       if (body.dialogue !== undefined) data.dialogue = body.dialogue.trim()
-      if (body.speaker !== undefined) data.speaker = body.speaker?.trim() || null
+      if (body.speaker !== undefined) data.speaker = normalizeSpeaker(body.speaker)
       if (body.sourceExcerpt !== undefined) data.sourceExcerpt = body.sourceExcerpt
       if (body.continuityIn !== undefined) data.continuityIn = body.continuityIn
       if (body.continuityOut !== undefined) data.continuityOut = body.continuityOut
+      if (body.shotRole !== undefined) {
+        const shotRole = body.shotRole === null || body.shotRole === '' ? null : normalizeShotRole(body.shotRole)
+        if (body.shotRole !== null && body.shotRole !== '' && shotRole === null) {
+          return reply.code(400).send({ error: 'shotRole must be one of: main, insert, reaction, ambience, card' })
+        }
+        data.shotRole = shotRole
+      }
+      if (body.transition !== undefined || body.transitionMs !== undefined) {
+        if (body.transition !== undefined && body.transition !== '' && normalizeTransition(body.transition) === null) {
+          return reply.code(400).send({ error: 'transition must be one of: cut, dissolve, fade_in, fade_out, black, flash' })
+        }
+        // 只改时长时沿用现有转场：硬切恒为 0，其余夹在 50–1000ms。
+        const resolved = resolveTransition(body.transition ?? storyboard.transition, body.transitionMs ?? storyboard.transitionMs)
+        data.transition = resolved.transition
+        data.transitionMs = resolved.transitionMs
+      }
+      if (body.lines !== undefined) {
+        const lines = normalizeShotLines(body.lines)
+        data.lines = lines === null ? Prisma.DbNull : (lines as unknown as Prisma.InputJsonValue)
+      }
+      if (body.ambience !== undefined) data.ambience = body.ambience?.trim() || null
       const updated = await app.db.storyboard.update({ where: { id: storyboard.id }, data })
       await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'storyboard.update', entityType: 'Storyboard', entityId: storyboard.id, payload: { fields: Object.keys(data) } })
       return updated
@@ -633,12 +792,27 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         const artifact = (await resolveVideoArtifactShot(app.db, artifactId, auth.organizationId))?.storyboardId === storyboard.id
           ? await app.db.mediaArtifact.findFirst({ where: { id: artifactId, organizationId: auth.organizationId, stage: 'VIDEO' }, select: { id: true } })
           : null
-        if (!artifact) return reply.code(400).send({ error: 'artifact is not a succeeded video of this shot' })
+        if (!artifact) {
+          // 拼接段不是「这一镜的一个版本」：它只是母带的一块,单独钦定就等于把
+          // 接缝交回时间线。这里不能混在「不是本镜成功视频」里拒绝——那会让人
+          // 以为产物丢了,而真正要做的是去钦定整镜母带。
+          const segment = await app.db.mediaArtifact.findFirst({
+            where: { id: artifactId, organizationId: auth.organizationId, stage: 'VIDEO' },
+            select: { metadata: true },
+          })
+          const role = (JSON.parse(segment?.metadata ?? '{}') as { role?: unknown }).role
+          if (role === 'take-video' || role === 'take-end-frame') {
+            return reply.code(400).send({ error: 'this cut is one segment of a spliced shot — select the shot master, not a single take' })
+          }
+          return reply.code(400).send({ error: 'artifact is not a succeeded video of this shot' })
+        }
       }
       const updated = await app.db.storyboard.update({
         where: { id: storyboard.id },
-        data: { selectedVideoArtifactId: artifactId },
-        select: { id: true, selectedVideoArtifactId: true },
+        // V02:人工改选推进 stateRevision——自动采用的 CAS 依据它发现「读取之后、
+        // 写入之前」的人工意图变化。
+        data: { selectedVideoArtifactId: artifactId, stateRevision: { increment: 1 } },
+        select: { id: true, selectedVideoArtifactId: true, stateRevision: true },
       })
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
@@ -866,6 +1040,231 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => removeShotAudio(request, reply, 'ambience'),
   )
 
+  // ── 手工制作镜（分镜表「生成方式≠视频」）的画面入口 ──────────────────────────
+  // 这些镜头不排模型任务，平台此前唯一给它们的东西是一句「由人在剪辑里做」——于是
+  // 时间线里它们是空的，「合成整集」在第一处空镜头抛错，而人明明做完了他该做的部分。
+  // 字卡镜头本来就没有可拍的素材、只有一句话，所以画面由本机 ffmpeg 画；界面/录屏/
+  // 合成三档由人给一段视频。两条路都不碰厂商、不进用量账本：这一镜没有买过任何东西，
+  // 产物只挂在镜头自己的视频指针上，与模型版本同一条入片路径。
+  const VIDEO_IMPORT_MAX_BYTES = 256 * 1024 * 1024
+  const VIDEO_IMPORT_TYPES = new Map([
+    ['.mp4', 'video/mp4'],
+    ['.m4v', 'video/mp4'],
+    ['.mov', 'video/quicktime'],
+    ['.webm', 'video/webm'],
+  ])
+
+  type ShotVideoRequest = FastifyRequest<{ Params: { storyboardId: string } }>
+  type TitleCardRequest = FastifyRequest<{ Params: { storyboardId: string }; Body: { text?: unknown } }>
+
+  /** 画幅与出片同源（配方快照优先，无快照按项目形态兜底），画布跟着画幅走，
+   *  否则一张 16:9 的字卡塞进竖屏时间线会被二次缩放，字糊成一团。 */
+  async function shotCanvas(app: FastifyInstance, episodeId: string) {
+    const episode = await app.db.episode.findUnique({
+      where: { id: episodeId },
+      select: { id: true, projectId: true, project: { select: { format: true, recipeSnapshot: true } } },
+    })
+    if (!episode) return null
+    const aspect = projectAspect(episode.project?.recipeSnapshot ?? null, episode.project?.format ?? '')
+    return { ...episode, ...titleCardCanvas(aspect) }
+  }
+
+  /** 本机画面与模型产物走同一条落库路径：同一个 key 构造器、同一个 stage、同一根
+   *  镜头指针。差别只有一处——它不属于任何生成任务，所以用量账本里不会有它。 */
+  async function storeShotVideo(app: FastifyInstance, auth: AuthContext, reply: FastifyReply, input: {
+    shotId: string
+    projectId: string
+    episodeId: string
+    bytes: Buffer
+    extension: string
+    mimeType: string
+    width: number
+    height: number
+    durationMs: number
+    version: number
+    metadata: Record<string, unknown>
+    action: string
+    entityId: string
+  }) {
+    const stored = await app.storage.put(
+      buildObjectKey({
+        tenantId: auth.organizationId,
+        projectId: input.projectId,
+        episodeId: input.episodeId,
+        stage: 'VIDEO',
+        entityId: input.entityId,
+        version: input.version,
+        extension: input.extension,
+      }),
+      new Uint8Array(input.bytes),
+      input.mimeType,
+    )
+    const artifact = await app.db.mediaArtifact.create({
+      data: {
+        organizationId: auth.organizationId,
+        stage: 'VIDEO',
+        storyboardId: input.shotId,
+        objectKey: stored.key,
+        checksum: stored.checksum,
+        mimeType: stored.mimeType,
+        version: input.version,
+        width: input.width,
+        height: input.height,
+        durationMs: input.durationMs,
+        metadata: JSON.stringify(input.metadata),
+      },
+    })
+    // 上传即选中：这一镜只有人给的这一条画面，若还要他再去版本行点一次钦定，
+    // 等于把「画面空着」换成「画面有了但你没选」。人工改选推进 stateRevision，与
+    // video-selection 同一口径（自动采用的 CAS 依据它）。
+    const updated = await app.db.storyboard.update({
+      where: { id: input.shotId },
+      data: { selectedVideoArtifactId: artifact.id, stateRevision: { increment: 1 } },
+      select: { id: true, selectedVideoArtifactId: true, stateRevision: true },
+    })
+    await recordAudit(app.db, {
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: input.action,
+      entityType: 'Storyboard',
+      entityId: input.shotId,
+      payload: { artifactId: artifact.id, ...input.metadata },
+    })
+    return reply.code(201).send({ ...updated, artifact: toArtifactDto(artifact) })
+  }
+
+  async function renderShotTitleCard(request: TitleCardRequest, reply: FastifyReply) {
+    const auth = request.auth!
+    const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+    if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+    if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+    if (shotProduction(storyboard.method) !== 'title-card') {
+      return reply.code(409).send({ error: 'this shot is not a title card shot' })
+    }
+    // 缺 drawtext 与缺中文字体是两件不同的事，修复动作也不同（换 ffmpeg 构建 / 装字体）。
+    // 报成「生成失败」会让人去重抽一张根本不归模型画的卡。
+    const capability = await titleCardCapability()
+    if (!capability.canRender) {
+      return reply.code(501).send({
+        error: capability.blocker === 'no_cjk_font'
+          ? 'no Chinese-capable font on this machine, so title cards cannot be drawn'
+          : 'this ffmpeg build has no text filter, so title cards cannot be drawn',
+      })
+    }
+    const body = request.body?.text
+    if (body !== undefined && typeof body !== 'string') return reply.code(400).send({ error: 'text must be a string' })
+    // 不带文案重画时沿用上一次的卡上原文。直接退回 storyboard.title 会把真文案覆盖成分镜表里的
+    // 占位镜号（「镜头7」）——那是这一镜的名字，不是要给观众看的那句话。
+    const earlier = await app.db.mediaArtifact.findFirst({
+      where: { storyboardId: storyboard.id, stage: 'VIDEO' },
+      orderBy: { createdAt: 'desc' },
+      select: { metadata: true },
+    })
+    let earlierText: string | null = null
+    try {
+      const meta = JSON.parse(earlier?.metadata ?? '{}') as { rendered?: unknown; text?: unknown }
+      if (meta.rendered === true && typeof meta.text === 'string') earlierText = meta.text
+    } catch { /* 元数据读不出就按「没有上一次」处理，仍可由调用方显式给文案 */ }
+    const cardText = (body ?? earlierText ?? storyboard.title).trim()
+    if (cardText === '') return reply.code(400).send({ error: 'title card text is empty' })
+    const canvas = await shotCanvas(app, storyboard.episodeId)
+    if (!canvas) return reply.code(404).send({ error: 'Episode not found' })
+    // 字卡不占额度，所以它没有「先确认再花钱」这一段；但画一次要落一次盘，
+    // 用完即删——渲染中间产物留在临时目录里，攒久了就是一次制作吃掉一整块盘。
+    const dir = await mkdtemp(join(tmpdir(), 'studio-title-card-'))
+    const outPath = join(dir, 'title-card.mp4')
+    try {
+      const rendered = await renderTitleCard({
+        text: cardText,
+        outPath,
+        durationMs: storyboard.durationMs,
+        width: canvas.width,
+        height: canvas.height,
+      })
+      const bytes = await readFile(outPath)
+      const version = (await app.db.mediaArtifact.count({ where: { storyboardId: storyboard.id, stage: 'VIDEO' } })) + 1
+      return await storeShotVideo(app, auth, reply, {
+        shotId: storyboard.id,
+        projectId: canvas.projectId,
+        episodeId: canvas.id,
+        bytes,
+        extension: 'mp4',
+        mimeType: 'video/mp4',
+        width: rendered.width,
+        height: rendered.height,
+        durationMs: rendered.durationMs,
+        version,
+        metadata: { rendered: true, text: cardText, lines: rendered.lines },
+        action: 'storyboard.render-title-card',
+        entityId: `${storyboard.id}-local`,
+      })
+    } catch (error) {
+      if (error instanceof TitleCardTooLongError) {
+        return reply.code(400).send({ error: 'title card text does not fit on one card' })
+      }
+      throw error
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  async function importShotVideo(request: ShotVideoRequest, reply: FastifyReply) {
+    const auth = request.auth!
+    const storyboard = await findStoryboardInOrg(app.db, request.params.storyboardId, auth.organizationId)
+    if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
+    if (storyboard.supersededAt) return reply.code(409).send({ error: 'storyboard is superseded' })
+    if (shotProduction(storyboard.method) === 'video') {
+      return reply.code(409).send({ error: 'this shot is produced by a model, import only covers hand-made shots' })
+    }
+    const file = await request.file({ throwFileSizeLimit: false, limits: { fileSize: VIDEO_IMPORT_MAX_BYTES, files: 1 } })
+    if (!file) return reply.code(400).send({ error: 'video file is required' })
+    const base = basename(file.filename ?? '')
+    const extension = extname(base).toLowerCase()
+    const mimeType = VIDEO_IMPORT_TYPES.get(extension)
+    if (!mimeType) {
+      return reply.code(400).send({ error: `only ${[...VIDEO_IMPORT_TYPES.keys()].join(' ')} files are accepted` })
+    }
+    const bytes = await file.toBuffer()
+    if (file.file.truncated || bytes.byteLength > VIDEO_IMPORT_MAX_BYTES) {
+      return reply.code(413).send({ error: `file is larger than ${Math.round(VIDEO_IMPORT_MAX_BYTES / 1024 / 1024)} MB` })
+    }
+    if (bytes.byteLength === 0) return reply.code(400).send({ error: 'file is empty' })
+    const canvas = await shotCanvas(app, storyboard.episodeId)
+    if (!canvas) return reply.code(404).send({ error: 'Episode not found' })
+    // 实测尺寸与时长必须读到：读不出就收下，等于让一条「不知道多长」的片段进时间线，
+    // 而合成会拿分镜计划时长冒充素材实长——这是 SD-099 已经踩过一次的坑。
+    const meta = await withTempFile(bytes, base, probeMediaMeta)
+    if (!meta?.durationMs) return reply.code(400).send({ error: 'this video file cannot be read, export it again as mp4' })
+    const version = (await app.db.mediaArtifact.count({ where: { storyboardId: storyboard.id, stage: 'VIDEO' } })) + 1
+    return storeShotVideo(app, auth, reply, {
+      shotId: storyboard.id,
+      projectId: canvas.projectId,
+      episodeId: canvas.id,
+      bytes,
+      extension: extension.slice(1),
+      mimeType,
+      width: meta.width ?? canvas.width,
+      height: meta.height ?? canvas.height,
+      durationMs: meta.durationMs,
+      version,
+      metadata: { imported: true, filename: base },
+      action: 'storyboard.import-video',
+      entityId: `${storyboard.id}-import`,
+    })
+  }
+
+  app.post<{ Params: { storyboardId: string }; Body: { text?: unknown } }>(
+    '/storyboards/:storyboardId/title-card',
+    { preHandler: requirePermission('storyboard:write') },
+    renderShotTitleCard,
+  )
+
+  app.post<{ Params: { storyboardId: string } }>(
+    '/storyboards/:storyboardId/video-import',
+    { preHandler: requirePermission('storyboard:write') },
+    async (request, reply) => importShotVideo(request, reply),
+  )
+
   app.get<{ Params: { storyboardId: string } }>(
     '/storyboards/:storyboardId/assets',
     { preHandler: requirePermission('read') },
@@ -884,7 +1283,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
   app.put<{
     Params: { storyboardId: string }
-    Body: { assets?: { assetId?: unknown; role?: unknown }[] }
+    Body: { assets?: { assetId?: unknown }[] }
   }>(
     '/storyboards/:storyboardId/assets',
     { preHandler: requirePermission('storyboard:write') },
@@ -894,33 +1293,35 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
       if (!storyboard) return reply.code(404).send({ error: 'Storyboard not found' })
 
       const entries = request.body?.assets
-      if (!Array.isArray(entries)) return reply.code(400).send({ error: 'assets must be an array of { assetId, role }' })
-      // A Map deduplicates repeated assetIds; the last occurrence wins.
-      const wanted = new Map<string, string>()
+      if (!Array.isArray(entries)) return reply.code(400).send({ error: 'assets must be an array of { assetId }' })
+      // 集合去重且保留首次出现的顺序。role 不接受客户端传值：这一列只有一个词表，
+      // 就是素材自己的 kind（SD-123——模型路径写 asset.kind、手工路径曾写 'appears'，
+      // 同一列两套词，下游任何按 role 的读取都会分叉）。
+      const wanted = new Set<string>()
       for (const entry of entries) {
         const assetId = entry?.assetId
         if (typeof assetId !== 'string' || !assetId.trim()) return reply.code(400).send({ error: 'each asset requires a non-empty assetId' })
-        if (entry.role !== undefined && typeof entry.role !== 'string') return reply.code(400).send({ error: 'role must be a string' })
-        wanted.set(assetId, (entry.role as string | undefined) ?? '')
+        wanted.add(assetId)
       }
 
+      const kindById = new Map<string, string>()
       if (wanted.size > 0) {
         const found = await app.db.asset.findMany({
-          where: { id: { in: [...wanted.keys()] }, episodeId: storyboard.episodeId },
-          select: { id: true },
+          where: { id: { in: [...wanted] }, episodeId: storyboard.episodeId },
+          select: { id: true, kind: true },
         })
         if (found.length !== wanted.size) {
           const valid = new Set(found.map(asset => asset.id))
-          const invalid = [...wanted.keys()].find(id => !valid.has(id))
+          const invalid = [...wanted].find(id => !valid.has(id))
           return reply.code(400).send({ error: `asset ${invalid} does not belong to this episode` })
         }
+        for (const asset of found) kindById.set(asset.id, asset.kind)
       }
 
+      const rows = [...wanted].map(assetId => ({ storyboardId: storyboard.id, assetId, role: kindById.get(assetId) ?? '' }))
       await app.db.$transaction([
         app.db.storyboardAsset.deleteMany({ where: { storyboardId: storyboard.id } }),
-        app.db.storyboardAsset.createMany({
-          data: [...wanted.entries()].map(([assetId, role]) => ({ storyboardId: storyboard.id, assetId, role })),
-        }),
+        app.db.storyboardAsset.createMany({ data: rows }),
       ])
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
@@ -928,7 +1329,7 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         action: 'storyboard.assets',
         entityType: 'Storyboard',
         entityId: storyboard.id,
-        payload: { count: wanted.size, assets: [...wanted.entries()].map(([assetId, role]) => ({ assetId, role })) },
+        payload: { count: rows.length, assets: rows.map(row => ({ assetId: row.assetId, role: row.role })) },
       })
 
       const links = await app.db.storyboardAsset.findMany({
@@ -976,15 +1377,67 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
 
       // 选优门数据:每一镜全部成功版本(新→旧)与各自的质检结论——三件产物同一口径。
       // 「最新」只是机器的猜测,人要在多个版本之间挑,就得先看见全部候选。
+      // FAILED 也进这条查询:停在「等你裁决」上的那一版是真花了钱的成片,把它从版本
+      // 列表里吃掉,屏上那句「决定再抽一次还是收下」就成了空话（SD-120）。哪些失败
+      // 尝试真的算候选,在下面按问询状态逐条筛,不在这里放宽。
       const stageArtifacts = shotIds.length
         ? await app.db.mediaArtifact.findMany({
-            where: { stage: { in: ['VIDEO', 'FIRST_FRAME', 'AUDIO'] }, task: { status: 'SUCCEEDED', storyboardId: { in: shotIds } } },
-            include: { task: { select: { id: true, storyboardId: true, createdAt: true } } },
+            where: { stage: { in: ['VIDEO', 'FIRST_FRAME', 'AUDIO'] }, task: { status: { in: ['SUCCEEDED', 'FAILED'] }, storyboardId: { in: shotIds } } },
+            include: { task: { select: { id: true, storyboardId: true, status: true, reviewSnapshot: true, createdAt: true } } },
           })
         : []
-      const videoArtifacts = stageArtifacts.filter(artifact => artifact.stage === 'VIDEO')
-      const stageQcRows = stageArtifacts.length
-        ? await app.db.qualityCheck.findMany({ where: { artifactId: { in: stageArtifacts.map(a => a.id) } }, orderBy: { id: 'asc' } })
+      // 操作产物并入候选(UX-P04):延长/定向编辑的输出没有任务行——上面那条查询
+      // inner join task,把 taskId=null 的制品整条排除,操作成功落库后版本列表仍只有
+      // 原视频一条。信任路径不变:先按本组织 SUCCEEDED 操作行找出输出制品(快照
+      // storyboardId 先落在本次板内只是省一次解析,不是信任判据),再逐条过统一归属
+      // 解析器 resolveVideoArtifactShot——操作行终态 + 快照归属的镜头确属本组织,
+      // 三重校验缺一不可;解析不过、或解析到本集之外的镜头(跨镜/跨组织伪造行)
+      // 一律不并入。绝不为纳入 taskId=null 制品而放宽归属检查。
+      const operationShotIds = new Set(shotIds)
+      const operationOutputs: { artifactId: string; storyboardId: string; kind: 'video_extend' | 'video_edit'; createdAt: Date }[] = []
+      if (shotIds.length > 0) {
+        const operations = await app.db.artifactOperation.findMany({
+          where: { organizationId: auth.organizationId, status: 'SUCCEEDED', kind: { in: ['video_extend', 'video_edit'] }, outputArtifactId: { not: null } },
+          select: { kind: true, outputArtifactId: true, requestSnapshot: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        })
+        const seenOutput = new Set<string>()
+        for (const operation of operations) {
+          const outputId = operation.outputArtifactId
+          if (!outputId || seenOutput.has(outputId)) continue
+          let storyboardId: string | null = null
+          try {
+            storyboardId = (JSON.parse(operation.requestSnapshot) as { storyboardId?: string }).storyboardId ?? null
+          } catch {
+            // 快照损坏的行解析不出归属,跳过——统一解析器同样不会信它
+            continue
+          }
+          if (!storyboardId || !operationShotIds.has(storyboardId)) continue
+          // 统一归属解析器是唯一信任入口:跨组织/跨镜的伪造操作行在这里被拒绝。
+          const context = await resolveVideoArtifactShot(app.db, outputId, auth.organizationId)
+          if (!context || context.storyboardId !== storyboardId) continue
+          seenOutput.add(outputId)
+          operationOutputs.push({ artifactId: outputId, storyboardId, kind: operation.kind as 'video_extend' | 'video_edit', createdAt: operation.createdAt })
+        }
+      }
+      const operationArtifacts = operationOutputs.length > 0
+        ? await app.db.mediaArtifact.findMany({
+            where: { id: { in: operationOutputs.map(entry => entry.artifactId) }, organizationId: auth.organizationId, stage: 'VIDEO' },
+          })
+        : []
+      const operationByArtifact = new Map(operationOutputs.map(entry => [entry.artifactId, entry]))
+      // 本机画面（字卡渲染 / 人工导入）并入候选：它们没有任务行，上面那条 inner join
+      // task 的查询会整条排除，于是人自己做的那条在版本列表里根本不出现——镜头明明
+      // 有画面，界面却读成「自动取最新」。归属不靠快照解析：artifact 行自带
+      // organizationId 与 storyboardId，storyboardId 又钉死在本次板内（板本身已过
+      // 组织校验），且客户端从不指认这些 id，所以这不是裸 artifactId 读取。
+      const localArtifacts = shotIds.length
+        ? await app.db.mediaArtifact.findMany({
+            where: { stage: 'VIDEO', taskId: null, storyboardId: { in: shotIds }, organizationId: auth.organizationId },
+          })
+        : []
+      const stageQcRows = stageArtifacts.length + operationArtifacts.length + localArtifacts.length > 0
+        ? await app.db.qualityCheck.findMany({ where: { artifactId: { in: [...stageArtifacts, ...operationArtifacts, ...localArtifacts].map(a => a.id) } }, orderBy: { id: 'asc' } })
         : []
       // reasons 一并带出：被审计否决的尝试必须把扣分原因亮给用户——自动重抽花的是
       // 用户的钱，失败理由埋在库里就是黑盒（2026-09-29 用户实测）。
@@ -1000,29 +1453,124 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         }
         latestQcByArtifact.set(qc.artifactId, { kind: qc.kind, status: qc.status, score: qc.score, reasons })
       }
-      const artifactsById = new Map(stageArtifacts.map(artifact => [artifact.id, artifact]))
+      const artifactsById = new Map([...stageArtifacts, ...operationArtifacts, ...localArtifacts].map(artifact => [artifact.id, artifact]))
       const candidatesByStage = new Map<'VIDEO' | 'FIRST_FRAME' | 'AUDIO', Map<string, Omit<VideoCandidateDto, 'selected'>[]>>()
       for (const artifact of stageArtifacts) {
-        const shotId = artifact.task?.storyboardId
-        if (!shotId || !artifact.task) continue
+        const task = artifact.task
+        const shotId = task?.storyboardId
+        if (!shotId || !task) continue
         if (artifact.stage !== 'VIDEO' && artifact.stage !== 'FIRST_FRAME' && artifact.stage !== 'AUDIO') continue
+        // 失败任务只有「问询还压在人手上、且被问的就是这一件」才进候选。已经决定重抽的、
+        // 没有问询记录的失败尝试由失败行自己说话——把它们混进版本列表会把「等你决定」
+        // 和「已经过去了」弄成同一堆。解析问询只认 pipeline 的那一份严格解析器。
+        const review = task.status === 'FAILED' ? parseGenerationReview(task.reviewSnapshot) : null
+        const awaitingDecision = review !== null && review.state === 'pending' && review.artifactId === artifact.id
+        if (task.status === 'FAILED' && !awaitingDecision) continue
         const byShot = candidatesByStage.get(artifact.stage) ?? new Map<string, Omit<VideoCandidateDto, 'selected'>[]>()
         const list = byShot.get(shotId) ?? []
         list.push({
           artifactId: artifact.id,
-          taskId: artifact.task.id,
+          taskId: task.id,
+          origin: 'generation',
+          cardText: null,
           version: artifact.version,
           mimeType: artifact.mimeType,
           durationMs: artifact.durationMs,
-          createdAt: artifact.task.createdAt.toISOString(),
+          createdAt: task.createdAt.toISOString(),
           qc: latestQcByArtifact.get(artifact.id) ?? null,
+          awaitingDecision,
         })
         byShot.set(shotId, list)
         candidatesByStage.set(artifact.stage, byShot)
       }
+      // 操作产物只有 VIDEO 一档,追加进视频候选并如实标注来源;与任务产物按
+      // artifactId 去重(两路来源本不相交,防御性去重保证同一制品绝不重复成两票)。
+      for (const artifact of operationArtifacts) {
+        const meta = operationByArtifact.get(artifact.id)
+        if (!meta) continue
+        const byShot = candidatesByStage.get('VIDEO') ?? new Map<string, Omit<VideoCandidateDto, 'selected'>[]>()
+        const list = byShot.get(meta.storyboardId) ?? []
+        if (list.some(candidate => candidate.artifactId === artifact.id)) continue
+        list.push({
+          artifactId: artifact.id,
+          taskId: null,
+          origin: meta.kind === 'video_edit' ? 'directed_edit' : 'extend',
+          cardText: null,
+          version: artifact.version,
+          mimeType: artifact.mimeType,
+          durationMs: artifact.durationMs,
+          createdAt: meta.createdAt.toISOString(),
+          qc: latestQcByArtifact.get(artifact.id) ?? null,
+        })
+        byShot.set(meta.storyboardId, list)
+        candidatesByStage.set('VIDEO', byShot)
+      }
+      // 本机画面按 artifact 自带的镜头归属并入，版本行如实标注来源：字卡是平台自己
+      // 画的（local_render），其余是人在别处做完再给进来的（imported）。两者都没有
+      // 任务、没有质检，也不该有——它们一分钱额度没花。
+      for (const artifact of localArtifacts) {
+        const shotId = artifact.storyboardId
+        if (!shotId) continue
+        const byShot = candidatesByStage.get('VIDEO') ?? new Map<string, Omit<VideoCandidateDto, 'selected'>[]>()
+        const list = byShot.get(shotId) ?? []
+        if (list.some(candidate => candidate.artifactId === artifact.id)) continue
+        let rendered = false
+        let cardText: string | null = null
+        try {
+          const meta = JSON.parse(artifact.metadata ?? '{}') as { rendered?: unknown; text?: unknown }
+          rendered = meta.rendered === true
+          if (typeof meta.text === 'string') cardText = meta.text
+        } catch {
+          // 元数据读不出就当导入件标注，不影响这一条能否入片
+        }
+        list.push({
+          artifactId: artifact.id,
+          taskId: null,
+          origin: rendered ? 'local_render' : 'imported',
+          cardText,
+          version: artifact.version,
+          mimeType: artifact.mimeType,
+          durationMs: artifact.durationMs,
+          createdAt: artifact.createdAt.toISOString(),
+          qc: null,
+        })
+        byShot.set(shotId, list)
+        candidatesByStage.set('VIDEO', byShot)
+      }
       for (const byShot of candidatesByStage.values()) {
         for (const list of byShot.values()) {
           list.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.version - a.version)
+        }
+      }
+
+      // 操作状态(UX-P04):延长/定向编辑是异步操作,状态就挂在板上——制作台对板数据
+      // 做无条件轮询,界面的「延长中/修改中/待确认/失败」由这份列表数据驱动。归属同样
+      // 只信操作行快照里的 storyboardId(与统一解析器同源),SUCCEEDED 不进这张表——
+      // 它的结果就是上面并入的候选本身。
+      const operationsByShot = new Map<string, ShotOperationDto[]>()
+      if (shotIds.length > 0) {
+        const liveOperations = await app.db.artifactOperation.findMany({
+          where: { organizationId: auth.organizationId, status: { in: ['QUEUED', 'RUNNING', 'BLOCKED', 'FAILED'] } },
+          select: { id: true, kind: true, status: true, errorSnapshot: true, requestSnapshot: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        })
+        for (const operation of liveOperations) {
+          let storyboardId: string | null = null
+          try {
+            storyboardId = (JSON.parse(operation.requestSnapshot) as { storyboardId?: string }).storyboardId ?? null
+          } catch {
+            continue
+          }
+          if (!storyboardId || !operationShotIds.has(storyboardId)) continue
+          const list = operationsByShot.get(storyboardId) ?? []
+          list.push({
+            id: operation.id,
+            kind: operation.kind as 'video_extend' | 'video_edit',
+            status: operation.status,
+            error: operation.errorSnapshot ? operation.errorSnapshot.slice(0, 400) : null,
+            createdAt: operation.createdAt.toISOString(),
+          })
+          operationsByShot.set(storyboardId, list)
         }
       }
 
@@ -1102,6 +1650,20 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         usageByShot.set(shotId, agg)
       }
 
+      // 分镜文本的逐镜软检（只提示、不拦人，见 storyboard-gaps.ts）。整集在册镜头按
+      // 出片顺序一次算完：首镜与末镜的判据依赖它在序列里的位置，逐镜单独算会误报。
+      // 单镜时长地板不在这里取——它要再解析一遍模型链，而这屏每 3 秒轮询一次；
+      // 那条判据归预审门（buildGenerationPlan），花钱的那一下才是它该出现的地方。
+      const approvedScript = await app.db.scriptVersion.findFirst({
+        where: { episodeId: episode.id, status: 'APPROVED' },
+        orderBy: { version: 'desc' },
+        select: { content: true },
+      })
+      const gapsByShot = inspectStoryboardGaps(storyboards, {
+        castNames: episodeAssets.filter(asset => asset.kind === 'character').map(asset => asset.name),
+        scriptContent: approvedScript?.content ?? null,
+      })
+
       const appearancesByAsset = new Map<string, string[]>()
       const referenceCountByAsset = new Map<string, number>()
       const shots = storyboards.map(storyboard => {
@@ -1134,16 +1696,20 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
         const candidates = withSelected('VIDEO', storyboard.selectedVideoArtifactId)
         const frameCandidates = withSelected('FIRST_FRAME', storyboard.selectedFrameArtifactId)
         const voiceCandidates = withSelected('AUDIO', storyboard.selectedVoiceArtifactId)
+        const production = shotProduction(storyboard.method)
         const attention: string[] = []
         if (storyboard.status === 'BLOCKED') attention.push('shot_blocked')
         if (frameError) attention.push('frame_failed')
         if (videoError) attention.push('video_failed')
         // 等你审是一等缺口：卡在这一步的是人，不是机器，队列必须算它一件。
         if (storyboard.status === 'NEEDS_REVIEW') attention.push('awaiting_review')
-        if (linkedAssets.some(a => a.status !== 'APPROVED' && a.hasVersions)) attention.push('asset_gate')
+        // 本机镜头不消费素材，素材草稿不是它的缺口。
+        if (production === 'video' && linkedAssets.some(a => a.status !== 'APPROVED' && a.hasVersions)) attention.push('asset_gate')
         // 只有真存在多版本可选却没人钦定的镜头才进待处理泳道——单版本没有抉择，
-        // 逼人选一次是摩擦不是审计。
-        if (candidates.length >= 2 && !candidates.some(c => c.selected)) attention.push('selection_open')
+        // 逼人选一次是摩擦不是审计。停在问询上的那一版还不算「可选」：它得先被收下
+        // 或被重抽，拿它凑数会把「等你裁决」报成「等你选优」。
+        const selectable = candidates.filter(candidate => !candidate.awaitingDecision)
+        if (selectable.length >= 2 && !selectable.some(candidate => candidate.selected)) attention.push('selection_open')
         const usage = usageByShot.get(storyboard.id)
         const qcEntries = [...latestQc.entries()].filter(([key]) => key.startsWith(`${storyboard.id}:`)).map(([, value]) => value)
         // 缩略图跟着选定版本走:卡片展示的必须是将入片的那一版，而不是"最新"。
@@ -1151,7 +1717,8 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           ? artifactsById.get(storyboard.selectedVideoArtifactId!)
           : undefined
         // 每镜占位裁决(放映条与预映共用一个事实源):这一镜现在拿得上画面的东西
-        // 是钦定成片 > 最新成功片段 > 在产 > 只有分镜图 > 空。
+        // 是钦定成片 > 最新成功片段 > 在产 > 只有分镜图 > 本机制作且还没画面 > 空。
+        // 本机镜头（字卡/界面/录屏/合成）也能有画面了——钦定那条走第一档。
         const slot = storyboard.selectedVideoArtifactId
           ? 'chosen'
           : media.video.get(storyboard.id)
@@ -1160,7 +1727,9 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
               ? 'running'
               : media.firstFrame.get(storyboard.id)
                 ? 'frame'
-                : 'empty'
+                : production !== 'video'
+                  ? 'local'
+                  : 'empty'
         // 等待时钟按「哪件事现在压着你」同源取值：失败优先，其次待钦定的最新一版，
         // 再次人推进到等审/阻塞的那一刻，最后才退到最近落地的产物。全都没有就是 null，
         // 前端那一栏索性不显示——没有来源的时间不许上屏。
@@ -1184,7 +1753,13 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           sourceExcerpt: storyboard.sourceExcerpt,
           continuityIn: storyboard.continuityIn,
           continuityOut: storyboard.continuityOut,
+          // 分镜表「转场」列的定格值：合成侧按它排母带时间线，界面必须能看见它，
+          // 否则「这一刀是叠化还是裸切」只有查库才知道，22 刀回填没法逐镜核对。
+          transition: storyboard.transition,
+          transitionMs: storyboard.transitionMs,
           sceneNumber: storyboard.sceneNumber,
+          /** 视频=平台生成；其余=按分镜表的生成方式由人完成，不排队也不计费。 */
+          production,
           status: storyboard.status,
           assets: linkedAssets,
           // 首帧/配音的生效版与视频同规则：钦定优先，无钦定取最新成功——界面上
@@ -1198,6 +1773,9 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
             : media.voice.get(storyboard.id) ?? null,
           importedVoice: media.importedVoice.get(storyboard.id) ?? null,
           importedAmbience: media.importedAmbience.get(storyboard.id) ?? null,
+          /** 剧本「声音」列写的那条氛围底（文字）。平台没有环境音生成槽位，它是给人
+           *  导入时对照的出处——没有这一行，分镜表写下的「雨声」就永远进不了成片。 */
+          ambience: storyboard.ambience,
           audioSource: storyboard.audioSource,
           firstFrameError: frameError,
           videoError,
@@ -1207,12 +1785,19 @@ export async function episodeRoutes(app: FastifyInstance): Promise<void> {
           selectedVideoArtifactId: storyboard.selectedVideoArtifactId,
           selectedFrameArtifactId: storyboard.selectedFrameArtifactId,
           selectedVoiceArtifactId: storyboard.selectedVoiceArtifactId,
+          /** 镜头 CAS 依据（延长 apply_if_unchanged 需要它做 expectedShotRevision）。 */
+          stateRevision: storyboard.stateRevision,
+          /** 延长/定向编辑操作状态（新→旧）：QUEUED/RUNNING/BLOCKED/FAILED。 */
+          operations: operationsByShot.get(storyboard.id) ?? [],
           videoCandidates: candidates,
           frameCandidates,
           voiceCandidates,
           usage: usage ? { inputUnits: usage.inputUnits, outputUnits: usage.outputUnits, models: [...usage.models], calls: usage.calls } : null,
           slot,
           attention,
+          /** 分镜文本的逐镜体检结论（代码，人话在前端）。刻意不进 attention：
+           *  它描述的是「写得不够清楚」，挡路的仍然是人，不该灌水「需要你处理」的计数。 */
+          storyboardGaps: gapsByShot.get(storyboard.id) ?? [],
           waitingSince: waitingSince ? waitingSince.toISOString() : null,
         }
       })

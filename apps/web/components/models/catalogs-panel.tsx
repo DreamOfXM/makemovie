@@ -2,7 +2,7 @@
 
 import { useCallback, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { modelModalities } from '@studio/domain'
+import { modelModalities, modalityInputs } from '@studio/domain'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   BoxesIcon,
@@ -404,8 +404,7 @@ function AddCatalogModelDialog({ provider, open, onOpenChange, onDone }: AddCata
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const takesInput = modality === 'i2v' || modality === 'r2v' || modality === 'image'
-  const videoInput = modality === 'i2v' || modality === 'r2v'
+  const inputs = modalityInputs(modality)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -418,7 +417,7 @@ function AddCatalogModelDialog({ provider, open, onOpenChange, onDone }: AddCata
           model: model.trim(),
           displayName: displayName.trim() || undefined,
           modality,
-          ...(takesInput ? { ...(videoInput ? { acceptsFirstFrame } : {}), acceptsReferenceImages, ...(acceptsReferenceImages ? { maxReferenceImages: Number(maxReferenceImages) } : {}) } : {}),
+          ...(inputs.takesInput ? { ...(inputs.firstFrame ? { acceptsFirstFrame } : {}), acceptsReferenceImages, ...(acceptsReferenceImages ? { maxReferenceImages: Number(maxReferenceImages) } : {}) } : {}),
         }),
       })
       setModel('')
@@ -478,20 +477,18 @@ function AddCatalogModelDialog({ provider, open, onOpenChange, onDone }: AddCata
             </Select>
           </Field>
 
-          {takesInput && (
+          {inputs.takesInput && (
             <div className="space-y-3 rounded-lg border p-3">
-              {modality === 'i2v' && (
+              {inputs.firstFrame && (
                 <label className="flex items-center justify-between gap-3 text-sm">
                   <span>{t('models.firstFrame')}</span>
                   <Switch checked={acceptsFirstFrame} onCheckedChange={setAcceptsFirstFrame} />
                 </label>
               )}
-              {(videoInput || modality === 'image') && (
-                <label className="flex items-center justify-between gap-3 text-sm">
-                  <span>{t('models.referenceImages')}</span>
-                  <Switch checked={acceptsReferenceImages} onCheckedChange={setAcceptsReferenceImages} />
-                </label>
-              )}
+              <label className="flex items-center justify-between gap-3 text-sm">
+                <span>{t('models.referenceImages')}</span>
+                <Switch checked={acceptsReferenceImages} onCheckedChange={setAcceptsReferenceImages} />
+              </label>
               {acceptsReferenceImages && (
                 <Field label={t('models.maxRefs')} htmlFor="catalogModelMaxRefs">
                   <Input

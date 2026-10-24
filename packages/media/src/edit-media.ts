@@ -41,13 +41,16 @@ export function editFingerprint(input: {
   fpsNum: number
   fpsDen: number
   clips: ReadonlyArray<{ clipId: string; artifactId: string; sourceInFrame: number; sourceOutFrame: number }>
-  tracks: ReadonlyArray<{ elementId: string; sourceArtifactId: string; anchor: string }>
+  tracks: ReadonlyArray<{ elementId: string; sourceArtifactId: string; anchor: string; clipId?: string; offsetFrame?: number; gain?: number; muted?: boolean; locked?: boolean; sourceInFrame?: number; sourceOutFrame?: number }>
+  outputSpec?: Record<string, unknown>
 }): string {
   const canonical = JSON.stringify({
     fpsNum: input.fpsNum,
     fpsDen: input.fpsDen,
     clips: [...input.clips].map(clip => [clip.clipId, clip.artifactId, clip.sourceInFrame, clip.sourceOutFrame]),
-    tracks: [...input.tracks].map(track => [track.elementId, track.sourceArtifactId, track.anchor]),
+    // 指纹必须覆盖 track 的完整可变参数——offset/gain/muted 变了就是不同编辑。
+    tracks: [...input.tracks].map(track => [track.elementId, track.sourceArtifactId, track.anchor, track.clipId ?? '', track.offsetFrame, track.gain, track.muted, track.locked, track.sourceInFrame, track.sourceOutFrame]),
+    ...(input.outputSpec ? { outputSpec: Object.keys(input.outputSpec).sort().map(key => [key, input.outputSpec![key]]) } : {}),
   })
   return createHash('sha256').update(canonical).digest('hex')
 }
@@ -71,13 +74,16 @@ export async function conformToEditMedia(
     if (probe === null) return null
 
     // 规范化:CFR、归零 PTS、保持画幅、固定编码质量。
-    // -vsync 0 = 按时间戳不丢帧;-fps_mode cfr 确保恒定帧率输出。
+    // Filter onto the new clock before encoding; output -r alone can append
+    // duplicate tail frames (30→25fps produced 27 frames for a one-second clip).
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const execFileAsync = promisify(execFile)
     await execFileAsync('ffmpeg', [
       '-y', '-v', 'error',
       '-i', sourcePath,
+      '-vf', `setpts=PTS-STARTPTS,fps=${fps}`,
+      '-af', 'asetpts=PTS-STARTPTS',
       '-fps_mode', 'cfr',   // ffmpeg 9+: -vsync 已移除
       '-r', fps,
       '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
@@ -131,3 +137,16 @@ async function probeVideo(filePath: string): Promise<EditMediaProbe | null> {
 }
 
 export { probeVideo }
+
+
+/** Intersect a positioned source range with the visible sequence, without moving its out point. */
+export function resolveAudioRange(input: { sourceInFrame?: number; sourceOutFrame?: number; offsetFrame: number }, anchorFrame: number, sequenceFrames: number, sourceFrames?: number): { sourceInFrame: number; sourceOutFrame: number | undefined; recordStartFrame: number } | null {
+  const position = anchorFrame + input.offsetFrame
+  const sourceInFrame = (input.sourceInFrame ?? 0) + Math.max(0, -position)
+  const recordStartFrame = Math.max(0, position)
+  const originalOut = input.sourceOutFrame ?? sourceFrames
+  const availableEnd = sourceInFrame + Math.max(0, sequenceFrames - recordStartFrame)
+  const sourceOutFrame = originalOut === undefined ? availableEnd : Math.min(originalOut, availableEnd)
+  if (sourceOutFrame <= sourceInFrame) return null
+  return { sourceInFrame, sourceOutFrame, recordStartFrame }
+}

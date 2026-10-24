@@ -15,6 +15,8 @@ interface ShotboardShot {
   sourceExcerpt: string
   continuityIn: string
   continuityOut: string
+  transition: string
+  transitionMs: number
   status: string
   assets: { id: string; kind: string; name: string; status: string; role: string; hasVersions: boolean; reference: boolean }[]
   firstFrame: { id: string; downloadUrl: string } | null
@@ -25,7 +27,7 @@ interface ShotboardShot {
   inflight: string[]
   qc: { kind: string; status: string; score: number | null }[]
   selectedVideoArtifactId: string | null
-  videoCandidates: { artifactId: string; taskId: string; version: number; mimeType: string; durationMs: number | null; createdAt: string; selected: boolean; qc: { kind: string; status: string; score: number | null } | null }[]
+  videoCandidates: { artifactId: string; taskId: string; version: number; mimeType: string; durationMs: number | null; createdAt: string; selected: boolean; awaitingDecision?: boolean; qc: { kind: string; status: string; score: number | null; reasons?: string[] } | null }[]
   usage: { inputUnits: number; outputUnits: number; models: string[]; calls: number } | null
   slot: string
   attention: string[]
@@ -151,12 +153,41 @@ describe('GET /episodes/:episodeId/shotboard', () => {
 
     const shot2 = body.shots[1]
     // 镜头卡内联字段:台词/原文/衔接随聚合一起给,弹窗不再二级跳转。
-    expect(shot2).toMatchObject({ dialogue: '我会想你的。', speaker: '小雨', sourceExcerpt: '', continuityIn: '', continuityOut: '' })
+    expect(shot2).toMatchObject({ dialogue: '我会想你的。', speaker: '小雨', sourceExcerpt: '', continuityIn: '', continuityOut: '', transition: 'cut', transitionMs: 0 })
     expect(shot2.inflight).toEqual(['AUDIO'])
     // 配音在产但还没有任何能上画面的片段或分镜图。
     expect(shot2.slot).toBe('running')
     expect(shot2.usage).toBeNull()
     expect(shot2.attention).toEqual([])
+  })
+
+  it('reads back the transition the workbench writes, and clamps the length it asks for', async () => {
+    // 转场列是母带时间线的唯一输入：界面写进去的值必须原样读回来，否则「叠化」在
+    // 格子里亮着、合成吃的却是别的数，22 刀回填就没人能逐镜核对。
+    const write = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${shotTwoId}`, headers: authHeaders(ownerToken),
+      payload: { transition: '叠化', transitionMs: 600 },
+    })
+    expect(write.statusCode).toBe(200)
+    const after = await shotboard(ownerToken, episodeId)
+    expect(after.body.shots.find(shot => shot.id === shotTwoId)).toMatchObject({ transition: 'dissolve', transitionMs: 600 })
+
+    // 只改时长时沿用现有转场；越界的数夹进 50–1000ms，因为重叠超过整镜就把画面吃穿了。
+    const clamp = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${shotTwoId}`, headers: authHeaders(ownerToken),
+      payload: { transitionMs: 5000 },
+    })
+    expect(clamp.statusCode).toBe(200)
+    const clamped = await shotboard(ownerToken, episodeId)
+    expect(clamped.body.shots.find(shot => shot.id === shotTwoId)).toMatchObject({ transition: 'dissolve', transitionMs: 1000 })
+
+    // 词表外的写法不许静默变成硬切：那是把用户的意图改成另一种形状。
+    const bogus = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${shotTwoId}`, headers: authHeaders(ownerToken),
+      payload: { transition: 'wipe' },
+    })
+    expect(bogus.statusCode).toBe(400)
+    expect(bogus.json().error).toContain('cut, dissolve')
   })
 
   it('flags unapproved assets with versions on the shot and in the episode lane, and only while gate-relevant', async () => {
@@ -170,13 +201,13 @@ describe('GET /episodes/:episodeId/shotboard', () => {
     await env.db.assetVersion.create({ data: { assetId, version: 1, description: '版本一', status: 'DRAFT', artifactId: costume.id } })
     const put = await env.app.inject({
       method: 'PUT', url: `/api/storyboards/${shotOneId}/assets`, headers: authHeaders(ownerToken),
-      payload: { assets: [{ assetId, role: 'lead' }] },
+      payload: { assets: [{ assetId }] },
     })
     expect(put.statusCode).toBe(200)
 
     const before = await shotboard(ownerToken, episodeId)
     const shot1 = before.body.shots.find(shot => shot.id === shotOneId)!
-    expect(shot1.assets).toEqual([{ id: assetId, kind: 'character', name: '小雨', status: 'DRAFT', role: 'lead', hasVersions: true, reference: false }])
+    expect(shot1.assets).toEqual([{ id: assetId, kind: 'character', name: '小雨', status: 'DRAFT', role: 'character', hasVersions: true, reference: false }])
     expect(shot1.attention).toContain('asset_gate')
     expect(before.body.assetsPending.map(asset => asset.id)).toContain(assetId)
 
@@ -190,7 +221,7 @@ describe('GET /episodes/:episodeId/shotboard', () => {
     expect(cleared.attention).not.toContain('asset_gate')
     expect(after.body.assetsPending.map(asset => asset.id)).not.toContain(assetId)
     // 审批后版本带了定妆图，且"小雨"出现在画面文本里——参考图指示灯必须亮。
-    expect(cleared.assets).toEqual([{ id: assetId, kind: 'character', name: '小雨', status: 'APPROVED', role: 'lead', hasVersions: true, reference: true }])
+    expect(cleared.assets).toEqual([{ id: assetId, kind: 'character', name: '小雨', status: 'APPROVED', role: 'character', hasVersions: true, reference: true }])
   })
 
   it('keeps the newest verdict per kind and stays silent on superseded shots', async () => {
@@ -328,5 +359,111 @@ describe('shotboard video candidates and the selection endpoint', () => {
     const audit = await env.app.inject({ method: 'GET', url: '/api/audit-events?action=storyboard.select-video', headers: authHeaders(ownerToken) })
     const events = audit.json().events as { entityId: string; payload: { artifactId: string | null } }[]
     expect(events.some(event => event.entityId === shotOneId && event.payload.artifactId === clipNewId)).toBe(true)
+  })
+})
+
+/**
+ * SD-120：「先问」停在等人裁决上的那一版是真实付费产物，用户必须能在版本列表里
+ * 看到它、播它、并就地裁决它。旧口径只查 SUCCEEDED 任务，于是界面一边说「成片这一版
+ * 还在 · 决定再抽一次还是收下」，一边既不给那一版也不给「收下」的对象。
+ */
+describe('shotboard parked takes and the accept path', () => {
+  let parkedShotId: string
+  let parkedTaskId: string
+  let parkedClipId: string
+
+  const snapshot = (artifactId: string | null, state: 'pending' | 'retried') => JSON.stringify({
+    state,
+    retryClass: 'creative',
+    kind: 'visual-audit',
+    reasons: ['visual-audit: threshold not met — awaiting review (policy)'],
+    findings: [{ dimension: 'aesthetic', message: 'LED 数字漂移', evidenceTimeSeconds: 2.048 }],
+    score: 0.65,
+    attempt: 1,
+    cap: 1,
+    retriesUsed: 0,
+    budgetLimit: null,
+    budgetUsed: 0,
+    policy: 'ask',
+    autoRetries: 0,
+    askReason: 'policy',
+    candidates: [{ connectionId: 'c1', capabilityId: 'video_gen', provider: 'mock', model: 'mock-t2v' }],
+    artifactId,
+    error: null,
+    createdAt: new Date().toISOString(),
+  })
+
+  const select = (payload: { artifactId?: string | null }) =>
+    env.app.inject({ method: 'POST', url: `/api/storyboards/${parkedShotId}/video-selection`, headers: authHeaders(ownerToken), payload })
+
+  beforeAll(async () => {
+    const shot = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken), payload: { number: 3, title: '床头读秒', durationMs: 4000, description: '他盯着床头的电子钟' } })
+    expect(shot.statusCode).toBe(201)
+    parkedShotId = shot.json().id as string
+
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', plannedCount: 1 } })
+    // 一版被收下过的成功片：它已经过了问询，不该再带「等你裁决」。
+    const decidedBatch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', plannedCount: 1 } })
+    const decidedTask = await env.db.generationTask.create({
+      data: { organizationId, batchId: decidedBatch.id, stage: 'VIDEO', status: 'FAILED', storyboardId: parkedShotId, provider: 'mock', model: 'mock-t2v', attempts: 1, errorSnapshot: 'VIDEO: threshold not met', reviewSnapshot: snapshot(null, 'retried') },
+    })
+    const decidedClip = await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: decidedTask.id, stage: 'VIDEO', objectKey: `parked/${decidedTask.id}-v1.mp4`, checksum: 'pd-v1', mimeType: 'video/mp4', version: 1, durationMs: 4000 },
+    })
+    // 改口径：重抽已决定，那一版归历史，不再占候选。
+    await env.db.generationTask.update({ where: { id: decidedTask.id }, data: { reviewSnapshot: snapshot(decidedClip.id, 'retried') } })
+
+    const task = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'FAILED', storyboardId: parkedShotId, provider: 'mock', model: 'mock-t2v', attempts: 1, errorSnapshot: 'visual-audit: threshold not met — awaiting review (policy)', reviewSnapshot: snapshot(null, 'pending') },
+    })
+    parkedTaskId = task.id
+    parkedClipId = (await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: task.id, stage: 'VIDEO', objectKey: `parked/${task.id}-v2.mp4`, checksum: 'pk-v2', mimeType: 'video/mp4', version: 2, durationMs: 4000 },
+    })).id
+    await env.db.generationTask.update({ where: { id: task.id }, data: { reviewSnapshot: snapshot(parkedClipId, 'pending') } })
+    await env.db.qualityCheck.create({ data: { status: 'NEEDS_REVIEW', kind: 'visual-audit', score: 0.65, report: '{}', artifactId: parkedClipId, batchId: null } })
+  }, 300_000)
+
+  it('shows the parked paid take, playable but not pinnable, and keeps other failures out', async () => {
+    const { body } = await shotboard(ownerToken, episodeId)
+    const shot = body.shots.find(item => item.id === parkedShotId)!
+
+    // 已重抽的那一版不回来：只有压在人手上的问询才进候选，否则失败历史会混成版本列表。
+    expect(shot.videoCandidates.map(candidate => candidate.artifactId)).toEqual([parkedClipId])
+    expect(shot.videoCandidates[0]).toMatchObject({
+      version: 2,
+      taskId: parkedTaskId,
+      selected: false,
+      awaitingDecision: true,
+      qc: { kind: 'visual-audit', status: 'NEEDS_REVIEW', score: 0.65 },
+    })
+    // 停在问询上的不是成片：卡片缩略图与「这一镜拿得上画面的东西」都不许指向它。
+    expect(shot.video).toBeNull()
+    expect(shot.selectedVideoArtifactId).toBeNull()
+    expect(shot.slot).not.toBe('video')
+    // 「等你裁决」不许报成「等你选优」——单版没有抉择。
+    expect(shot.attention).not.toContain('selection_open')
+  })
+
+  it('refuses to pin the parked take, then accepts it into a usable version', async () => {
+    const rejected = await select({ artifactId: parkedClipId })
+    expect(rejected.statusCode).toBe(400)
+    expect(rejected.json().error).toBe('artifact is not a succeeded video of this shot')
+
+    const accept = await env.app.inject({
+      method: 'POST',
+      url: `/api/generations/tasks/${parkedTaskId}/review`,
+      headers: authHeaders(ownerToken),
+      payload: { action: 'waive', reason: '钟表停摆正是剧本要的僵持感，LED 漂移在成片画幅内不可辨' },
+    })
+    expect(accept.statusCode).toBe(200)
+    expect(accept.json().task).toMatchObject({ id: parkedTaskId, status: 'SUCCEEDED' })
+
+    const { body } = await shotboard(ownerToken, episodeId)
+    const shot = body.shots.find(item => item.id === parkedShotId)!
+    expect(shot.videoCandidates[0]).toMatchObject({ artifactId: parkedClipId, awaitingDecision: false })
+    // 收下之后它才成为可选版本：钦定不再被拒，质检也从待审转通过。
+    expect((await select({ artifactId: parkedClipId })).statusCode).toBe(200)
+    expect((await env.db.qualityCheck.findFirstOrThrow({ where: { artifactId: parkedClipId } })).status).toBe('APPROVED')
   })
 })

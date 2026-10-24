@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { PauseIcon, PlayIcon, RotateCcwIcon } from 'lucide-react'
 import type { ShotboardShot } from '@/lib/api'
+import { productionWord } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
 import { cn, formatDuration } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -48,6 +49,7 @@ export function PreScreenDialog({ shots, open, onClose }: { shots: ShotboardShot
     if (s.slot === 'video') return t('shotboard.strip.hasclip')
     if (s.slot === 'running') return t('shotboard.strip.running')
     if (s.slot === 'frame') return t('shotboard.strip.frameOnly')
+    if (s.slot === 'local') return productionWord(t, s.production)
     return t('shotboard.strip.missing')
   }
 
@@ -147,6 +149,11 @@ function PreScreenStage({ shot, playing, onEnded }: { shot: ShotboardShot; playi
         <img src={frameUrl} alt={`#${shot.number} ${shot.title}`} className="h-full w-full object-contain" />
       ) : shot.slot === 'running' ? (
         <p className="text-muted-foreground animate-pulse text-sm">{t('shotboard.strip.running')}</p>
+      ) : shot.slot === 'local' ? (
+        <div className="text-center">
+          <p className="text-muted-foreground font-mono text-sm">#{shot.number}</p>
+          <p className="text-faint-foreground text-xs">{productionWord(t, shot.production)} · {t('shotboard.strip.local')}</p>
+        </div>
       ) : (
         <div className="text-center">
           <p className="text-muted-foreground font-mono text-sm">#{shot.number}</p>

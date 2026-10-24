@@ -17,7 +17,7 @@ afterAll(async () => { await env?.stop() })
 const authHeaders = (token: string) => env.authHeaders(token)
 
 describe('example projects (US-008)', () => {
-  it('installs idempotently with readable source note and no model calls', async () => {
+  it('installs idempotently with playable media, visible source note and no model calls (V09)', async () => {
     const first = await env.app.inject({ method: 'POST', url: '/api/projects/install-example', headers: { ...authHeaders(ownerToken), 'content-type': 'application/json' }, payload: {} })
     expect(first.statusCode).toBe(201)
     expect(first.json().installed).toBe(true)
@@ -25,11 +25,29 @@ describe('example projects (US-008)', () => {
     expect(again.statusCode).toBe(200)
     expect(again.json().installed).toBe(false)
     expect(again.json().projectId).toBe(first.json().projectId)
-    // 安装零模型调用、素材来源可见。
-    expect(await env.db.generationTask.count({ where: { organizationId } })).toBe(0)
     const project = await env.db.project.findUniqueOrThrow({ where: { id: first.json().projectId } })
     expect(project.isExample).toBe(true)
     expect(project.exampleSourceNote).toContain('示例项目')
+
+    // V09:零供应商 key 的可播放示例——每镜都有钦定成片,媒体真实存在,挂在
+    // example-bundle 任务链下(零真实模型调用=零用量台账)。
+    const episode = await env.db.episode.findFirstOrThrow({ where: { projectId: project.id } })
+    const shots = await env.db.storyboard.findMany({ where: { episodeId: episode.id }, orderBy: { number: 'asc' } })
+    expect(shots).toHaveLength(3)
+    expect(shots.every(shot => shot.selectedVideoArtifactId !== null)).toBe(true)
+    const tasks = await env.db.generationTask.findMany({ where: { organizationId } })
+    expect(tasks.length).toBe(3)
+    expect(tasks.every(task => task.provider === 'example-bundle' && task.status === 'SUCCEEDED')).toBe(true)
+    expect(await env.db.usageLedger.count({ where: { organizationId } })).toBe(0)
+    for (const shot of shots) {
+      const artifact = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: shot.selectedVideoArtifactId! } })
+      expect(artifact.mimeType).toBe('video/mp4')
+      // 零 key 直接播放:内容端点拿得到真实字节。
+      const content = await env.app.inject({ method: 'GET', url: `/api/artifacts/${artifact.id}/content`, headers: authHeaders(ownerToken) })
+      expect(content.statusCode).toBe(200)
+      expect(content.headers['content-type']).toContain('video/mp4')
+      expect(content.rawPayload.length).toBeGreaterThan(1000)
+    }
   })
 
   it('is read-only in place but clones into an independent editable copy', async () => {
@@ -50,8 +68,14 @@ describe('example projects (US-008)', () => {
     expect(await env.db.project.findUniqueOrThrow({ where: { id: cloneId } })).toMatchObject({ isExample: false, name: '我的练习' })
     // 剧集/分镜/源文档都进了副本。
     const cloneEpisode = await env.db.episode.findFirstOrThrow({ where: { projectId: cloneId } })
-    expect(await env.db.storyboard.count({ where: { episodeId: cloneEpisode.id } })).toBeGreaterThan(0)
+    const cloneShots = await env.db.storyboard.findMany({ where: { episodeId: cloneEpisode.id }, orderBy: { number: 'asc' } })
+    expect(cloneShots.length).toBeGreaterThan(0)
     expect(await env.db.sourceDocumentVersion.count({ where: { episodeId: cloneEpisode.id } })).toBe(1)
+    // V09:每镜媒体随副本进入目标组织(字节共享、行独立、钦定就位)。
+    expect(cloneShots.every(shot => shot.selectedVideoArtifactId !== null)).toBe(true)
+    const cloneArtifact = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: cloneShots[0]!.selectedVideoArtifactId! } })
+    expect(cloneArtifact.organizationId).toBe(organizationId)
+    expect(cloneArtifact.objectKey).toBeTruthy()
     // 非示例项目走 clone 接口 404——它不是教材。
     const normal = await env.app.inject({ method: 'POST', url: '/api/projects', headers: { ...authHeaders(ownerToken), 'content-type': 'application/json' }, payload: { name: '普通' } })
     expect((await env.app.inject({ method: 'POST', url: `/api/projects/${normal.json().id}/clone-example`, headers: authHeaders(ownerToken) })).statusCode).toBe(404)

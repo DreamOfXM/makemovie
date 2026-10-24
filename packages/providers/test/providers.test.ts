@@ -118,6 +118,24 @@ describe('catalog', () => {
     expect(modalities.has('r2v')).toBe(false)
   })
 
+  it('dashscope ships image models that take the approved asset sheets as references', () => {
+    // 首帧的外观锚点只有吃参考图的出图模型能兑现:计划层会在整条候选链都不接受参考图时
+    // 把镜头拦成 BLOCKED(2026-10-21 SD-066)。目录里一个都没有的话,新装环境的第一帧就无路可走。
+    const anchored = getCatalog('dashscope')!.models.filter(m => m.modality === 'image' && m.acceptsReferenceImages === true)
+    expect(anchored.length).toBeGreaterThan(0)
+    for (const model of anchored) {
+      expect(model.maxReferenceImages ?? 0, model.model).toBeGreaterThan(0)
+    }
+  })
+
+  it('names only invokable dashscope image ids, never a capability title', () => {
+    // `qwen-image-edit` 是厂商文档里的「图像编辑」能力名,不是可调用的模型 id:
+    // 2026-10-21 挂上它提交,厂商回 InvalidParameter | Model not exist,首帧链头一发必死。
+    const models = getCatalog('dashscope')!.models.filter(m => m.modality === 'image').map(m => m.model)
+    expect(models).not.toContain('qwen-image-edit')
+    expect(models).toContain('qwen-image-2.0-pro')
+  })
+
   it('every i2v catalog model accepts a first frame', () => {
     for (const catalog of listCatalogs()) {
       for (const model of catalog.models.filter(m => m.modality === 'i2v')) {
@@ -378,6 +396,47 @@ describe('dashscope request building', () => {
     expect(body.input.messages).toEqual([{ role: 'user', content: [{ text: 'a red apple' }] }])
   })
 
+  it('translates the platform frame ratio into a qwen-image size', () => {
+    const portrait = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'qwen-image-2.0-pro', acceptsReferenceImages: true, maxReferenceImages: 3 }), {
+      model: 'qwen-image-2.0-pro',
+      input: { prompt: 'same outfit', media: [{ type: 'reference_image', url: 'https://cdn/board.png' }] },
+      parameters: { seed: 7, aspectRatio: '9:16' },
+    })
+    expect((portrait.body as { parameters: Record<string, unknown> }).parameters).toEqual({ seed: 7, size: '1080*1920' })
+
+    const wide = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'qwen-image-3.0' }), {
+      model: 'qwen-image-3.0',
+      input: { prompt: 'a wide street' },
+      parameters: { aspectRatio: '16:9' },
+    })
+    expect((wide.body as { parameters: Record<string, unknown> }).parameters).toEqual({ size: '1920*1080' })
+  })
+
+  it('drops a frame ratio the model was not verified to accept', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'wan2.2-t2i-flash' }), {
+      model: 'wan2.2-t2i-flash',
+      input: { prompt: 'a rainy street' },
+      parameters: { aspectRatio: '9:16', n: 1 },
+    })
+    expect((req.body as { parameters: Record<string, unknown> }).parameters).toEqual({ n: 1 })
+  })
+
+  it('sends wan2.6-t2i to the sync multimodal endpoint with one image and no prompt rewriting', () => {    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 'image', model: 'wan2.6-t2i' }), {
+      model: 'wan2.6-t2i',
+      input: { prompt: 'a rainy street' },
+      parameters: { seed: 7 },
+    })
+    expect(req.url).toBe(`${base}/api/v1/services/aigc/multimodal-generation/generation`)
+    expect(req.headers['X-DashScope-Async']).toBeUndefined()
+    const body = req.body as {
+      input: { messages: Array<{ role: string; content: unknown }> }
+      parameters: Record<string, unknown>
+    }
+    expect(body.input.messages).toEqual([{ role: 'user', content: [{ text: 'a rainy street' }] }])
+    // n 默认 4 张、prompt_extend 默认 true——两项都必须钉死，且调用方的 seed 透传。
+    expect(body.parameters).toEqual({ prompt_extend: false, n: 1, seed: 7 })
+  })
+
   it('reduces a first_frame reference to img_url and refuses anything it would have to drop', () => {
     const cap = capability({ modality: 'i2v', model: 'wanx2.1-i2v-turbo', acceptsFirstFrame: true })
     const req = buildSubmitRequest(base, 'sk-test', cap, {
@@ -426,6 +485,19 @@ describe('dashscope request building', () => {
       parameters: { watermark: false },
     })
     expect(optedOut.body).toMatchObject({ parameters: { watermark: false, prompt_extend: false } })
+  })
+
+  // The length lands nested inside `parameters`, and only under the vendor's own name: this
+  // adapter spreads the caller's map straight through, so a canonical key left in place
+  // would put two durations on one request the project has already paid for.
+  it('maps the canonical length into parameters and takes the platform name out', () => {
+    const req = buildSubmitRequest(base, 'sk-test', capability({ modality: 't2v', model: 'wan2.7-t2v' }), {
+      model: 'wan2.7-t2v',
+      input: { prompt: 'a rainy street' },
+      parameters: { durationSeconds: 12 },
+    })
+    expect(req.body).toMatchObject({ parameters: { duration: 12, prompt_extend: false } })
+    expect((req.body as { parameters: Record<string, unknown> }).parameters.durationSeconds).toBeUndefined()
   })
 
   // The newest Wan generation takes the media array as it stands, so the neutral contract
@@ -506,10 +578,12 @@ describe('dashscope request building', () => {
     expect(req.headers.Authorization).toBe('Bearer sk-test')
   })
 
-  it('builds a credential probe against the compatible-mode chat endpoint for any capability', () => {
+  it('builds a credential probe as a bodyless GET on the model list', () => {
     const req = buildCredentialProbeRequest(`${base}/`, 'sk-test')
-    expect(req.url).toBe(`${base}/compatible-mode/v1/chat/completions`)
-    expect(req.body).toMatchObject({ model: 'qwen-turbo', max_tokens: 1 })
+    expect(req.url).toBe(`${base}/compatible-mode/v1/models`)
+    expect(req.method).toBe('GET')
+    expect(req.body).toBeUndefined()
+    expect(req.headers['Content-Type']).toBeUndefined()
     expect(req.headers['X-DashScope-Async']).toBeUndefined()
   })
 })
@@ -544,7 +618,7 @@ describe('dashscope adapter probe', () => {
   }
 
   it('probes every catalog model, including ones with no dashscope endpoint', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [{ id: 'qwen-plus' }] }) })
     const capabilities = catalogCapabilities()
     const results = await Promise.all(capabilities.map(item => adapter().probe(item)))
     expect(results.every(result => result.ok)).toBe(true)
@@ -552,11 +626,36 @@ describe('dashscope adapter probe', () => {
   })
 
   it('verifies the shared credential once, not once per capability', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [] }) })
     const prober = adapter()
     await Promise.all(catalogCapabilities().map(item => prober.probe(item)))
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock.mock.calls[0][0]).toContain('/compatible-mode/v1/chat/completions')
+    expect(fetchMock.mock.calls[0][0]).toContain('/compatible-mode/v1/models')
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('body')
+  })
+
+  /**
+   * A 200 that is not a model list is not a passing key. Without this, a proxy or a
+   * captive portal answering anything with HTML would light up every row on the tab.
+   */
+  it('fails a 2xx that carries no model list', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    const result = await adapter().probe(capability({ modality: 'image' }))
+    expect(result).toMatchObject({ ok: false, status: 200, message: 'dashscope probe: 2xx without a "data" model list' })
+  })
+
+  /** Compatible-mode wraps faults under `error`; unwrapping it is what keeps a bare
+   *  `request_id=…` off the connection card. */
+  it('reads the message out of an OpenAI-style error envelope', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ error: { message: 'Incorrect API key provided', code: 'invalid_api_key' }, request_id: 'r-2' }),
+    })
+    const result = await adapter().probe(capability({ modality: 'image' }))
+    expect(result).toMatchObject({ ok: false, status: 401 })
+    expect(result.message).toBe('invalid_api_key | Incorrect API key provided')
   })
 
   it('reports the provider error for every capability when the key is rejected', async () => {
@@ -626,6 +725,22 @@ describe('dashscope adapter submit and poll', () => {
     const { taskId } = await adapter.submit(cap, { model: 'qwen-image-3.0', input: { prompt: 'a red apple' }, parameters: {} })
     expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
     expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/qwen.png' })
+  })
+
+  it('reads a wan2.6-t2i artifact url out of the same sync response', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        output: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: [{ image: 'https://oss/wan26.png', type: 'image' }] } }] },
+        request_id: 'r-w26',
+      }),
+    })
+    const adapter = new DashScopeAdapter({ apiKey: 'sk-test', baseUrl: 'https://dashscope.aliyuncs.com' })
+    const cap = capability({ modality: 'image', model: 'wan2.6-t2i' })
+    const { taskId } = await adapter.submit(cap, { model: 'wan2.6-t2i', input: { prompt: 'a rainy street' }, parameters: {} })
+    expect(fetchMock.mock.calls[0][0]).toContain('/multimodal-generation/generation')
+    expect(await adapter.poll(cap, taskId)).toEqual({ status: 'completed', artifactUrl: 'https://oss/wan26.png' })
   })
 
   it('voices a tts line from output.audio.url on the sync endpoint', async () => {

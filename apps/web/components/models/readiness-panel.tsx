@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import {
   ArrowRightIcon,
   CheckCircle2Icon,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react'
 import { translateEnum, useI18n, type TranslateFn } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
+import { safeReturnPath } from '@/lib/return-path'
 import type { AsyncState } from '@/lib/use-async'
 import type { Binding, CallEvidenceMap, Catalog, Connection } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
@@ -26,12 +28,15 @@ import {
   candidatesForSlot,
   isHeldUp,
   minimumConnections,
+  mockCandidateForSlot,
+  mockSlotAnnotations,
   readyCount,
   requiredSlotCoverage,
   slotReadiness,
   unwiredSlots,
   wiredRequiredSlots,
   type MinimumConnectionsResult,
+  type MockSlotAnnotation,
   type SlotCallBlock,
   type SlotReadiness,
 } from '@/lib/models/readiness'
@@ -57,6 +62,12 @@ const VISIBLE_ROWS = 3
 export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, onGoto }: ReadinessPanelProps) {
   const { t } = useI18n()
   const { api, can } = useSession()
+  // R04:就绪后的「去项目开工」优先回到带 returnTo 的创作现场,其次项目页,
+  // 最后才是项目列表——从创作跳来补配置的人,不该被送回大门口重新找项目。
+  const searchParams = useSearchParams()
+  const returnTo = safeReturnPath(searchParams.get('returnTo'))
+  const projectParam = searchParams.get('project')
+  const goWorkHref = returnTo ?? (projectParam ? `/projects/${projectParam}` : '/projects')
   const [expanded, setExpanded] = useState(false)
   const [whyOpen, setWhyOpen] = useState(false)
   const [mockBusy, setMockBusy] = useState(false)
@@ -102,6 +113,11 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
   const slotCoverage = requiredSlotCoverage(catalogs)
   const minimum = minimumConnections(catalogs)
   const unwired = unwiredSlots(readiness)
+  // 「离线演示」标注：就绪是 mock 供应商带来的那些行，绿勾只说明配置可用，
+  // 不许顺手暗示真实模型效果（UX-P01）。
+  const mockAnnotations = mockSlotAnnotations(bindings.data, callEvidence)
+  const mockDemoRows = rows.filter(item => mockAnnotations.get(item.slot)?.demo)
+  const mockAnywhere = mockDemoRows.length > 0
   const canWireMock = can('providers:manage') && can('bindings:manage')
   // The one-click real-vendor exit only makes sense while a required slot is actually empty.
   // A slot that is held up with bindings in place (call-blocked) is not something more
@@ -175,6 +191,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
           whyOpen={whyOpen}
           onWhy={() => setWhyOpen(value => !value)}
           onGoto={onGoto}
+          mock={mockAnnotations.get(item.slot) ?? null}
           t={t}
         />
       ))}
@@ -200,7 +217,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
         <div className="bg-card text-card-foreground flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border px-5 py-4 shadow-card">
           <CheckCircle2Icon className="text-success size-4 shrink-0" />
           <Button size="sm" asChild>
-            <Link href="/projects">
+            <Link href={goWorkHref}>
               <ArrowRightIcon />
               {t('models.readiness.goProjects')}
             </Link>
@@ -218,7 +235,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
         )}
         {list}
         {foldButton}
-        <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} t={t} />
+        <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} mockAnywhere={mockAnywhere} t={t} />
       </div>
     )
   }
@@ -259,7 +276,7 @@ export function ReadinessPanel({ connections, bindings, catalogs, callEvidence, 
           {foldButton}
         </CardContent>
       </Card>
-      <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} t={t} />
+      <Footnotes slotCoverage={slotCoverage} minimum={minimum} unwired={unwired} mockAnywhere={mockAnywhere} t={t} />
     </div>
   )
 }
@@ -277,6 +294,7 @@ function SlotRow({
   whyOpen,
   onWhy,
   onGoto,
+  mock,
   t,
 }: {
   item: SlotReadiness
@@ -286,6 +304,8 @@ function SlotRow({
   whyOpen: boolean
   onWhy: () => void
   onGoto: (tab: 'connections' | 'bindings') => void
+  /** 「离线演示」标注；null = 该槽位的供应与 mock 无关。 */
+  mock: MockSlotAnnotation | null
   t: TranslateFn
 }) {
   const stages = item.usage.stages.map(stage => translateEnum(t, 'generations.stage', stage)).join(t('common.listJoin'))
@@ -313,6 +333,8 @@ function SlotRow({
               </Badge>
             )}
             {item.projectOnly && <Badge variant="muted">{t('models.readiness.projectOnly')}</Badge>}
+            {/* 标签不是按钮：演示位是状态事实，muted 静置，不与主操作撞形。 */}
+            {mock?.demo && <Badge variant="muted">{t('models.readiness.mockDemoTag')}</Badge>}
           </div>
           <p className="text-muted-foreground text-sm leading-relaxed">
             {block ? callBlockedNote(t, block) : rowNote(item, isHead, gateSlot, rest, t)}
@@ -320,6 +342,7 @@ function SlotRow({
           <p className="text-faint-foreground text-xs tabular-nums">
             {usedBy} · {t('models.readiness.candidates', { usable: item.usableCount, bindable: item.bindableCount })}
             {!isReady && ` · ${t(`models.readiness.state.${item.state}`)}`}
+            {mock?.demo && ` · ${t(mock.verifiedRun ? 'models.readiness.mockVerifiedRun' : 'models.readiness.mockConfigOnly')}`}
           </p>
           {isHead && (
             <div className="pt-1">
@@ -407,11 +430,13 @@ function Footnotes({
   slotCoverage,
   minimum,
   unwired,
+  mockAnywhere,
   t,
 }: {
   slotCoverage: ReturnType<typeof requiredSlotCoverage>
   minimum: MinimumConnectionsResult
   unwired: SlotReadiness[]
+  mockAnywhere: boolean
   t: TranslateFn
 }) {
   const combinations = minimum.combinations
@@ -419,6 +444,11 @@ function Footnotes({
     .join(' · ')
   return (
     <>
+      {mockAnywhere && (
+        <p className="text-muted-foreground text-xs leading-relaxed">
+          {t('models.readiness.mockDemoNote')}
+        </p>
+      )}
       {minimum.count !== null && (
         <p className="text-muted-foreground text-xs leading-relaxed">
           {t('models.readiness.coverageMinimum', { count: minimum.count, total: slotCoverage.total, combinations })}
@@ -460,9 +490,13 @@ function Footnotes({
 
 /**
  * The exit in front of a blocked user: create the keyless mock connection if the org has none,
- * probe it so its models count as verified, then point every step that still has nothing at the
- * first model the binding rules accept. Additive — a step a real vendor already covers is left
- * alone, and everything written here stays editable on the other tabs.
+ * probe it so its models count as verified, then point every step that still has nothing at a
+ * purpose-matched mock model. Additive — a step a real vendor already covers is left alone, and
+ * everything written here stays editable on the other tabs.
+ *
+ * 按用途对号，不取排序第一名：剧本和分镜都是 text 模态，目录序第一名绑到分镜槽位
+ * 上会让 mock 回剧本文本、分镜解析失败（UX-04 根因一）。`mockCandidateForSlot`
+ * 先找用途精确匹配的 mock 模型，对不上号才回落池子自己的顺序。
  */
 async function wireMockVendor(api: ApiFetch): Promise<number> {
   const list = await api<Connection[]>('/providers/connections')
@@ -485,7 +519,7 @@ async function wireMockVendor(api: ApiFetch): Promise<number> {
   )
   let bound = 0
   for (const gap of gaps) {
-    const [candidate] = candidatesForSlot(pool, gap.slot)
+    const candidate = mockCandidateForSlot(candidatesForSlot(pool, gap.slot), gap.slot)
     if (!candidate) continue
     await api('/bindings', {
       method: 'POST',

@@ -223,6 +223,134 @@ describe('audit trail', () => {
   })
 })
 
+describe('project settings and organization defaults', () => {
+  it('prefills new projects from the organization default without rewriting existing ones', async () => {
+    const owner = await register('settings-owner@example.com', 'Settings Org')
+    const existing = await app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Before Switch' } })
+    expect(existing.statusCode).toBe(201)
+    expect(existing.json().contentLocale).toBe('zh')
+
+    const read = await app.inject({ method: 'GET', url: '/api/organization', headers: authHeaders(owner.token) })
+    expect(read.statusCode).toBe(200)
+    expect(read.json().defaultContentLocale).toBe('zh')
+
+    const switched = await app.inject({ method: 'PATCH', url: '/api/organization', headers: authHeaders(owner.token), payload: { defaultContentLocale: 'en' } })
+    expect(switched.statusCode).toBe(200)
+    expect(switched.json().defaultContentLocale).toBe('en')
+
+    const next = await app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'After Switch' } })
+    expect(next.json().contentLocale).toBe('en')
+
+    // 空间默认只影响新建：切换前已存在的作品保持原语言。
+    const stored = await db.project.findUniqueOrThrow({ where: { id: existing.json().id as string } })
+    expect(stored.contentLocale).toBe('zh')
+
+    // 建项后语言锁定：改名可以，换语言 400。
+    const rename = await app.inject({ method: 'PATCH', url: `/api/projects/${stored.id}`, headers: authHeaders(owner.token), payload: { name: 'Renamed After Switch' } })
+    expect(rename.statusCode).toBe(200)
+    const relanguage = await app.inject({ method: 'PATCH', url: `/api/projects/${stored.id}`, headers: authHeaders(owner.token), payload: { contentLocale: 'en' } })
+    expect(relanguage.statusCode).toBe(400)
+
+    const invalid = await app.inject({ method: 'PATCH', url: '/api/organization', headers: authHeaders(owner.token), payload: { defaultContentLocale: 'fr' } })
+    expect(invalid.statusCode).toBe(400)
+
+    await register('settings-viewer@example.com', 'Viewer Settings Org')
+    await app.inject({ method: 'POST', url: '/api/members', headers: authHeaders(owner.token), payload: { email: 'settings-viewer@example.com', role: 'VIEWER' } })
+    const viewerLogin = await app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'settings-viewer@example.com', password: 'password123', organizationId: owner.organization.id } })
+    const denied = await app.inject({ method: 'PATCH', url: '/api/organization', headers: authHeaders(viewerLogin.json().token as string), payload: { defaultContentLocale: 'zh' } })
+    expect(denied.statusCode).toBe(403)
+  })
+
+  it('edits the project target duration without rewriting existing episode targets', async () => {
+    const owner = await register('target-duration@example.com', 'Target Duration Org')
+    const project = await app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Retiming Drama', format: 'short_drama' } })
+    const id = project.json().id as string
+
+    const first = await app.inject({ method: 'POST', url: `/api/projects/${id}/episodes`, headers: authHeaders(owner.token), payload: { number: 1, title: '第一集' } })
+    expect((first.json() as { targetDurationMs: number }).targetDurationMs).toBe(8 * 60_000)
+
+    const updated = await app.inject({ method: 'PATCH', url: `/api/projects/${id}`, headers: authHeaders(owner.token), payload: { targetDurationMs: 90_000 } })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json().targetDurationMs).toBe(90_000)
+
+    // 已经存在的集锁着自己的目标时长，改项目档只影响之后新建的集。
+    const episodes = await app.inject({ method: 'GET', url: `/api/projects/${id}/episodes`, headers: authHeaders(owner.token) })
+    expect((episodes.json() as Array<{ targetDurationMs: number }>)[0].targetDurationMs).toBe(8 * 60_000)
+    const second = await app.inject({ method: 'POST', url: `/api/projects/${id}/episodes`, headers: authHeaders(owner.token), payload: { number: 2, title: '第二集' } })
+    expect((second.json() as { targetDurationMs: number }).targetDurationMs).toBe(90_000)
+
+    for (const targetDurationMs of [5_000, 31 * 60_000, 90_000.5]) {
+      const rejected = await app.inject({ method: 'PATCH', url: `/api/projects/${id}`, headers: authHeaders(owner.token), payload: { targetDurationMs } })
+      expect(rejected.statusCode).toBe(400)
+    }
+    // 形态仍然建项后锁定。
+    const formatLocked = await app.inject({ method: 'PATCH', url: `/api/projects/${id}`, headers: authHeaders(owner.token), payload: { format: 'series' } })
+    expect(formatLocked.statusCode).toBe(400)
+  })
+
+  it('edits a single episode target without touching the project default', async () => {
+    const owner = await register('episode-target@example.com', 'Episode Target Org')
+    const project = await app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Retimed Episode', format: 'short_drama' } })
+    const projectId = project.json().id as string
+    const created = await app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(owner.token), payload: { number: 1, title: '第一集' } })
+    const episodeId = created.json().id as string
+    expect((created.json() as { targetDurationMs: number }).targetDurationMs).toBe(8 * 60_000)
+
+    const updated = await app.inject({ method: 'PATCH', url: `/api/episodes/${episodeId}`, headers: authHeaders(owner.token), payload: { targetDurationMs: 180_000 } })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json().targetDurationMs).toBe(180_000)
+
+    const listed = await app.inject({ method: 'GET', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(owner.token) })
+    expect((listed.json() as Array<{ targetDurationMs: number }>)[0].targetDurationMs).toBe(180_000)
+    // 改本集目标不回写项目默认档，之后新建的集仍按项目档落地。
+    const projectAfter = await db.project.findUniqueOrThrow({ where: { id: projectId } })
+    expect(projectAfter.targetDurationMs).toBeNull()
+    const next = await app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(owner.token), payload: { number: 2, title: '第二集' } })
+    expect((next.json() as { targetDurationMs: number }).targetDurationMs).toBe(8 * 60_000)
+
+    for (const payload of [{}, { targetDurationMs: 5_000 }, { targetDurationMs: 31 * 60_000 }, { targetDurationMs: 180_000.5 }]) {
+      const rejected = await app.inject({ method: 'PATCH', url: `/api/episodes/${episodeId}`, headers: authHeaders(owner.token), payload })
+      expect(rejected.statusCode).toBe(400)
+    }
+
+    const outsider = await register('episode-target-outsider@example.com', 'Episode Target Other Org')
+    const cross = await app.inject({ method: 'PATCH', url: `/api/episodes/${episodeId}`, headers: authHeaders(outsider.token), payload: { targetDurationMs: 120_000 } })
+    expect(cross.statusCode).toBe(404)
+    const missing = await app.inject({ method: 'PATCH', url: '/api/episodes/episode-does-not-exist', headers: authHeaders(owner.token), payload: { targetDurationMs: 120_000 } })
+    expect(missing.statusCode).toBe(404)
+
+    await register('episode-target-viewer@example.com', 'Episode Target Viewer Org')
+    await app.inject({ method: 'POST', url: '/api/members', headers: authHeaders(owner.token), payload: { email: 'episode-target-viewer@example.com', role: 'VIEWER' } })
+    const viewerLogin = await app.inject({ method: 'POST', url: '/auth/login', payload: { email: 'episode-target-viewer@example.com', password: 'password123', organizationId: owner.organization.id } })
+    const denied = await app.inject({ method: 'PATCH', url: `/api/episodes/${episodeId}`, headers: authHeaders(viewerLogin.json().token as string), payload: { targetDurationMs: 120_000 } })
+    expect(denied.statusCode).toBe(403)
+  })
+
+  it('validates and persists the per-shot duration and retry settings', async () => {
+    const owner = await register('shot-settings@example.com', 'Shot Settings Org')
+    const project = await app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(owner.token), payload: { name: 'Shot Settings Drama' } })
+    const id = project.json().id as string
+
+    const updated = await app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${id}`,
+      headers: authHeaders(owner.token),
+      payload: { maxShotDurationMs: 30_000, maxRetriesPerShot: 3, retryTechnical: 'auto1', retryConsistency: 'auto2', retryCreative: 'auto1' },
+    })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json()).toMatchObject({ maxShotDurationMs: 30_000, maxRetriesPerShot: 3, retryTechnical: 'auto1', retryConsistency: 'auto2', retryCreative: 'auto1' })
+
+    for (const payload of [{ maxShotDurationMs: 20_000 }, { maxRetriesPerShot: 4 }, { maxRetriesPerShot: -1 }, { retryTechnical: 'auto3' }, { retryConsistency: 'auto3' }, { retryCreative: 'auto2' }]) {
+      const rejected = await app.inject({ method: 'PATCH', url: `/api/projects/${id}`, headers: authHeaders(owner.token), payload })
+      expect(rejected.statusCode).toBe(400)
+    }
+
+    const cleared = await app.inject({ method: 'PATCH', url: `/api/projects/${id}`, headers: authHeaders(owner.token), payload: { maxShotDurationMs: null, maxRetriesPerShot: null, retryTechnical: null } })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json()).toMatchObject({ maxShotDurationMs: null, maxRetriesPerShot: null, retryTechnical: null })
+  })
+})
+
 describe('cors', () => {
   // @fastify/cors defaults to GET,HEAD,POST. Without the write verbs the browser
   // preflight fails and every edit in the console surfaces as "Failed to fetch".

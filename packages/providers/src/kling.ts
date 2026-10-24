@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto'
 import type { ModelCapability, ModelModality } from '@studio/domain'
 import type { AdapterOptions, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { vendorDurationField } from './duration.js'
 import { readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
 export const KLING_DEFAULT_BASE_URL = 'https://api-beijing.klingai.com'
@@ -191,8 +192,11 @@ export function buildKlingSubmitBody(capability: ModelCapability, request: Provi
     model_name: request.model,
     prompt: readString(input, 'prompt') ?? '',
     mode: readString(parameters, 'mode') ?? DEFAULT_MODE,
-    // Kling validates duration as a string, so a numeric 10 has to be coerced rather than passed through.
-    duration: String(parameters.duration ?? DEFAULT_DURATION),
+    // Kling validates duration as a string, so the canonical whole seconds are rendered
+    // through its slot rather than passed through. With nothing requested the row keeps
+    // the explicit default: a length this product writes is auditable, a vendor default it
+    // cannot read back is not.
+    duration: String(vendorDurationField('kling', parameters).duration ?? DEFAULT_DURATION),
     aspect_ratio: readString(parameters, 'aspectRatio') ?? DEFAULT_ASPECT_RATIO,
   }
 

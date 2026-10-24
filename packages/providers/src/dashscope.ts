@@ -1,11 +1,15 @@
 import type { ModelCapability } from '@studio/domain'
+import { withoutDurationKey } from '@studio/domain'
 import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
+import { vendorDurationField } from './duration.js'
 import { probeModel, readMediaReferences, sanitizeError, validateReferenceRequest } from './types.js'
 
 // Chat lives on the OpenAI-compatible endpoint: the new generation of qwen models
 // (qwen3.x-max and friends) is only served there, and the legacy native path answers
 // them with a misleading `InvalidParameter | url error`. Verified live 2026-09-22.
 const TEXT_PATH = '/compatible-mode/v1/chat/completions'
+// Read-only key check, proven live 2026-10-21: 200 with 178 model ids, no quota touched.
+const MODELS_PATH = '/compatible-mode/v1/models'
 const VLM_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
 const IMAGE_PATH = '/api/v1/services/aigc/text2image/image-synthesis'
 const VIDEO_PATH = '/api/v1/services/aigc/video-generation/video-synthesis'
@@ -69,23 +73,33 @@ export function buildSubmitRequest(
   }
 
   // Qwen-Image answers synchronously on the multimodal endpoint (verified live), so it
-  // must not carry the async header the wanx task models below need.
-  if (capability.modality === 'image' && isQwenImage(capability.model)) {
-    // qwen-image-edit 需要请求里至少 1 个 image 项(纯文本会被百炼以
-    // "must contain 1~3 image content items" 拒绝):定妆照参考图以 data URL
-    // 走 {image: url} 项,放在指令前面。参考图解析在 worker 侧——模型行未声明
-    // 接受参考图时不会带 media,届时这个校验会在发送前给出明确错误。
+  // must not carry the async header the wanx task models below need. wan2.6-t2i is
+  // served there too: the legacy async text2image endpoint answers it with a
+  // misleading `InvalidParameter | url error` (verified live 2026-10-21).
+  if (capability.modality === 'image' && isSyncImage(capability.model)) {
+    // 定妆照参考图以 data URL 走 {image: url} 项,排在指令之前——厂商图像编辑示例的方言就是这样
+    // 排列的。旧的 qwen-image-edit 缺 image 项会被拒(`must contain 1~3 image content items`),
+    // 但 3.0 一代纯文本照样出图(2026-10-21 实测),所以这里不强制带图:模型行未声明接受参考图时
+    // worker 不会带 media,那次调用就是无锚点文生图,由 pipeline 的 BLOCKED 门负责拦下。
     validateReferenceRequest(capability, request.input)
     const references = readMediaReferences(request.input.media)
     const content: Array<{ image: string } | { text: string }> = [
       ...references.map(reference => ({ image: reference.url })),
       { text: prompt },
     ]
+    // wan2.6 的 `n` 默认 4 张，照默认发送等于一次请求买四张；`prompt_extend`
+    // 默认 true 会改写我们存进快照的提示词。两项都钉死，除非调用方显式指定。
+    const parameters = imageParameters(
+      capability.model,
+      isWan26T2I(capability.model)
+        ? { prompt_extend: false, n: 1, ...request.parameters }
+        : request.parameters,
+    )
     return {
       url: `${base}${VLM_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { messages: [{ role: 'user', content }] }, parameters: request.parameters },
+      body: { model: request.model, input: { messages: [{ role: 'user', content }] }, parameters },
     }
   }
 
@@ -112,17 +126,23 @@ export function buildSubmitRequest(
       url: `${base}${IMAGE_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { prompt }, parameters: request.parameters },
+      // The async t2i models take a frame size too, but their boxes differ (wan2.2
+      // tops out at 1440×1440 total); only the qwen family is translated.
+      body: { model: request.model, input: { prompt }, parameters: imageParameters(capability.model, request.parameters) },
     }
   }
 
   if (capability.modality === 't2v') {
     validateReferenceRequest(capability, request.input)
+    // first_clip 是延长/编辑的续片输入:validateReferenceRequest 已保证 t2v 携带的
+    // 引用只可能是 first_clip,这里把它原样送进 media 数组——丢掉它等于让一次
+    // 「接着拍」按纯文生图计费,产物与源片毫无关系。
+    const media = readMediaReferences(request.input.media)
     return {
       url: `${base}${VIDEO_PATH}`,
       method: 'POST',
       headers,
-      body: { model: request.model, input: { prompt }, parameters: videoParameters(request.parameters) },
+      body: { model: request.model, input: { prompt, ...(media.length > 0 ? { media } : {}) }, parameters: videoParameters(request.parameters) },
     }
   }
 
@@ -182,18 +202,21 @@ export function buildPollRequest(baseUrl: string, apiKey: string, taskId: string
 }
 
 /**
- * Always the text endpoint, whatever capability is being probed: the call proves
- * the connection's API key, not entitlement for a specific model. Routing it
- * through buildSubmitRequest instead would throw for i2v and for the modalities
- * this adapter has no endpoint for.
+ * The model list proves the key and bills nothing. The text-completions ping this
+ * function used to build cost a generation on every probe and failed outright for a
+ * key that is not served `qwen-turbo` — which, because the bind gate only needs a
+ * credential stamp, left every image and video row on such a connection unbindable.
+ *
+ * The list is NOT a model-absence oracle: measured on two keys that both generate
+ * images, it was byte-identical and omitted models that demonstrably work. Entitlement
+ * for a specific model is still earned by `verifyModel` or the first real generation.
  */
 export function buildCredentialProbeRequest(baseUrl: string, apiKey: string): DashScopeHttpRequest {
   const base = baseUrl.replace(/\/+$/, '')
   return {
-    url: `${base}${TEXT_PATH}`,
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: { model: 'qwen-turbo', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 },
+    url: `${base}${MODELS_PATH}`,
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}` },
   }
 }
 
@@ -238,6 +261,27 @@ export function isQwenImage(model: string): boolean {
   return model.startsWith('qwen-image')
 }
 
+/** Wan 2.6 text-to-image is synchronous on the same endpoint; the legacy async path is not its home. */
+export function isWan26T2I(model: string): boolean {
+  return model === 'wan2.6-t2i'
+}
+
+function isSyncImage(model: string): boolean {
+  return isQwenImage(model) || isWan26T2I(model)
+}
+
+/**
+ * qwen-image spells the frame as `width*height`, while the platform carries a ratio.
+ * Only this family's size box is verified to hold 1080×1920, so other models get the
+ * key dropped rather than a guess; an explicit `size` from the caller wins over the ratio.
+ */
+function imageParameters(model: string, parameters: Record<string, unknown>): Record<string, unknown> {
+  const { aspectRatio, ...rest } = parameters
+  if (!isQwenImage(model) || typeof rest.size === 'string') return rest
+  const size = aspectRatio === '9:16' ? '1080*1920' : aspectRatio === '16:9' ? '1920*1080' : undefined
+  return size ? { ...rest, size } : rest
+}
+
 /**
  * Which dialect a wan video model speaks. Both generations post to the same path, so
  * only the name says whether the frame goes in `input.img_url` or in `input.media` —
@@ -259,11 +303,13 @@ export function usesMediaVideoApi(model: string): boolean {
 function videoParameters(parameters: Record<string, unknown>): Record<string, unknown> {
   // audio: true 让 wan2.5+/wan3.0 在生成视频时同时输出原生音频（口型同步）。
   // 调用方可以显式传 audio: false 关掉（如已走独立 TTS 叠加时）。
-  return { prompt_extend: false, audio: true, ...parameters }
+  // 时长走映射而不是原样铺开：这个对象会被整体转进厂商体，canonical 键混在里面等于
+  // 一次请求带两个时长，实际付费的那一个再也无法证明。
+  return { prompt_extend: false, audio: true, ...withoutDurationKey(parameters), ...vendorDurationField('dashscope', parameters) }
 }
 
 /** Verified live: the sync multimodal response carries the image at output.choices[0].message.content[0].image.
- *  The compatible-mode endpoint (qwen-image-edit) answers with the same message shape, but its content
+ *  The compatible-mode endpoint answers with the same message shape, but its content
  *  items speak the OpenAI dialect — image_url objects, sometimes plain strings. Both are read here. */
 function extractSyncImageUrl(container: Record<string, unknown>): string | undefined {
   const choices = container.choices
@@ -329,6 +375,16 @@ interface SyncResult {
 const syncResults = new Map<string, SyncResult>()
 let syncCounter = 0
 
+// 同步出图把整次生成挂在一个 HTTP 响应上：没有截止时间的 fetch 会永远悬着，任务停在
+// RUNNING、台账停在 submitting，租约过期后的重试就撞上自己那行未终局的台账——#19 的
+// 死结正是这条路（2026-10-22 实测：同一请求悬了 3 分钟无响应）。超时后至少得到一个
+// 确定结局：提交超时按「提交未知」交人工核对，轮询超时下一轮照常续查。
+// 截止点取实测分布的最大值两倍：本空间 35 次成功的首帧提交（含同步生成全程）p50=172s、
+// p90=231s、最长 299s；180s 会砍掉约三成正常出图（2026-10-22 #20 即被 180s 误杀）。
+/** 导出供回归测试引用：截止点与实测分布的关系（`test/dashscope-deadline.test.ts`）。 */
+export const SUBMIT_TIMEOUT_MS = 600_000
+const POLL_TIMEOUT_MS = 30_000
+
 export class DashScopeAdapter implements ProviderAdapter {
   provider = 'dashscope'
 
@@ -349,14 +405,14 @@ export class DashScopeAdapter implements ProviderAdapter {
   private async checkCredential(): Promise<ProbeResult> {
     const httpRequest = buildCredentialProbeRequest(this.options.baseUrl, this.options.apiKey)
     try {
-      const response = await fetch(httpRequest.url, {
-        method: httpRequest.method,
-        headers: httpRequest.headers,
-        body: JSON.stringify(httpRequest.body),
-      })
-      if (response.ok) return { ok: true, status: response.status, message: 'probe ok' }
+      const response = await fetch(httpRequest.url, { method: httpRequest.method, headers: httpRequest.headers, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) })
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
-      return { ok: false, status: response.status, message: sanitizeError(body ?? response.statusText) }
+      // Compatible-mode errors arrive under `error`, the native paths put code/message at
+      // the top level. Unwrapping first is what keeps a failure from rendering as a bare
+      // `request_id=…`, which is all sanitizeError can find in an envelope it did not open.
+      if (!response.ok) return { ok: false, status: response.status, message: sanitizeError(body?.error ?? body ?? response.statusText) }
+      if (!Array.isArray(body?.data)) return { ok: false, status: response.status, message: 'dashscope probe: 2xx without a "data" model list' }
+      return { ok: true, status: response.status, message: 'probe ok' }
     } catch (error) {
       return { ok: false, status: 0, message: sanitizeError(error instanceof Error ? error.message : error) }
     }
@@ -372,12 +428,67 @@ export class DashScopeAdapter implements ProviderAdapter {
     )
   }
 
+  /**
+   * US-021/R02 真实延长与定向编辑。百炼把视频续拍(延长)与视频编辑派发到同一个
+   * 异步 video-synthesis 任务端点:提交 POST 返回 output.task_id,轮询
+   * GET /api/v1/tasks/{task_id} 到 SUCCEEDED,产物在 output.video_url,由 worker
+   * 的 materialize 统一下载。源片走 input.media 的 first_clip 项(data URL 或公开
+   * URL 百炼都收,与首帧同规),编辑指令写在 prompt;保留范围/静音等参数在
+   * parameters 里透传(prompt_extend 仍钉死 false,防止端点改写指令后快照失真)。
+   * 协议按阿里云百炼「视频生成/编辑」REST 文档 2026-10 —— 本仓库从未对着真实
+   * 百炼账号验证过,延长/编辑的真实验收(AC12 源/结果对比)由用户配 key 完成。
+   */
+  private videoArtifactOperationRequest(kind: 'extend' | 'editVideo', capability: ModelCapability, request: ProviderRequest): DashScopeHttpRequest {
+    if (this.options.apiKey === '') {
+      throw new Error(`dashscope ${kind} 需要配置 API key — connection carries no secret; refusing to fabricate a result`)
+    }
+    if (capability.modality !== 't2v' && capability.modality !== 'i2v' && capability.modality !== 'r2v') {
+      throw new Error(`dashscope ${kind} needs a video model, "${capability.model}" is "${capability.modality}"`)
+    }
+    const media = readMediaReferences(request.input.media)
+    if (!media.some(reference => reference.type === 'first_clip')) {
+      throw new Error(`dashscope ${kind} needs a first_clip reference carrying the source video, model "${capability.model}"`)
+    }
+    if (!usesMediaVideoApi(capability.model)) {
+      throw new Error(`dashscope ${kind} needs a media-array video dialect, model "${capability.model}" (wan2.7/wan3.0 generations) only has a single-frame slot`)
+    }
+    return buildSubmitRequest(this.options.baseUrl, this.options.apiKey, capability, request)
+  }
+
+  private async submitVideoTask(httpRequest: DashScopeHttpRequest): Promise<SubmitResult> {
+    const response = await fetch(httpRequest.url, {
+      method: httpRequest.method,
+      headers: httpRequest.headers,
+      body: httpRequest.body === undefined ? undefined : JSON.stringify(httpRequest.body),
+      signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
+    })
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
+    if (!response.ok) throw new Error(sanitizeError(body ?? `HTTP ${response.status}`))
+    const output = (body?.output ?? {}) as Record<string, unknown>
+    const taskId = output.task_id
+    if (typeof taskId !== 'string') throw new Error(sanitizeError(body ?? 'dashscope response missing output.task_id'))
+    return { taskId }
+  }
+
+  /** 对已有视频的「接着拍」:提交百炼异步任务,task_id 记录在 SubmitResult,轮询走共用 poll。 */
+  async extend(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
+    const httpRequest = this.videoArtifactOperationRequest('extend', capability, request)
+    return this.submitVideoTask(httpRequest)
+  }
+
+  /** 对已有视频下达修改指令:同一端点同一形态,prompt 是指令,first_clip 是被改的片。 */
+  async editVideo(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
+    const httpRequest = this.videoArtifactOperationRequest('editVideo', capability, request)
+    return this.submitVideoTask(httpRequest)
+  }
+
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {
     const httpRequest = buildSubmitRequest(this.options.baseUrl, this.options.apiKey, capability, request)
     const response = await fetch(httpRequest.url, {
       method: httpRequest.method,
       headers: httpRequest.headers,
       body: httpRequest.body === undefined ? undefined : JSON.stringify(httpRequest.body),
+      signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
     })
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
     if (!response.ok) throw new Error(sanitizeError(body ?? `HTTP ${response.status}`))
@@ -393,7 +504,7 @@ export class DashScopeAdapter implements ProviderAdapter {
       return { taskId }
     }
 
-    if (capability.modality === 'image' && isQwenImage(capability.model)) {
+    if (capability.modality === 'image' && isSyncImage(capability.model)) {
       const output = (body?.output ?? {}) as Record<string, unknown>
       const artifactUrl = (body ? extractSyncImageUrl(body) : undefined) ?? extractSyncImageUrl(output)
       if (!artifactUrl) throw new Error(sanitizeError(body ?? 'dashscope qwen-image response missing an image url'))
@@ -427,7 +538,7 @@ export class DashScopeAdapter implements ProviderAdapter {
     }
 
     const httpRequest = buildPollRequest(this.options.baseUrl, this.options.apiKey, taskId)
-    const response = await fetch(httpRequest.url, { method: httpRequest.method, headers: httpRequest.headers })
+    const response = await fetch(httpRequest.url, { method: httpRequest.method, headers: httpRequest.headers, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) })
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
     if (!response.ok) {
       if (response.status === 404) return { status: 'failed', error: sanitizeError(body ?? `task ${taskId} not found`) }

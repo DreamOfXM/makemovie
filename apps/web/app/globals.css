@@ -343,11 +343,95 @@
   .strip-cell[data-chosen='1'] {
     box-shadow: inset 0 -2px 0 0 color-mix(in oklch, var(--color-foreground) 62%, transparent);
   }
+  /* 当前正在看的那一镜：从放映条点下去后，条上必须留下落点，
+     否则右列内容变了、条上没有反馈（2026-10-20 用户实测）。 */
+  .strip-cell[data-active='1'] {
+    position: relative;
+    z-index: 1;
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+  }
   /* 词放不下的判断走实际渲染宽度（ShotStrip 的 fitWords 量的 scrollWidth）。
      旧版这里是一条固定 44px 的容器查询，它不知道词有多长：窄格里的短词被整格抹白，
-     宽格里的长词照样溢出。截断成「等你…」比不写字更难看，所以放不下就不写。 */
+     宽格里的长词照样溢出。截断成「等你…」比不写字更难看，所以放不下就不写。
+     visibility 而不是 display：藏起来之后 scrollWidth 仍可量，窗口变宽时才能恢复。 */
   .strip-cell[data-clip='1'] > .strip-word {
+    visibility: hidden;
+  }
+
+  /* 制作台三区。断点写在一处媒体查询里，避免 Tailwind 变体顺序把
+     `lg:hidden` 排在 `min-[1440px]:block` 后面（SD-023 的成因）。
+     <1024 单列堆叠（预览在顶，清单收尾）；1024~1279 清单是浮层轨道；
+     ≥1280 清单常驻首列——1439 下不再压住编辑器；≥1440 回到原三列宽度。 */
+  .workbench-shell {
+    display: grid;
+    grid-template-areas: 'preview' 'editor' 'list';
+    grid-template-rows: auto auto auto;
+  }
+  .workbench-list {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    grid-area: list;
+  }
+  .workbench-list-body {
     display: none;
+    min-height: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+  }
+  .workbench-list[data-open='true'] .workbench-list-body {
+    display: flex;
+  }
+  @media (min-width: 1024px) {
+    .workbench-shell {
+      /* flex-1 的 flex-basis:0% 会让 height 失效，整块按内容撑到 3783px，
+         两列因此没有内部滚动。这里改成不伸缩并钉住视口高度。 */
+      flex: 0 0 auto;
+      height: calc(100dvh - 21rem);
+      grid-template-columns: minmax(0, 1fr) 23rem;
+      grid-template-rows: minmax(0, 1fr);
+      grid-template-areas: 'editor preview';
+    }
+  }
+  @media (min-width: 1024px) and (max-width: 1279.98px) {
+    .workbench-list {
+      position: absolute;
+      inset-block: 0;
+      left: 0;
+      z-index: 30;
+      width: 18rem;
+      box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.25);
+      backdrop-filter: blur(4px);
+    }
+    .workbench-list[data-open='false'] {
+      display: none;
+    }
+    .workbench-list[data-open='true'] .workbench-list-body {
+      display: flex;
+    }
+  }
+  @media (min-width: 1280px) {
+    .workbench-shell {
+      grid-template-columns: 15.5rem minmax(0, 1fr) 20rem;
+      grid-template-areas: 'list editor preview';
+    }
+    .workbench-list {
+      position: static;
+      z-index: auto;
+      display: flex;
+      width: auto;
+      box-shadow: none;
+      backdrop-filter: none;
+    }
+    .workbench-list .workbench-list-body {
+      display: flex;
+    }
+  }
+  @media (min-width: 1440px) {
+    .workbench-shell {
+      grid-template-columns: 18.5rem minmax(0, 1fr) 23rem;
+    }
   }
 }
 

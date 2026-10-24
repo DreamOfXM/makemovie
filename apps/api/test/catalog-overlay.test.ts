@@ -104,11 +104,11 @@ describe('catalog overlay — custom models', () => {
   it('shadows the official row it matches, so a stale flag can be corrected', async () => {
     const owner = await env.register('ov-shadow@example.com', 'Shadow Org')
 
-    const res = await addCustom(owner.token, 'dashscope', { model: 'qwen-image-edit', modality: 'image', acceptsReferenceImages: true, maxReferenceImages: 5 })
+    const res = await addCustom(owner.token, 'dashscope', { model: 'qwen-image-3.0', modality: 'image', acceptsReferenceImages: true, maxReferenceImages: 5 })
     expect(res.statusCode).toBe(201)
     const dashscope = (await getCatalogs(owner.token)).find(c => c.provider === 'dashscope')!
     // One row, not two: the custom correction replaces the official claim.
-    const rows = dashscope.models.filter(m => m.model === 'qwen-image-edit')
+    const rows = dashscope.models.filter(m => m.model === 'qwen-image-3.0')
     expect(rows).toHaveLength(1)
     expect(rows[0].source).toBe('custom')
     expect(rows[0].maxReferenceImages).toBe(5)
@@ -116,7 +116,7 @@ describe('catalog overlay — custom models', () => {
     // Deleting the correction puts the shipped row back.
     const del = await env.app.inject({ method: 'DELETE', url: `/api/providers/catalogs/entries/${(res.json() as { id: string }).id}`, headers: authHeaders(owner.token) })
     expect(del.statusCode).toBe(204)
-    const reverted = (await getCatalogs(owner.token)).find(c => c.provider === 'dashscope')!.models.filter(m => m.model === 'qwen-image-edit')
+    const reverted = (await getCatalogs(owner.token)).find(c => c.provider === 'dashscope')!.models.filter(m => m.model === 'qwen-image-3.0')
     expect(reverted).toHaveLength(1)
     expect(reverted[0].source).toBe('official')
     expect(reverted[0].maxReferenceImages).toBe(3)

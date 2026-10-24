@@ -3,11 +3,12 @@
 import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useRouter } from 'next/navigation'
-import { ArrowRightIcon, BoxesIcon, CableIcon, ListChecksIcon, RadioTowerIcon, RefreshCwIcon } from 'lucide-react'
+import { ArrowLeftIcon, ArrowRightIcon, BotIcon, BoxesIcon, CableIcon, ListChecksIcon, RadioTowerIcon, RefreshCwIcon } from 'lucide-react'
 import type { Binding, CallEvidenceMap, Catalog, Connection } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
+import { safeReturnPath } from '@/lib/return-path'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page-header'
@@ -85,11 +86,14 @@ function ModelsWorkspace() {
   const setTab = useCallback(
     (next: ModelsTab) => {
       const query = new URLSearchParams({ tab: next })
-      // Keep the project scope alive while it is meaningful on this page.
-      if (projectParam && next === 'bindings') query.set('project', projectParam)
+      // P06 创作上下文跨页签存活:project 作用域和 returnTo 在任何标签间切换都保留,
+      // 否则用户从创作跳来补模型,切一下标签就再也回不去原来的集和步骤。
+      if (projectParam) query.set('project', projectParam)
+      const returnTo = searchParams.get('returnTo')
+      if (returnTo) query.set('returnTo', returnTo)
       router.replace(`/models?${query.toString()}`, { scroll: false })
     },
-    [projectParam, router],
+    [projectParam, router, searchParams],
   )
 
 // Each flow step has its own landing target; a step whose specific target does not exist
@@ -152,19 +156,29 @@ const ANCHOR_FALLBACK: Record<string, string> = {
         title={t('models.title')}
         description={t('models.subtitle')}
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              connections.reload()
-              bindings.reload()
-              catalogs.reload()
-              callEvidence.reload()
-            }}
-          >
-            <RefreshCwIcon />
-            {t('common.refresh')}
-          </Button>
+          <>
+            {/* P06:带着创作上下文进来的用户,任何时刻都能一步回到原来的集;
+                只认本站 /projects/ 开头的路径,防开放跳转。返回只是导航,不触发任何调用。 */}
+            {safeReturnPath(searchParams.get('returnTo')) && (
+              <Button variant="outline" size="sm" onClick={() => router.push(safeReturnPath(searchParams.get('returnTo'))!)}>
+                <ArrowLeftIcon />
+                {t('models.backToCreate')}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                connections.reload()
+                bindings.reload()
+                catalogs.reload()
+                callEvidence.reload()
+              }}
+            >
+              <RefreshCwIcon />
+              {t('common.refresh')}
+            </Button>
+          </>
         }
       />
 
@@ -190,7 +204,7 @@ const ANCHOR_FALLBACK: Record<string, string> = {
               {t('models.tab.catalogs')}
             </TabsTrigger>
             <TabsTrigger value="agent">
-              <RadioTowerIcon />
+              <BotIcon />
               {t('models.tab.agent')}
             </TabsTrigger>
           </TabsList>

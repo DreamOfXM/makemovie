@@ -115,7 +115,7 @@ describe('buildOtio', () => {
     expect(v1.name).toBe('V1')
     expect(a1).toMatchObject({ OTIO_SCHEMA: 'Track.1', name: 'A1', kind: 'Audio' })
     expect(a1.children[0]!.media_reference.target_url).toBe('file:///org1/p1/e1/music/master/v1.wav')
-    // 9000ms @25 = 225 帧。
-    expect(a1.children[0]!.source_range.duration.value).toBe(225)
+    // 音乐源虽有225帧,实际放置范围不得超过V1的75+31帧。
+    expect(a1.children[0]!.source_range.duration.value).toBe(106)
   })
 })

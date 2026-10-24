@@ -8,13 +8,24 @@ import {
   mimeTypeForOpenAISpeech,
   type OpenAIHttpRequest,
 } from './openai.js'
-import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult } from './types.js'
-import { probeModel, sanitizeError } from './types.js'
+import type { AdapterOptions, ModelProbeRequest, PollResult, ProbeResult, ProviderAdapter, ProviderRequest, SubmitResult, TranscribeRequest, TranscribeResult, TranscribeSegment } from './types.js'
+import { parseDataUrl, probeModel, sanitizeError } from './types.js'
 
 const CHAT_PATH = '/v1/chat/completions'
 const MODELS_PATH = '/v1/models'
+const TRANSCRIPTIONS_PATH = '/v1/audio/transcriptions'
 
 const SUPPORTED_MODALITIES = new Set<ModelModality>(['text', 'vlm', 'image', 'tts'])
+
+/**
+ * US-033: asr rows ride the same gateway as the rest — the credential probe (/v1/models)
+ * proves the key for a transcription model just as well as for a chat one, and a real
+ * per-model verification would cost an actual transcription. Keeping asr probeable is
+ * what lets a hand-added asr capability survive the connection probe and bind to
+ * audio_transcribe; submit/poll still refuse the modality (SUPPORTED_MODALITIES), since
+ * transcribe bypasses the task queue entirely.
+ */
+const PROBE_MODALITIES = new Set<ModelModality>([...SUPPORTED_MODALITIES, 'asr'])
 
 function baseUrlOf(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '')
@@ -102,6 +113,76 @@ interface SyncOutcome {
   inlineArtifact?: { bytes: Uint8Array; mimeType: string }
 }
 
+/** US-033: the audio half of the transcription request, whichever side of the contract it arrived on. */
+function resolveAudio(request: TranscribeRequest): { bytes: Uint8Array; mimeType: string } {
+  if (typeof request.audio.dataUrl === 'string') {
+    const parsed = parseDataUrl(request.audio.dataUrl)
+    if (!parsed) throw new Error('transcribe: audio.dataUrl is not a base64 data URL')
+    return { bytes: new Uint8Array(Buffer.from(parsed.base64, 'base64')), mimeType: parsed.mimeType }
+  }
+  if (request.audio.bytes instanceof Uint8Array) {
+    const mimeType = request.audio.mimeType ?? 'audio/wav'
+    return { bytes: request.audio.bytes, mimeType }
+  }
+  throw new Error('transcribe: audio needs a dataUrl or bytes+mimeType')
+}
+
+function extensionForAudio(mimeType: string): string {
+  if (mimeType.includes('mpeg')) return 'mp3'
+  if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'm4a'
+  if (mimeType.includes('webm')) return 'webm'
+  if (mimeType.includes('ogg')) return 'ogg'
+  if (mimeType.includes('flac')) return 'flac'
+  return 'wav'
+}
+
+/**
+ * US-033 真实转写:OpenAI 兼容网关的 /v1/audio/transcriptions,multipart 表单
+ * (file + model + 可选 language),response_format 请求 verbose_json 以拿 segments;
+ * 响应标准形态 { text, segments?: [{start, end, text}] }(start/end 为秒,数字或
+ * 数字串都收)。协议按 OpenAI API 参考「Create transcription」2026-10——本仓库只对
+ * stub 契约测试,真实转写验收由用户配 key 完成。expectedText 是 mock 元数据,这里
+ * 必须忽略。
+ */
+export function buildCompatTranscriptionRequest(
+  baseUrl: string,
+  apiKey: string,
+  capability: { model: string },
+  request: TranscribeRequest,
+): { url: string; headers: Record<string, string>; form: FormData } {
+  const audio = resolveAudio(request)
+  // Re-house the bytes in a fresh ArrayBuffer-backed view: a Uint8Array that arrived as
+  // a Buffer or a slice view is Uint8Array<ArrayBufferLike>, which Blob rejects.
+  const bytes = new Uint8Array(audio.bytes.byteLength)
+  bytes.set(audio.bytes)
+  const form = new FormData()
+  form.append('file', new Blob([bytes], { type: audio.mimeType }), `audio.${extensionForAudio(audio.mimeType)}`)
+  form.append('model', capability.model)
+  form.append('response_format', 'verbose_json')
+  if (typeof request.language === 'string' && request.language !== '') form.append('language', request.language)
+  return { url: `${baseUrlOf(baseUrl)}${TRANSCRIPTIONS_PATH}`, headers: authHeaders(apiKey), form }
+}
+
+/** seconds (number or numeric string — both appear across gateways) → whole milliseconds. */
+function toMs(value: unknown): number | undefined {
+  const seconds = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined
+}
+
+function mapTranscriptionSegments(value: unknown): TranscribeSegment[] {
+  if (!Array.isArray(value)) return []
+  const segments: TranscribeSegment[] = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue
+    const record = item as { start?: unknown; end?: unknown; text?: unknown }
+    const startMs = toMs(record.start)
+    const text = typeof record.text === 'string' ? record.text : ''
+    if (startMs === undefined) continue
+    segments.push({ startMs, endMs: toMs(record.end) ?? startMs, text })
+  }
+  return segments
+}
+
 const syncResults = new Map<string, SyncOutcome>()
 let syncCounter = 0
 
@@ -113,7 +194,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   constructor(private readonly options: AdapterOptions) {}
 
   async probe(capability: ModelCapability): Promise<ProbeResult> {
-    if (!SUPPORTED_MODALITIES.has(capability.modality)) {
+    if (!PROBE_MODALITIES.has(capability.modality)) {
       return { ok: false, status: 0, message: `no openai-compatible endpoint for modality "${capability.modality}"` }
     }
     this.credential ??= this.checkCredential()
@@ -140,6 +221,32 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       capability.model,
       body => Array.isArray(body.choices) && body.choices.length > 0,
     )
+  }
+
+  /**
+   * Synchronous by contract: /audio/transcriptions answers in one call, so the
+   * adapter has no polling to digest. An empty key never gets a fabricated answer —
+   * the call refuses before any bytes leave.
+   */
+  async transcribe(capability: ModelCapability, request: TranscribeRequest): Promise<TranscribeResult> {
+    if (!this.options.apiKey) {
+      throw new Error('openai-compatible transcription 需要配置 API key — connection carries no secret; refusing to fabricate a transcript')
+    }
+    const httpRequest = buildCompatTranscriptionRequest(this.options.baseUrl, this.options.apiKey, capability, request)
+    const response = await fetch(httpRequest.url, { method: 'POST', headers: httpRequest.headers, body: httpRequest.form })
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
+    if (!response.ok) throw new Error(sanitizeError(body?.error ?? body ?? `HTTP ${response.status}`))
+    const text = typeof body?.text === 'string' ? body.text : ''
+    const segments = mapTranscriptionSegments(body?.segments)
+    // A 2xx with neither half is not a transcript; returning it as one would feed the
+    // diff an "empty audio" verdict the vendor never gave.
+    if (text === '' && segments.length === 0) throw new Error(`transcription response carries neither text nor segments: ${sanitizeError(body ?? 'empty body')}`)
+    return {
+      transcript: text !== '' ? text : segments.map(segment => segment.text).join(''),
+      ...(segments.length > 0 ? { segments } : {}),
+      provider: 'openai_compatible',
+      model: capability.model,
+    }
   }
 
   async submit(capability: ModelCapability, request: ProviderRequest): Promise<SubmitResult> {

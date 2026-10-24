@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import type { Binding, CallEvidenceMap, Capability, Catalog } from '@/lib/api'
 import {
+  bindableCapabilities,
+  candidatesForSlot,
   isHeldUp,
   minimumConnections,
+  mockCandidateForSlot,
+  mockSlotAnnotations,
+  MOCK_SLOT_MODELS,
   readyCount,
   requiredSlotCoverage,
   slotReadiness,
   wiredRequiredSlots,
+  type CapabilitySlot,
 } from '@/lib/models/readiness'
+import { canBind } from '@studio/domain'
 import { listCatalogs } from '../../../packages/providers/src/catalog'
 
 /**
@@ -29,6 +36,8 @@ function capability(model: string, provider = 'dashscope'): Capability {
     entitlementVerifiedAt: '2026-09-20T00:00:00.000Z',
     credentialVerifiedAt: '2026-09-20T00:00:00.000Z',
     lastProbedAt: '2026-09-20T00:00:00.000Z',
+    spec: null,
+    durationEvidence: null,
     connection: { id: `conn-${provider}`, provider, name: provider, enabled: true },
   } as Capability
 }
@@ -175,5 +184,129 @@ describe('目录覆盖：最少连接数与并列组合', () => {
     expect(total).toBe(4)
     const video = perSlot.find(entry => entry.slot === 'video_t2v')
     expect(video?.providers.map(entry => entry.provider)).toEqual(['dashscope', 'seedance', 'kling', 'google'])
+  })
+})
+
+/**
+ * 一键 mock 的用途绑定（UX-P01，2026-10-19 实测 UX-04 根因一）：剧本和分镜都是
+ * text 模态，取排序第一名会把剧本文本绑进分镜槽位，mock 按模型名回剧本文本、
+ * 分镜解析必然失败。挑候选必须按用途对号，对不上才回落池子顺序。
+ */
+describe('一键 mock 的用途绑定', () => {
+  const mockCatalog = listCatalogs().find(catalog => catalog.provider === 'mock')!
+
+  /** 目录序的 mock 池——bindableCapabilities 眼里的「一键 mock 之后」的样子。 */
+  function mockPool() {
+    return bindableCapabilities([
+      {
+        id: 'conn-mock',
+        provider: 'mock',
+        name: 'mock-preview',
+        enabled: true,
+        capabilities: mockCatalog.models.map((model, index) => ({
+          id: `cap-mock-${index}`,
+          model: model.model,
+          displayName: model.displayName,
+          modality: model.modality,
+          acceptsFirstFrame: !!model.acceptsFirstFrame,
+          acceptsReferenceImages: !!model.acceptsReferenceImages,
+          maxReferenceImages: model.maxReferenceImages ?? 0,
+          entitlementVerifiedAt: '2026-10-19T00:00:00.000Z',
+        })),
+      },
+    ])
+  }
+
+  it('每个用途槽位对号到自己的 mock 模型，不取文本模态的排序第一名', () => {
+    const pool = mockPool()
+    // 剧本和分镜共享 text 模态；目录序第一名（mock-text）不是任何一个的用途模型。
+    const storyboardCandidates = candidatesForSlot(pool, 'storyboard_text')
+    expect(storyboardCandidates[0]!.model).not.toBe('mock-storyboard')
+    const purpose: Array<[CapabilitySlot, string]> = [
+      ['script_text', 'mock-script'],
+      ['storyboard_text', 'mock-storyboard'],
+      ['image_gen', 'mock-image'],
+      ['video_t2v', 'mock-t2v'],
+      ['video_i2v', 'mock-i2v'],
+      ['video_r2v', 'mock-r2v'],
+      ['tts_voice', 'mock-tts'],
+      ['music_gen', 'mock-music'],
+      ['sfx', 'mock-sfx'],
+      ['visual_audit', 'mock-vlm'],
+    ]
+    for (const [slot, model] of purpose) {
+      expect(mockCandidateForSlot(candidatesForSlot(pool, slot), slot)?.model, slot).toBe(model)
+    }
+  })
+
+  it('用途对照表钉住真实 mock 目录：每个模型都存在，且绑定规则放行它进对应槽位', () => {
+    const models = new Map(mockCatalog.models.map(model => [model.model, model]))
+    for (const [slot, model] of Object.entries(MOCK_SLOT_MODELS)) {
+      const row = models.get(model!)
+      expect(row, `${slot} → ${model} 必须还是 mock catalog 里的真实模型`).toBeDefined()
+      expect(canBind(slot as CapabilitySlot, {
+        provider: 'mock',
+        model: row!.model,
+        modality: row!.modality,
+        acceptsFirstFrame: !!row!.acceptsFirstFrame,
+        acceptsReferenceImages: !!row!.acceptsReferenceImages,
+        maxReferenceImages: row!.maxReferenceImages ?? 0,
+      }).ok, `${slot} → ${model} 必须能通过 canBind`).toBe(true)
+    }
+  })
+
+  it('目录里没有用途模型的槽位不进对照表（audio_transcribe 无 mock asr），挑候选回落池子顺序', () => {
+    expect(MOCK_SLOT_MODELS.audio_transcribe).toBeUndefined()
+    const pool = [
+      {
+        capabilityId: 'cap-dashscope-text',
+        model: 'qwen3-max',
+        displayName: null,
+        modality: 'text',
+        connectionId: 'conn-dashscope',
+        connectionName: 'dashscope',
+        provider: 'dashscope',
+        acceptsFirstFrame: false,
+        acceptsReferenceImages: false,
+        maxReferenceImages: 0,
+      },
+    ]
+    expect(mockCandidateForSlot(pool, 'script_text')?.model).toBe('qwen3-max')
+  })
+})
+
+/**
+ * mock 就绪的口径（UX-P01）：mock 供应的槽位必须标「离线演示」，且就绪只说明
+ * 配置可用——mock 模型真跑过至少一次调用才叫「已验证运行」，未跑过不许暗示。
+ */
+describe('mock 就绪标注：配置可用 ≠ 已验证运行', () => {
+  const mockStoryboard = capability('mock-storyboard', 'mock')
+
+  it('mock 独家供应的槽位是演示位；没有任何履历时只算配置可用', () => {
+    const annotations = mockSlotAnnotations([binding('storyboard_text', mockStoryboard)])
+    expect(annotations.get('storyboard_text')).toEqual({ demo: true, verifiedRun: false })
+  })
+
+  it('mock 模型有过真实调用履历（成功或失败都算跑过）才是已验证运行', () => {
+    const ran = mockSlotAnnotations([binding('storyboard_text', mockStoryboard)], {
+      'mock|mock-storyboard': { ok: 2, failed: 0, lastStatus: 'SUCCEEDED', lastAt: '2026-10-19T08:00:00.000Z', lastKind: 'unknown' },
+    })
+    expect(ran.get('storyboard_text')).toEqual({ demo: true, verifiedRun: true })
+    const failedRun = mockSlotAnnotations([binding('storyboard_text', mockStoryboard)], {
+      'mock|mock-storyboard': { ok: 0, failed: 1, lastStatus: 'FAILED', lastAt: '2026-10-19T08:00:00.000Z', lastKind: 'quota' },
+    })
+    // 「已验证运行」答的是有没有真跑过，不是质量——质量另有 callBlocked 说。
+    expect(failedRun.get('storyboard_text')?.verifiedRun).toBe(true)
+  })
+
+  it('真供应商也在供应的槽位不算演示位', () => {
+    const annotations = mockSlotAnnotations([binding('storyboard_text', mockStoryboard), binding('storyboard_text', imageCap)])
+    expect(annotations.get('storyboard_text')?.demo).toBe(false)
+  })
+
+  it('没跑过 mock 的槽位不进标注；mock 供应其他槽位互不影响', () => {
+    const annotations = mockSlotAnnotations([binding('image_gen', imageCap)])
+    expect(annotations.has('storyboard_text')).toBe(false)
+    expect(annotations.get('image_gen')?.demo).toBe(false)
   })
 })

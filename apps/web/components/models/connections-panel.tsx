@@ -2,10 +2,11 @@
 
 import { Fragment, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { capabilitySlots, modelModalities } from '@studio/domain'
+import { capabilitySlots, modelModalities, modalityInputs } from '@studio/domain'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   CircleAlertIcon,
+  ClockIcon,
   KeyRoundIcon,
   ListOrderedIcon,
   LoaderCircleIcon,
@@ -19,7 +20,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
 } from 'lucide-react'
-import type { Binding, Capability, Catalog, Connection, ProbeResponse, ProbeResult } from '@/lib/api'
+import { patchDurationEvidence, type Binding, type Capability, type Catalog, type Connection, type DurationEvidence, type ProbeResponse, type ProbeResult } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import type { AsyncState } from '@/lib/use-async'
@@ -232,6 +233,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
               probeAnchor={index === 0 ? 'probe-first' : undefined}
               onProbe={() => probe(connection)}
               onVerify={capability => void verifyModel(capability)}
+              onEvidenceSaved={connections.reload}
               onAddModel={() => setModelDialog(connection)}
               onDeleteCapability={capability => setDeleteTarget({ connection, capability })}
               onToggle={enabled => toggleEnabled(connection, enabled)}
@@ -318,6 +320,7 @@ interface ConnectionCardProps {
   probeAnchor?: string
   onProbe(): void
   onVerify(capability: Capability): void
+  onEvidenceSaved(): void
   onAddModel(): void
   onDeleteCapability(capability: Capability): void
   onToggle(enabled: boolean): void
@@ -332,6 +335,7 @@ function ConnectionCard({
   probeAnchor,
   onProbe,
   onVerify,
+  onEvidenceSaved,
   onAddModel,
   onDeleteCapability,
   onToggle,
@@ -511,6 +515,7 @@ function ConnectionCard({
                   locale={locale}
                   verifying={verifyingId === capability.id}
                   onVerify={() => onVerify(capability)}
+                  onEvidenceSaved={onEvidenceSaved}
                   onDelete={() => onDeleteCapability(capability)}
                 />
               ))}
@@ -528,17 +533,30 @@ interface CapabilityRowProps {
   locale: string
   verifying: boolean
   onVerify(): void
+  onEvidenceSaved(): void
   onDelete(): void
 }
 
-function CapabilityRow({ capability, locale, verifying, onVerify, onDelete }: CapabilityRowProps) {
+function CapabilityRow({ capability, locale, verifying, onVerify, onEvidenceSaved, onDelete }: CapabilityRowProps) {
   const { t } = useI18n()
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
+  const evidence = capability.durationEvidence
   return (
     <TableRow>
       <TableCell>
         <p className="font-medium">{capability.model}</p>
         {capability.displayName && capability.displayName !== capability.model && (
           <p className="text-muted-foreground text-xs">{capability.displayName}</p>
+        )}
+        {/* 实测/文档留痕挂在模型名下：预审门的上限就是按它算的，读数要跟模型放一起看。 */}
+        {evidence && (
+          <p className="text-muted-foreground text-xs">
+            {evidence.source === 'probe'
+              ? t('models.durationEvidenceProbe', { seconds: evidence.verifiedSeconds ?? 0, date: evidence.checkedAt })
+              : evidence.source === 'doc'
+                ? t('models.durationEvidenceDoc', { seconds: evidence.declaredSeconds ?? 0, date: evidence.checkedAt })
+                : t('models.durationEvidenceManual', { date: evidence.checkedAt })}
+          </p>
         )}
       </TableCell>
       <TableCell>
@@ -604,18 +622,170 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onDelete }: Ca
         )}
       </TableCell>
       <TableCell className="text-right">
-        <GuardedButton
-          action="providers:manage"
-          variant="ghost"
-          size="icon-sm"
-          className="text-destructive hover:text-destructive"
-          aria-label={t('models.deleteModel')}
-          onClick={onDelete}
-        >
-          <Trash2Icon />
-        </GuardedButton>
+        <div className="flex items-center justify-end gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex" tabIndex={0}>
+                <GuardedButton
+                  action="providers:manage"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t('models.durationEvidenceEdit')}
+                  onClick={() => setEvidenceOpen(true)}
+                >
+                  <ClockIcon />
+                </GuardedButton>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">{t('models.durationEvidenceHint')}</TooltipContent>
+          </Tooltip>
+          <GuardedButton
+            action="providers:manage"
+            variant="ghost"
+            size="icon-sm"
+            className="text-destructive hover:text-destructive"
+            aria-label={t('models.deleteModel')}
+            onClick={onDelete}
+          >
+            <Trash2Icon />
+          </GuardedButton>
+        </div>
       </TableCell>
+      <DurationEvidenceDialog
+        capability={capability}
+        open={evidenceOpen}
+        onClose={() => setEvidenceOpen(false)}
+        onSaved={() => {
+          setEvidenceOpen(false)
+          onEvidenceSaved()
+        }}
+      />
     </TableRow>
+  )
+}
+
+/**
+ * 一镜上限的「凭什么」：实测过的秒数会真的下调预检上限，文档/手记只做标注。
+ * 记错也要能撤回——null 是显式撤回，不是没填。
+ */
+function DurationEvidenceDialog({ capability, open, onClose, onSaved }: {
+  capability: Capability
+  open: boolean
+  onClose(): void
+  onSaved(): void
+}) {
+  const { t } = useI18n()
+  const { api } = useSession()
+  const existing = capability.durationEvidence
+  const [source, setSource] = useState<DurationEvidence['source']>(existing?.source ?? 'manual')
+  const [seconds, setSeconds] = useState(() => String(existing?.verifiedSeconds ?? existing?.declaredSeconds ?? ''))
+  const [checkedAt, setCheckedAt] = useState(existing?.checkedAt ?? new Date().toISOString().slice(0, 10))
+  const [url, setUrl] = useState(existing?.url ?? '')
+  const [note, setNote] = useState(existing?.note ?? '')
+  const [saving, setSaving] = useState(false)
+
+  const measured = Number(seconds)
+  const needsSeconds = source !== 'manual'
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (needsSeconds && !(Number.isFinite(measured) && measured > 0)) {
+      toast.error(t('models.durationEvidenceVerifiedRequired'))
+      return
+    }
+    const evidence: DurationEvidence = {
+      source,
+      checkedAt,
+      ...(needsSeconds && Number.isFinite(measured) && measured > 0
+        ? source === 'probe' ? { verifiedSeconds: measured } : { declaredSeconds: measured }
+        : {}),
+      ...(url.trim() ? { url: url.trim() } : {}),
+      ...(note.trim() ? { note: note.trim() } : {}),
+    }
+    setSaving(true)
+    try {
+      await patchDurationEvidence(api, capability.id, evidence)
+      toast.success(t('models.durationEvidenceSaved', { model: capability.model }))
+      onSaved()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function clear() {
+    setSaving(true)
+    try {
+      await patchDurationEvidence(api, capability.id, null)
+      toast.success(t('models.durationEvidenceCleared', { model: capability.model }))
+      onSaved()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={value => !value && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t('models.durationEvidenceTitle', { model: capability.model })}</DialogTitle>
+          <DialogDescription>{t('models.durationEvidenceHint')}</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={event => void submit(event)} className="space-y-3">
+          <Field label={t('models.durationEvidenceSource')}>
+            <Select value={source} onValueChange={value => setSource(value as DurationEvidence['source'])}>
+              <SelectTrigger aria-label={t('models.durationEvidenceSource')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="probe">{translateEnum(t, 'models.durationEvidenceSource', 'probe')}</SelectItem>
+                <SelectItem value="doc">{translateEnum(t, 'models.durationEvidenceSource', 'doc')}</SelectItem>
+                <SelectItem value="manual">{translateEnum(t, 'models.durationEvidenceSource', 'manual')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {needsSeconds && (
+            <Field label={t('models.durationEvidenceSeconds')}>
+              <Input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={seconds}
+                required
+                onChange={event => setSeconds(event.target.value)}
+                className="tabular-nums"
+              />
+            </Field>
+          )}
+          <Field label={t('models.durationEvidenceDate')}>
+            <Input type="date" value={checkedAt} required onChange={event => setCheckedAt(event.target.value)} />
+          </Field>
+          {source === 'doc' && (
+            <Field label={t('models.durationEvidenceUrl')}>
+              <Input type="url" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://" />
+            </Field>
+          )}
+          <Field label={t('models.durationEvidenceNote')}>
+            <Input value={note} onChange={event => setNote(event.target.value)} />
+          </Field>
+          <DialogFooter>
+            {existing && (
+              <Button type="button" variant="outline" className="text-destructive" disabled={saving} onClick={() => void clear()}>
+                {t('models.durationEvidenceClear')}
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? <LoaderCircleIcon className="animate-spin" /> : null}
+              {t('models.durationEvidenceSave')}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -757,7 +927,7 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
                 onChange={event => setAccessKey(event.target.value)}
                 placeholder={t('models.accessKeyPlaceholder')}
                 required={!editing}
-                autoComplete="off"
+                autoComplete="new-password"
               />
             </Field>
           )}
@@ -775,7 +945,10 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
               onChange={event => setApiKey(event.target.value)}
               placeholder={t('models.apiKeyPlaceholder')}
               required={!editing}
-              autoComplete="off"
+              // new-password 是拦浏览器密码管理器自动填充的标准开关——off 会被
+              // Chrome 忽略。曾发生:用户浏览器存过一条测试密钥,弹窗一开就被
+              // 自动填进密钥框,用户以为系统在偷填数据(2026-10-19 用户实测)。
+              autoComplete="new-password"
             />
           </Field>
 
@@ -848,7 +1021,7 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const videoInput = modality === 'i2v' || modality === 'r2v'
+  const inputs = modalityInputs(modality)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -862,7 +1035,7 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
           model: model.trim(),
           displayName: displayName.trim() || undefined,
           modality,
-          ...(videoInput ? { acceptsFirstFrame, acceptsReferenceImages, maxReferenceImages: Number(maxReferenceImages) } : {}),
+          ...(inputs.takesInput ? { ...(inputs.firstFrame ? { acceptsFirstFrame } : {}), acceptsReferenceImages, ...(acceptsReferenceImages ? { maxReferenceImages: Number(maxReferenceImages) } : {}) } : {}),
         }),
       })
       onAdded(created.model)
@@ -917,34 +1090,30 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
             </Select>
           </Field>
 
-          {videoInput && (
+          {inputs.takesInput && (
             <div className="space-y-3 rounded-lg border p-3">
-              {modality === 'i2v' && (
+              {inputs.firstFrame && (
                 <label className="flex items-center justify-between gap-3 text-sm">
                   <span>{t('models.firstFrame')}</span>
                   <Switch checked={acceptsFirstFrame} onCheckedChange={setAcceptsFirstFrame} />
                 </label>
               )}
-              {modality === 'r2v' && (
-                <>
-                  <label className="flex items-center justify-between gap-3 text-sm">
-                    <span>{t('models.referenceImages')}</span>
-                    <Switch checked={acceptsReferenceImages} onCheckedChange={setAcceptsReferenceImages} />
-                  </label>
-                  {acceptsReferenceImages && (
-                    <Field label={t('models.maxRefs')} htmlFor="modelMaxRefs">
-                      <Input
-                        id="modelMaxRefs"
-                        type="number"
-                        min={1}
-                        max={8}
-                        value={maxReferenceImages}
-                        onChange={event => setMaxReferenceImages(event.target.value)}
-                        className="w-24"
-                      />
-                    </Field>
-                  )}
-                </>
+              <label className="flex items-center justify-between gap-3 text-sm">
+                <span>{t('models.referenceImages')}</span>
+                <Switch checked={acceptsReferenceImages} onCheckedChange={setAcceptsReferenceImages} />
+              </label>
+              {acceptsReferenceImages && (
+                <Field label={t('models.maxRefs')} htmlFor="modelMaxRefs">
+                  <Input
+                    id="modelMaxRefs"
+                    type="number"
+                    min={1}
+                    max={8}
+                    value={maxReferenceImages}
+                    onChange={event => setMaxReferenceImages(event.target.value)}
+                    className="w-24"
+                  />
+                </Field>
               )}
             </div>
           )}

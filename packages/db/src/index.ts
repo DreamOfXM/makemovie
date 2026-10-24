@@ -115,7 +115,21 @@ export async function resolveArtifactOwnership(
     }
   }
 
-  // 3) 人工导入件:镜头指针列(配音/环境音)与导入关系给出镜头归属;导入即终态。
+  // 3) 人工导入件/本机渲染件:镜头指针列(配音/环境音/视频)或 artifact 自带的
+  //    storyboardId 给出镜头归属;导入与本机渲染即终态(没有任务可以失败)。
+  const ownedStoryboardId = artifact.storyboardId
+  if (ownedStoryboardId) {
+    const shot = await db.storyboard.findUnique({
+      where: { id: ownedStoryboardId },
+      include: { episode: { include: { project: { select: { organizationId: true } } } } },
+    })
+    if (shot && shot.episode.project.organizationId === organizationId) {
+      return {
+        organizationId, projectId: shot.episode.projectId, episodeId: shot.episodeId,
+        storyboardId: shot.id, origin: 'manual_import', terminal: true,
+      }
+    }
+  }
   const importing = await db.storyboard.findFirst({
     where: {
       OR: [
@@ -181,6 +195,8 @@ export interface SlotCandidate {
   acceptsReferenceImages: boolean
   /// 模型自述的能力规格(时长/分辨率等),分镜容量按它动态取值。
   spec: unknown
+  /// 实测/文档核对留痕。只有 probe 能自动下调有效上限,doc/manual 只做标注。
+  durationEvidence: unknown
 }
 
 /**
@@ -228,6 +244,7 @@ export async function resolveSlotCandidates(
       modality: binding.capability.modality,
       acceptsReferenceImages: binding.capability.acceptsReferenceImages,
       spec: binding.capability.spec,
+      durationEvidence: binding.capability.durationEvidence,
     })
   }
   return candidates.sort(compareSlotFallbacks)

@@ -40,10 +40,12 @@ describe('pollToSettled', () => {
 
   // The deadline is the injected one, so the wait is bounded by STUDIO_POLL_TIMEOUT_MS
   // rather than by the ceiling a real video vendor would always blow past.
-  it('fails the task once the injected deadline runs out', async () => {
+  // V01:本地等待超时是独立的 `timeout` 状态——上游没有确认失败,调用方按
+  // 「已受理待查询」处理(阻断+续查),不是 failed 烧下一候选。
+  it('reports a timeout as its own state once the injected deadline runs out', async () => {
     const startedAt = Date.now()
     const result = await pollToSettled(fakeAdapter([{ status: 'running' }]), capability, 'task-1', { intervalMs: 5, timeoutMs: 50 })
-    expect(result.status).toBe('failed')
+    expect(result.status).toBe('timeout')
     expect(result.error).toContain('did not settle within 50ms')
     expect(Date.now() - startedAt).toBeLessThan(5_000)
   })

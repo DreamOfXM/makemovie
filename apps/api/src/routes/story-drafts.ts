@@ -66,6 +66,7 @@ export async function storyDraftRoutes(app: FastifyInstance): Promise<void> {
       const parsed = parseDraft(request.body)
       if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
       const draft = await app.db.storyDraft.create({ data: { organizationId: auth.organizationId, userId: auth.userId, ...parsed.values } })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'story_saved', entityType: 'StoryDraft', entityId: draft.id, payload: { recipeKey: parsed.values.recipeKey } })
       return reply.code(201).send({ draft })
     },
   )
@@ -113,7 +114,11 @@ export async function storyDraftRoutes(app: FastifyInstance): Promise<void> {
       if (draft.consumedProjectId) {
         // 幂等重发:双击/断网重试返回已建项目,不重复建。
         const existing = await app.db.project.findFirst({ where: { id: draft.consumedProjectId, organizationId: auth.organizationId } })
-        if (existing) return reply.code(200).send({ project: existing, idempotentReplay: true })
+        if (existing) {
+          // P06 建项后直接进首集:重放路径同样要能一步落回创作现场。
+          const firstEpisode = await app.db.episode.findFirst({ where: { projectId: existing.id, number: 1 }, select: { id: true } })
+          return reply.code(200).send({ project: existing, idempotentReplay: true, firstEpisodeId: firstEpisode?.id ?? null })
+        }
         return reply.code(409).send({ error: 'draft was consumed but its project is gone' })
       }
 
@@ -134,7 +139,22 @@ export async function storyDraftRoutes(app: FastifyInstance): Promise<void> {
       // 保存草稿不建项目时不动项目表;建项目这一步不调用任何模型——第一集源文档
       // 直接落 SourceDocumentVersion(草稿正文),生成链留给用户在项目里显式触发。
       const title = draft.title ?? draft.storyText.slice(0, 40)
-      const project = await app.db.$transaction(async tx => {
+      // R07b 原子占用：条件 UPDATE 的行锁在事务内持有到提交——并发事务阻塞等待
+      // 提交后按已占用读到同一项目。'PENDING' 只在未提交的事务内存在，对外永不
+      // 可见；事务失败连同占位一起回滚，不会卡死草稿。
+      const result = await app.db.$transaction(async tx => {
+        const claim = await tx.storyDraft.updateMany({ where: { id: draft.id, consumedProjectId: null }, data: { consumedProjectId: 'PENDING' } })
+        if (claim.count === 0) {
+          const row = await tx.storyDraft.findUnique({ where: { id: draft.id }, select: { consumedProjectId: true } })
+          const existing = row?.consumedProjectId
+            ? await tx.project.findFirst({ where: { id: row.consumedProjectId, organizationId: auth.organizationId } })
+            : null
+          if (existing) {
+            const firstEpisode = await tx.episode.findFirst({ where: { projectId: existing.id, number: 1 }, select: { id: true } })
+            return { project: existing, replay: true, firstEpisodeId: firstEpisode?.id ?? null }
+          }
+          throw new Error('DRAFT_CONSUMED_PROJECT_GONE')
+        }
         const created = await tx.project.create({
           data: {
             organizationId: auth.organizationId,
@@ -155,15 +175,24 @@ export async function storyDraftRoutes(app: FastifyInstance): Promise<void> {
         await tx.sourceDocumentVersion.create({
           data: { episodeId: episode.id, version: 1, content: draft.storyText, checksum, status: 'DRAFT' },
         })
+        // 占位改最终值：行锁由同事务的条件 UPDATE 持有，id-only 写安全。
         await tx.storyDraft.update({ where: { id: draft.id }, data: { consumedProjectId: created.id } })
-        return created
+        return { project: created, replay: false, firstEpisodeId: episode.id }
+      }).catch(error => {
+        if (error instanceof Error && error.message === 'DRAFT_CONSUMED_PROJECT_GONE') {
+          return { error: 'draft was consumed but its project is gone' as const }
+        }
+        throw error
       })
+      if ('error' in result) return reply.code(409).send({ error: result.error })
+      const project = result.project
+      if (result.replay) return reply.code(200).send({ project, idempotentReplay: true, firstEpisodeId: result.firstEpisodeId ?? null })
       await recordAudit(app.db, {
         organizationId: auth.organizationId, userId: auth.userId,
         action: 'project.createFromStory', entityType: 'Project', entityId: project.id,
         payload: { draftId: draft.id, recipeKey: recipe.recipeKey, recipeVersion: recipe.version, format: prismaFormat },
       })
-      return reply.code(201).send({ project, idempotentReplay: false })
+      return reply.code(201).send({ project, idempotentReplay: false, firstEpisodeId: result.firstEpisodeId ?? null })
     },
   )
 }

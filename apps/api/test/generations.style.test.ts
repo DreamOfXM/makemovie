@@ -148,8 +148,9 @@ describe('generation style presets', () => {
     expect(res.statusCode).toBe(201)
     const prompt = await batchPrompt(res.json().batch.id)
     // ASSET 取质感层并显式声明版式优先（2026-09-28：完整剧照 directive 会把设定板打回单张照片）
-    expect(prompt).toContain('视觉风格（只约束色彩与质感')
-    expect(prompt).toContain('禁止输出单张剧照或场景背景')
+    expect(prompt).toContain('视觉风格（只约束色彩与质感，不改变上方描述的构图与版式')
+    // 守卫与素材类型无关：场景概念图要背景，旧文案「禁止输出场景背景」已撤。
+    expect(prompt).not.toContain('禁止输出单张剧照或场景背景')
     expect(prompt).toContain(anime.visualStyle)
     expect(prompt).not.toContain(cinematic.visualStyle)
     // 「严禁照片级真人质感」只属于没选风格的安装；选了动漫风，那句必须让位。

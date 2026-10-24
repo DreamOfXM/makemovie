@@ -92,6 +92,8 @@ model Composition {
   editRevisionId     String?
   /// US-028 内容指纹:编辑/素材/设置任何变化→指纹不匹配→旧渲染不能冒充当前。
   inputFingerprint   String?
+  /// 母带实测时长（ffprobe）。null = 从未探测；合成完成时由 worker 写入。
+  durationMs         Int?
   episode            Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 
@@ -134,6 +136,8 @@ model GenerationBatch {
   stage          Stage
   status         WorkflowStatus   @default(DRAFT)
   plannedCount   Int
+  /// US-035 暂停 Run:暂停停止该批次新任务派发(已受理调用照常结算),恢复后继续。
+  paused         Boolean          @default(false)
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   episode        Episode          @relation(fields: [episodeId], references: [id], onDelete: Cascade)
@@ -174,7 +178,16 @@ model GenerationTask {
   requestSnapshot                                        String?
   responseSnapshot                                       String?
   errorSnapshot                                          String?
+  /// 先问的落点：质检/技术失败停在「等你决定」时，这里存重抽类别、原因、
+  /// 已用额度与可选动作；人工重抽后写 retried，豁免后写 waived（含原因与审计人）。
+  /// null = 这个任务从未停下来问过。
+  reviewSnapshot                                         String?
   attempts                                               Int             @default(0)
+  /// V01 原子领取:fencing token——终态写回与续查都以「claimToken 仍是我的」为前提,
+  /// 防止租约易主后旧消费者覆盖新消费者的结果。
+  claimToken                                             String?
+  /// V01 租约:领取时写入;过期未续的 RUNNING 任务可被重投消费者接管并按台账续查。
+  leaseUntil                                             DateTime?
   createdAt                                              DateTime        @default(now())
   updatedAt                                              DateTime        @updatedAt
   storyboardId                                           String?
@@ -195,7 +208,7 @@ model MediaArtifact {
   organizationId      String
   taskId              String?
   stage               Stage?
-  /// 人工导入音频所属的镜头（生成产物的 artifact 不填，走 task 归属）。
+  /// 人工导入音频或本机渲染视频所属的镜头（模型生成产物的 artifact 不填，走 task 归属）。
   storyboardId        String?
   objectKey           String
   checksum            String
@@ -229,6 +242,9 @@ model ModelCapability {
   spec                   Json?
   probeStatus            String              @default("unverified")
   probeMessage           String?
+  /// 时长能力的证据（plan §4.2）：{source:'probe'|'doc'|'manual',url?,checkedAt,verifiedMs?,taskId?}。
+  /// spec.duration 是厂商声明，这里回答「凭什么信」；实测证伪时上限降到 verifiedMs。
+  durationEvidence       Json?
   entitlementVerifiedAt  DateTime?
   lastProbedAt           DateTime?
   credentialVerifiedAt   DateTime?
@@ -242,6 +258,11 @@ model Organization {
   id                 String               @id @default(cuid())
   name               String
   slug               String               @unique
+  /// §14/US-011 预扣账:组织同时在途(提交中+已受理未落定)的供应商调用上限;
+  /// null=不限。触发前预扣(计数入限),调用落定自动释放——并发提交不会超烧。
+  inFlightCallLimit  Int?
+  /// 新建作品时缺省的内容语言（zh/en）。只在建项那一刻读一次；改它不动任何已有作品。
+  defaultContentLocale String            @default("zh")
   createdAt          DateTime             @default(now())
   auditEvents        AuditEvent[]
   capabilityBindings CapabilityBinding[]
@@ -292,12 +313,15 @@ model ArtifactOperation {
   requestSnapshot  String
   errorSnapshot    String?
   /// US-019 采用策略:candidate_only(默认)/apply_if_empty/apply_if_unchanged。
-  applyPolicy      String        @default("candidate_only")
-  /// US-019 采用结果:pending/applied/skipped(+applyReason)。
+  applyPolicy      String        @default("candidate_only")  /// US-019 采用结果:pending/applied/skipped(+applyReason)。
   applyStatus      String?
   applyReason      String?
   /// US-019 镜头 CAS:自动采用前校验,冲突只保留候选。
   expectedShotRevision Int?
+  /// V01 原子领取:fencing token——终态写回以「claimToken 仍是我的」为前提。
+  claimToken           String?
+  /// V01 租约:领取时写入;过期未续的 RUNNING 操作可被重投消费者接管并按台账续查。
+  leaseUntil           DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   organization     Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -367,8 +391,17 @@ model Project {
   targetDurationMs     Int?
   stylePresetId        String?
   pipelineConfigId     String?
-  /// 审计不过线时的自动重抽上限（1-3）。null = 默认 2。花用户的钱，次数由项目主人定。
-  qcMaxAttempts        Int?
+  /// 单镜时长上限（毫秒），只接受 10/15/30 秒。null = 跟随绑定模型。
+  /// 只决定每镜的上限，不决定每镜实际长度；生效上限 = min(项目, 模型, 产品)。
+  maxShotDurationMs    Int?
+  /// 每镜重抽上限（次数，不含首次），0-3。null = 默认 1（等同迁移前的总尝试 2 次）。
+  maxRetriesPerShot    Int?
+  /// 技术失败（供应商/网络/空产物）处置：auto2 / auto1 / ask。null = auto2。
+  retryTechnical       String?
+  /// 一致性失败处置：ask / auto1 / auto2。null = ask。
+  retryConsistency     String?
+  /// 创作性失败处置：ask / auto1。null = ask。
+  retryCreative        String?
   /// US-008 只读示例:预生成素材带合法来源,可播放可复制为私人项目,不可在原地修改。
   isExample            Boolean  @default(false)
   /// 示例的素材来源与授权说明(外宣边界内的公开事实)。
@@ -384,6 +417,9 @@ model Project {
   /// null 按 beforeSpend 解释，即引入档位之前的行为。素材定稿与交付验收不受它影响，
   /// 那两处由 nextRunnableStage 的结构保证。取值见 @studio/domain 的 automationGates。
   automationGate       String?
+  /// 分镜节奏契约（JSON：avgShotMs / longTakeMinMs / longTakeShareMin）。
+  /// null = 用 DEFAULT_SHOT_RHYTHM，即引入节奏契约之前的行为。
+  shotRhythm           String?
   capabilityBindings   CapabilityBinding[]
   episodes             Episode[]
   organization         Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -488,6 +524,9 @@ model ScriptVersion {
   status           WorkflowStatus  @default(DRAFT)
   generationTaskId String?
   archivedAt       DateTime?
+  /// 批准时的节奏快照（JSON：settings / readings / gate / measuredAt）。
+  /// 存快照而不是每次重算：阈值以后改了，这一版当年按什么尺子量的不能变。
+  rhythm           String?
   episode          Episode         @relation(fields: [episodeId], references: [id], onDelete: Cascade)
   generationTask   GenerationTask? @relation(fields: [generationTaskId], references: [id])
   storyboards      Storyboard[]
@@ -570,6 +609,25 @@ model Storyboard {
   selectedFrameArtifactId                                     String?
   /// 场次归属（r06·A）：场次首镜的钦定首帧=该场主帧。null = 旧数据，不参与。
   sceneNumber                                                 Int?
+  /// 这一镜发生在哪（卧室/楼道/字卡…）。来自剧本分镜表的场景列；null = 剧本没写或旧数据。
+  location                                                    String?
+  /// 这一镜怎么产出（视频/字卡/屏幕录制/合成/UI）。非「视频」的镜头不进 IMAGE/VIDEO 计费队列。
+  method                                                      String?
+  /// 镜头类型（plan_2026-10-24 §3）：main/insert/reaction/ambience/card。主镜承载这一场
+  /// 最重要的连续动作或完整对白；null = 旧数据，按普通镜头处理。
+  shotRole                                                    String?
+  /// 转场决策（plan §5）：cut/dissolve/fade_in/fade_out/black/flash。默认硬切。
+  transition                                                  String            @default("cut")
+  /// 转场时长（毫秒）；cut 恒为 0。叠化/黑场过桥取 300–500ms。
+  transitionMs                                                Int               @default(0)
+  /// 镜内多句台词：[{speaker,text}]。后期配音下同一空间的双人对白可以一镜说完，
+  /// 不因「一个镜头一个说话人」把连续瞬间拆成两刀。null = 用 dialogue/speaker。
+  lines                                                       Json?
+  /// 这一镜的环境音床描述（剧本「声音」列：雨、脚步、电流、心跳…）。S4 声床消费。
+  ambience                                                    String?
+  /// 超长镜的批准决议（plan S2b）：strategy=同镜拼接/换模型时记下意图、上限、
+  /// 分段数与当选模型。null = 未超过上限或还没有被预检门问过。
+  durationPlan                                                Json?
   /// 配音钦定版：合成时的音轨。null = 自动取最新成功版。
   selectedVoiceArtifactId                                     String?
   /// 这一镜成片里听到什么。null = 按镜型默认（有台词=只用配音，无台词=只用原声）。
@@ -597,9 +655,37 @@ model Storyboard {
   batch                                                      GenerationBatch[]
   /// 这一镜导入过的音频文件（配音与环境音都在里面，由各自指针列决定哪条在播）。
   importedVoices          MediaArtifact[]   @relation("ImportedVoice")
+  takes                                                       ShotTake[]
 
   @@unique([episodeId, revision, number])
   @@index([episodeId, supersededAt])
+}
+
+/// 连续段（plan_2026-10-24 §4.4）：一颗镜头买不到的时长在镜内接成 N 段。
+/// 镜头卡上仍显示为一颗镜头；母带里同组 take 之间不加转场。四条不变量：
+/// 帧链（下一条首帧 === 上一条末帧）、同机位、同声床、同参考集。
+model ShotTake {
+  id                   String     @id @default(cuid())
+  storyboardId         String
+  /// 段序，从 1 起。一颗没有拆分的镜头只有 order=1 的存量包。
+  order                Int
+  plannedMs            Int
+  /// 这一段相对整镜提示词的增量（机位/动作延续/拆点说明）。
+  promptDelta          String     @default("")
+  /// 本条的条件帧。order>1 时必须等于上一条的 endFrameArtifactId（确定性判据）。
+  firstFrameArtifactId String?
+  /// 本条出片后由平台抽出的末帧；order<N 时它又是下一条的条件帧。
+  endFrameArtifactId   String?
+  videoArtifactId      String?
+  status               String     @default("DRAFT")
+  /// 人工选中：整镜的入片版本 = 这组 take，而不是单个 artifact。
+  selected             Boolean    @default(false)
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  storyboard           Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+
+  @@unique([storyboardId, order])
+  @@index([storyboardId])
 }
 
 // US-014 镜头结构化控制:景别/机位/运动/动作/情绪/负面约束,全部可选「自动」——
@@ -618,6 +704,59 @@ model ShotControl {
   storyboard     Storyboard @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
 }
 
+
+// US-035 提交尝试:每个逻辑任务/操作下的逐次上游调用留痕。合法路径
+// prepared→submitting→accepted→running→settled;submitting 失联→submission_unknown。
+// 迟到成功照常落盘标记 late_result,只作候选(除非 CAS 允许采用)。
+model SubmissionAttempt {
+  id             String   @id @default(cuid())
+  taskId         String?
+  operationId    String?
+  attemptNumber  Int
+  /// V01:同一次尝试内的提交槽位——候选链的第 N 个候选/分段分镜的第 N 段各自留痕,
+  /// (taskId, attemptNumber, slot) 唯一;同槽位重投即并发冲突,按恢复/未知处理。
+  slot           Int      @default(0)
+  /// V01 恢复身份:accepted 续查需要重建 adapter/capability——提交时记录,重启后可续。
+  provider       String?
+  connectionId   String?
+  capabilityId   String?
+  model          String?
+  /// 提交时的提示词长度——续查成功后记账 inputUnits 用,不重算(重算会带上重抽后缀)。
+  promptChars    Int?
+  requestKey     String?  // 幂等键(上游支持时使用)
+  providerTaskId String?  // 提交后尽快记录;null = 尚未提交或失联
+  status         String   @default("prepared") // prepared|submitting|accepted|running|settled|submission_unknown
+  resolution     String?  // settled 的结果:succeeded|failed|late_result
+  resultSnapshot String? // upstream completion, replayable until local persistence finishes
+  artifactId     String? // durable local checkpoint, including completed storyboard segments
+  errorSnapshot  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([taskId])
+  @@index([operationId])
+  @@unique([taskId, attemptNumber, slot])
+  @@unique([operationId, attemptNumber])
+}
+
+// US-011/035 提交幂等落库:同 requestKey(组织+操作+Idempotency-Key)先占位后执行。
+// 进程重启/多实例下同键同指纹=复用既有结果,同键异指纹=冲突;batchId 在执行成功后回填。
+model CreationRun {
+  id             String   @id @default(cuid())
+  organizationId String
+  requestKey     String   @unique
+  episodeId      String
+  stage          String
+  fingerprint    String
+  batchId        String?
+  inputSnapshot  String?
+  claimToken     String?
+  leaseUntil     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+}
 
 // US-023 编辑时间线:集级编辑 head + 不可变修订 JSON 文档 + editMedia 规范化缓存。
 // EpisodeEdit 每集一个 head;EpisodeEditRevision 唯一 (editId, revision),不可变。
@@ -786,6 +925,7 @@ enum CapabilitySlot {
   MUSIC_GEN
   VISUAL_AUDIT
   SFX
+  AUDIO_TRANSCRIBE
 }
 
 enum MemberRole {
@@ -834,4 +974,47 @@ enum WorkflowStatus {
   BLOCKED
   COMPLETED
   CANCELLED
+}
+
+// US-034 质量问题队列与人工裁决:findings 从 composition manifest 提升为可裁决行。
+// 裁决绑定指纹——重渲染产生新指纹后旧裁决标 stale,不沿用到新快照(§11.1)。
+model QualityFinding {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  episodeId           String
+  compositionId       String
+  /// 裁决有效性边界:composition 的 inputFingerprint(编辑指纹)。
+  fingerprint         String
+  /// 稳定标识(检查器:finding id),同合成重跑按 (compositionId, findingKey) 去重。
+  findingKey          String
+  /// file|video|audio|duration|content|aesthetic|continuity|asr
+  dimension           String
+  /// blocking|warning|info
+  severity            String
+  message             String
+  evidenceTimeSeconds Float?
+  artifactId          String?
+  storyboardId        String?
+  /// open|accepted|resolved|stale
+  status              String    @default("open")
+  decidedBy           String?
+  reason              String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([compositionId, findingKey])
+  @@index([organizationId, episodeId, status])
+}
+
+// §17/US-035 可恢复 outbox:DB 事务内先落投递意图,再推队列;崩溃后由对账扫描
+// 重投。BullMQ jobId=outbox id 保证消费端幂等去重。
+model JobOutbox {
+  id             String    @id @default(cuid())
+  organizationId String?
+  payload        String
+  status         String    @default("pending") // pending|dispatched
+  createdAt      DateTime  @default(now())
+  dispatchedAt   DateTime?
+
+  @@index([status, createdAt])
 }

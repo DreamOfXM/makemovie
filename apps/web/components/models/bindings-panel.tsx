@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { CircleAlertIcon, CircleHelpIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { CircleAlertIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { capabilitySlots, compareSlotFallbacks, slotModality, type CapabilitySlot } from '@studio/domain'
 import type { Binding, Connection, Project, ResolveResponse } from '@/lib/api'
 import { bindableCapabilities, candidatesForSlot, type BindableCapability } from '@/lib/models/readiness'
@@ -220,18 +220,7 @@ export function BindingsPanel({ connections, bindings, projectScope }: BindingsP
     <div id="bindings-panel" className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="space-y-1">
-          <div className="flex items-center gap-1.5">
-            <h2 className="text-base font-semibold flex items-center gap-1.5">{t('models.bindings')}<HelpHint text={t('models.bindingsHint')} /></h2>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span tabIndex={0} className="text-muted-foreground inline-flex cursor-help">
-                  <CircleHelpIcon className="size-3.5" />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-xs">{t('models.slotsHelp')}</TooltipContent>
-            </Tooltip>
-          </div>
-
+          <h2 className="text-base font-semibold flex items-center gap-1.5">{t('models.bindings')}<HelpHint text={t('models.bindingsHint')} /></h2>
         </div>
         <span id="bind-btn" className="inline-flex">
           <GuardedButton

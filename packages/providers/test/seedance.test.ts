@@ -101,10 +101,11 @@ describe('seedance request building', () => {
     expect(buildSeedanceProbeRequest(`${base}/`, API_KEY).url).toBe(`${base}/api/v3/models`)
   })
 
-  it('merges only the known top-level parameters', () => {
+  it('merges only the known top-level parameters, with the length mapped from the canonical field', () => {
     const req = buildSeedanceSubmitRequest(base, API_KEY, t2v(), request({
-      parameters: { duration: 5, resolution: '1080p', ratio: '16:9', watermark: false, seed: 42 },
+      parameters: { durationSeconds: 5, resolution: '1080p', ratio: '16:9', watermark: false, seed: 42 },
     }))
+    // toEqual on the whole body is also the assertion that `durationSeconds` never reaches Ark.
     expect(req.body).toEqual({
       model: 'doubao-seedance-1-0-pro-250528',
       content: [{ type: 'text', text: 'rain-soaked street at night, neon reflections' }],
@@ -117,8 +118,13 @@ describe('seedance request building', () => {
   })
 
   it('drops unknown and wrongly-typed parameters', () => {
-    expect(mergeSeedanceParameters({ size: '1024x1024', n: 1, duration: '5', seed: Number.NaN, ratio: '1:1' })).toEqual({ ratio: '1:1' })
+    // Neither spelling of the length passes the whitelist: the slot is the only door to it.
+    expect(mergeSeedanceParameters({ size: '1024x1024', n: 1, duration: '5', durationSeconds: 5, seed: Number.NaN, ratio: '1:1' })).toEqual({ ratio: '1:1' })
     expect(mergeSeedanceParameters({})).toEqual({})
+  })
+
+  it('refuses a length it cannot express instead of sending a broken one', () => {
+    expect(() => buildSeedanceSubmitRequest(base, API_KEY, t2v(), request({ parameters: { durationSeconds: 7.5 } }))).toThrow('whole number of positive seconds')
   })
 
   it('reads the prompt from input only', () => {
@@ -175,7 +181,7 @@ describe('seedance adapter submit', () => {
 
   it('takes the task id from the top level of the response', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { id: 'cgt-abc123', model: 'doubao-seedance-1-0-pro-250528' }))
-    const submitted = await adapter().submit(t2v(), request({ parameters: { duration: 5 } }))
+    const submitted = await adapter().submit(t2v(), request({ parameters: { durationSeconds: 5 } }))
     expect(submitted).toEqual({ taskId: 'cgt-abc123' })
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe(`${base}/api/v3/contents/generations/tasks`)
@@ -306,5 +312,28 @@ describe('seedance adapter probe', () => {
     fetchMock.mockResolvedValue(jsonResponse(200, {}))
     const result = await adapter().probe(t2v())
     expect(result).toEqual({ ok: false, status: 200, message: 'seedance probe: 2xx without a "data" model list' })
+  })
+
+  it('falls back to the OpenAI-style model list when a relay has no Ark one', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(404, { error: { message: 'Invalid URL' } }, false))
+      .mockResolvedValueOnce(jsonResponse(200, { object: 'list', data: [{ id: 'seedance-2.0-mini' }] }))
+    const relay = capability({ modality: 'i2v', acceptsFirstFrame: true, model: 'seedance-2.0-mini' })
+    const result = await adapter().probe(relay)
+    expect(result).toEqual({ ok: true, status: 200, message: 'probe ok for seedance-2.0-mini' })
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([`${base}/api/v3/models`, `${base}/v1/models`])
+  })
+
+  it('does not retry a relay probe when Ark answered something other than 404', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: { message: 'no access' } }, false))
+    expect(await adapter().probe(t2v())).toEqual({ ok: false, status: 403, message: 'no access' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('denies when neither model-list route exists', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { error: { message: 'Invalid URL' } }, false))
+    const result = await adapter().probe(t2v())
+    expect(result.ok).toBe(false)
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([`${base}/api/v3/models`, `${base}/v1/models`])
   })
 })

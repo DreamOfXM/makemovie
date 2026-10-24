@@ -16,6 +16,7 @@ import {
 } from '@studio/domain'
 import { listCatalogs } from '@studio/providers'
 import { probeFilterPresence } from '@studio/media'
+import { QC_THRESHOLD } from '@studio/pipeline'
 import { loadOrgModelPool } from '../lib/bindings.js'
 import { requirePermission } from '../plugins/auth.js'
 
@@ -74,6 +75,18 @@ export function systemRoutes(app: FastifyInstance): void {
           minimumConnections: minimumConnections(catalogs),
         },
       })
+    },
+  )
+
+  /**
+   * 只读的产品判据。设置页要写「判定合格线 70 分」，但那个阈值只存在于
+   * pipeline 里；页面自己再抄一份必然与生成端分叉，所以由这里下发。
+   */
+  app.get(
+    '/system/limits',
+    { preHandler: requirePermission('read') },
+    async (_request, reply) => {
+      return reply.send({ qcThreshold: QC_THRESHOLD })
     },
   )
 

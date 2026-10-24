@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { MediaArtifact } from '@studio/db'
 import { resolveSlotCandidates, resolveVideoArtifactShot } from '@studio/db'
+import { reserveOrganizationCalls, recordJobIntent } from '@studio/pipeline'
 import { createAdapter } from '@studio/providers'
 import { pipelineJobs } from '../lib/jobs.js'
 import { recordAudit } from '../lib/audit.js'
@@ -101,7 +102,9 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       const candidate = pool.find(item => typeof createAdapter(item.provider, { apiKey: '', baseUrl: '' }).extend === 'function')
       if (!candidate) return reply.code(409).send({ error: 'no bound video model supports extend' })
 
-      const operation = await app.db.artifactOperation.create({
+      const operation = await app.db.$transaction(async tx => {
+        if (!await reserveOrganizationCalls(tx, auth.organizationId, 1)) return null
+        const operation = await tx.artifactOperation.create({
         data: {
           organizationId: auth.organizationId,
           kind: 'video_extend',
@@ -114,7 +117,11 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
           applyPolicy,
           expectedShotRevision,
         },
+        })
+        await recordJobIntent(tx, { kind: 'run-artifact-operation', operationId: operation.id, organizationId: auth.organizationId, attempt: 1, candidate: { connectionId: candidate.connectionId, capabilityId: candidate.capabilityId, provider: candidate.provider, model: candidate.model } })
+        return operation
       })
+      if (!operation) return reply.code(429).send({ error: 'pipeline:inFlightBudget', reasons: ['organization call reservations exhausted'] })
       await enqueueJob({ kind: 'run-artifact-operation', operationId: operation.id, organizationId: auth.organizationId, attempt: 1, candidate: { connectionId: candidate.connectionId, capabilityId: candidate.capabilityId, provider: candidate.provider, model: candidate.model } })
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
@@ -127,4 +134,59 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(202).send({ operation: { id: operation.id, kind: operation.kind, status: operation.status, sourceArtifactId: artifact.id, durationMs } })
     },
   )
+  // US-021+022 定向编辑:对已有视频下达修改指令,保留未提及区域。
+  app.post<{ Params: { artifactId: string }; Body: { instruction?: unknown; applyPolicy?: unknown } }>(
+    '/artifacts/:artifactId/edit-video',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const instruction = typeof request.body?.instruction === 'string' ? request.body.instruction.trim() : ''
+      if (instruction === '') return reply.code(400).send({ error: 'instruction is required (what to change)' })
+
+      const artifact = await app.db.mediaArtifact.findFirst({
+        where: { id: request.params.artifactId, organizationId: auth.organizationId },
+      })
+      if (!artifact) return reply.code(404).send({ error: 'artifact not found' })
+      if (!artifact.mimeType.startsWith('video/')) return reply.code(400).send({ error: 'editVideo works on video artifacts only' })
+      const shotContext = await resolveVideoArtifactShot(app.db, artifact.id, auth.organizationId)
+      if (!shotContext) return reply.code(400).send({ error: 'artifact has no shot to edit for' })
+
+      // 候选:适配器实现了 editVideo 的模型。
+      const pool = [
+        ...(await resolveSlotCandidates(app.db, auth.organizationId, shotContext.projectId, 'video_t2v')),
+        ...(await resolveSlotCandidates(app.db, auth.organizationId, shotContext.projectId, 'video_i2v')),
+      ]
+      const candidate = pool.find(item => typeof createAdapter(item.provider, { apiKey: '', baseUrl: '' }).editVideo === 'function')
+      if (!candidate) return reply.code(409).send({ error: 'no bound video model supports directed editing' })
+
+      const applyPolicy = typeof request.body?.applyPolicy === 'string' ? request.body.applyPolicy : 'candidate_only'
+      const operation = await app.db.$transaction(async tx => {
+        if (!await reserveOrganizationCalls(tx, auth.organizationId, 1)) return null
+        const operation = await tx.artifactOperation.create({
+        data: {
+          organizationId: auth.organizationId,
+          kind: 'video_edit',
+          sourceArtifactId: artifact.id,
+          connectionId: candidate.connectionId,
+          capabilityId: candidate.capabilityId,
+          provider: candidate.provider,
+          model: candidate.model,
+          requestSnapshot: JSON.stringify({ input: { prompt: instruction }, parameters: {}, sourceArtifactId: artifact.id, storyboardId: shotContext.storyboardId, applyPolicy }),
+          applyPolicy,
+        },
+        })
+        await recordJobIntent(tx, { kind: 'run-artifact-operation', operationId: operation.id, organizationId: auth.organizationId, attempt: 1, candidate: { connectionId: candidate.connectionId, capabilityId: candidate.capabilityId, provider: candidate.provider, model: candidate.model } })
+        return operation
+      })
+      if (!operation) return reply.code(429).send({ error: 'pipeline:inFlightBudget', reasons: ['organization call reservations exhausted'] })
+      await enqueueJob({ kind: 'run-artifact-operation', operationId: operation.id, organizationId: auth.organizationId, attempt: 1, candidate: { connectionId: candidate.connectionId, capabilityId: candidate.capabilityId, provider: candidate.provider, model: candidate.model } })
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId, userId: auth.userId,
+        action: 'artifact.editVideo', entityType: 'ArtifactOperation', entityId: operation.id,
+        payload: { sourceArtifactId: artifact.id, instruction: instruction.slice(0, 200), model: candidate.model },
+      })
+      return reply.code(202).send({ operation: { id: operation.id, kind: 'video_edit', status: operation.status, instruction } })
+    },
+  )
+
 }

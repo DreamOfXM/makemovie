@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, TaskStatus, WorkflowStatus } from '@studio/db'
 import { syncBatchStatus } from '@studio/db'
-import { COMPOSITION_STEP, QC_THRESHOLD, advancePipeline, buildGenerationPlan, createComposition, generationStages, isGenerationStage, liveStoryboards, toApiStage, triggerStage, type GenerationStage } from '@studio/pipeline'
+import { COMPOSITION_STEP, QC_THRESHOLD, advancePipeline, buildGenerationPlan, createComposition, generationStages, isGenerationStage, liveStoryboards, parseGenerationReview, recordAssetVersion, toApiStage, triggerStage, type GenerationReviewSnapshot, type GenerationStage } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -43,6 +43,17 @@ function parseRetryTrace(snapshot: string | null): RetryTraceDto | null {
   }
 }
 
+/** 豁免落版本时补上这次请求的提示词:快照由本服务提交时写入,解析失败不阻断豁免。 */
+function promptFromSnapshot(snapshot: string | null): string {
+  if (!snapshot) return ''
+  try {
+    const parsed = JSON.parse(snapshot) as { input?: { prompt?: unknown } }
+    return typeof parsed.input?.prompt === 'string' ? parsed.input.prompt : ''
+  } catch {
+    return ''
+  }
+}
+
 interface TaskDto {
   id: string
   stage: GenerationStage
@@ -63,6 +74,8 @@ interface TaskDto {
    *  而最后一次不是最高那次 —— 历史栏写「最高分」只能靠这个全量列表。 */
   scores: number[]
   retryTrace: RetryTraceDto | null
+  /** 「先问」的当前状态：pending = 任务停下等人决定；retried / waived = 已裁决，保留原因与计数。 */
+  review: GenerationReviewSnapshot | null
 }
 
 interface BatchDto {
@@ -94,6 +107,28 @@ interface GenerationBody {
   promptNote?: string
   regenerate?: boolean
   styleId?: string
+  /** 人已看过整集时长缺口并确认继续；没有它就拒绝整集视频触发。 */
+  acceptDurationGap?: boolean
+  /** 超长镜的逐镜决议：同镜拼接或换模型。拆成两镜要先改分镜，不在生成里执行。 */
+  durationDecisions?: Array<{ storyboardId: string; strategy: 'splice' | 'split' | 'switch_model'; capabilityId?: string }>
+}
+
+const DURATION_STRATEGIES = ['splice', 'split', 'switch_model'] as const
+
+/** 解析并拒绝整条决议里的任何一条坏数据，而不是悄悄丢掉它。 */
+function parseDurationDecisions(value: unknown): GenerationBody['durationDecisions'] | null {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return null
+  const parsed: NonNullable<GenerationBody['durationDecisions']> = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null
+    const row = entry as { storyboardId?: unknown; strategy?: unknown; capabilityId?: unknown }
+    if (typeof row.storyboardId !== 'string' || row.storyboardId === '') return null
+    if (typeof row.strategy !== 'string' || !DURATION_STRATEGIES.includes(row.strategy as typeof DURATION_STRATEGIES[number])) return null
+    if (row.capabilityId !== undefined && typeof row.capabilityId !== 'string') return null
+    parsed.push({ storyboardId: row.storyboardId, strategy: row.strategy as typeof DURATION_STRATEGIES[number], ...(row.capabilityId ? { capabilityId: row.capabilityId } : {}) })
+  }
+  return parsed
 }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
@@ -125,6 +160,7 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
     qc: newest ? { kind: newest.kind, score: newest.score, status: newest.status } : null,
     scores: own.flatMap(check => (check.score === null ? [] : [check.score])),
     retryTrace: parseRetryTrace(task.responseSnapshot),
+    review: parseGenerationReview(task.reviewSnapshot),
   }
 }
 
@@ -181,15 +217,21 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       const auth = request.auth!
       const stage = request.body?.stage
       if (!isGenerationStage(stage)) return reply.code(400).send({ error: `stage must be one of: ${generationStages.join(', ')}` })
+      const durationDecisions = parseDurationDecisions(request.body?.durationDecisions)
+      if (durationDecisions === null) return reply.code(400).send({ error: 'durationDecisions is malformed' })
       const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, {
         storyboardIds: request.body?.storyboardIds,
         assetIds: request.body?.assetIds,
         promptNote: request.body?.promptNote?.slice(0, 500),
         regenerate: request.body?.regenerate === true,
         styleId: request.body?.styleId,
+        acceptDurationGap: request.body?.acceptDurationGap === true,
+        durationDecisions,
       })
       if (!result.ok) return reply.code(result.code).send({ error: result.error, ...(result.reasons ? { reasons: result.reasons } : {}) })
-      return reply.code(result.created ? 201 : 200).send({ batch: await toBatchDto(app.db, result.batchId) })
+      // created:false 是命中了已有幂等结果(同键已成功/已阻塞/停在问询),没有新任务也没有新花费。
+      // 客户端必须据此区分「已排队」和「什么都没发生」,否则 200 会被当成又一次成功提交。
+      return reply.code(result.created ? 201 : 200).send({ created: result.created, batch: await toBatchDto(app.db, result.batchId) })
     },
   )
 
@@ -327,6 +369,77 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       await syncBatchStatus(app.db, batch.id)
       await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'generation.cancel', entityType: 'generation-batch', entityId: batch.id, payload: { stage: toApiStage(batch.stage), cancelled: count } })
       return { cancelled: count, batch: await toBatchDto(app.db, batch.id) }
+    },
+  )
+
+  // 先问的出口：一致性/创作性失败停在「等你决定」后，人在这里选择再买一次或收下。
+  // 重抽按快照里原样保存的候选链重排下一 attempt，不受策略/每镜上限/每集额度拦截
+  // ——那三样只约束自动重抽，人工决定永远有效。豁免的理由选填：填了同时进任务快照
+  // 与审计，没填就只记「谁在什么时候收下了」；两种都要把被豁免产物从待审改为通过，
+  // 否则下游（首帧喂 i2v、成片合成）仍会把它当成未过审而拒用，豁免就成了一个只改标签
+  // 不改行为的假动作。
+  app.post<{ Params: { taskId: string }; Body: { action?: string; reason?: string } }>(
+    '/generations/tasks/:taskId/review',
+    { preHandler: requirePermission('generation:trigger') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const action = request.body?.action
+      if (action !== 'retry' && action !== 'waive') return reply.code(400).send({ error: "action must be 'retry' or 'waive'" })
+      const reason = request.body?.reason?.trim()
+
+      const task = await app.db.generationTask.findFirst({ where: { id: request.params.taskId, organizationId: auth.organizationId } })
+      if (!task) return reply.code(404).send({ error: 'task not found' })
+      const review = parseGenerationReview(task.reviewSnapshot)
+      if (!review) return reply.code(409).send({ error: 'task has no pending review' })
+      if (review.state !== 'pending') return reply.code(409).send({ error: 'review already decided' })
+      if (task.status !== 'FAILED') return reply.code(409).send({ error: 'only failed tasks can be reviewed' })
+      if (action === 'waive' && !review.artifactId) return reply.code(409).send({ error: 'nothing to waive: the task produced no judged artifact' })
+      if (action === 'retry' && review.candidates.length === 0) return reply.code(409).send({ error: 'review snapshot carries no candidate chain to retry' })
+
+      const decided: GenerationReviewSnapshot = {
+        ...review,
+        state: action === 'retry' ? 'retried' : 'waived',
+        decidedAt: new Date().toISOString(),
+        decidedBy: auth.userId,
+        ...(action === 'waive' && reason ? { waiveReason: reason.slice(0, 500) } : {}),
+      }
+      // CAS 在 reviewSnapshot 原文上：两个人同时点，只有一个能把 pending 改写成功。
+      const applied = await app.db.$transaction(async tx => {
+        const written = await tx.generationTask.updateMany({
+          where: { id: task.id, status: 'FAILED', reviewSnapshot: task.reviewSnapshot },
+          data: {
+            status: action === 'retry' ? 'QUEUED' : 'SUCCEEDED',
+            errorSnapshot: null,
+            reviewSnapshot: JSON.stringify(decided),
+          },
+        })
+        if (written.count !== 1) return false
+        if (action === 'waive' && review.artifactId) {
+          await tx.qualityCheck.updateMany({ where: { artifactId: review.artifactId, status: 'NEEDS_REVIEW' }, data: { status: 'APPROVED' } })
+          // 被豁免的产物就是这一次的交付:不落版本,素材卡会显示「0 版」,下游也找不到
+          // 可用图。版本同样记为 DRAFT——豁免只免了重抽,不等于替用户签了「通过」。
+          await recordAssetVersion(tx as unknown as PrismaClient, task, review.artifactId, promptFromSnapshot(task.requestSnapshot))
+        }
+        return true
+      })
+      if (!applied) return reply.code(409).send({ error: 'review already decided' })
+
+      const attempt = action === 'retry' ? task.attempts + 1 : task.attempts
+      if (action === 'retry') {
+        await enqueueJob({ kind: 'run-task', taskId: task.id, organizationId: auth.organizationId, attempt, candidates: review.candidates })
+      }
+      await syncBatchStatus(app.db, task.batchId)
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: action === 'retry' ? 'generation.retry' : 'generation.waive',
+        entityType: 'generation-task',
+        entityId: task.id,
+        payload: { batchId: task.batchId, stage: toApiStage(task.stage), retryClass: review.retryClass, askReason: review.askReason, attempt, ...(reason ? { reason: reason.slice(0, 500) } : {}) },
+      })
+      const updated = await app.db.generationTask.findUniqueOrThrow({ where: { id: task.id }, include: { mediaArtifacts: true } })
+      const [dto] = await toTaskDtos(app.db, [updated])
+      return { task: dto }
     },
   )
 

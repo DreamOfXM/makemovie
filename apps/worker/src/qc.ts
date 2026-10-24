@@ -26,20 +26,68 @@ export interface QcSubject {
   workdir: string
   durationMs?: number
   /**
+   * US-032 FR-Q04: the task the artifact belongs to. When present, the model
+   * checker enforces the per-task audit-call budget before dialing the provider
+   * (the count is one query over the qualityCheck rows this task already wrote).
+   * Older callers that omit it are simply not budget-gated.
+   */
+  taskId?: string
+  /**
    * The shot's own frame, as the inline image this task actually sent to the video model.
    * Present only when conditioning happened, and shared rather than re-encoded: an auditor
    * that judges the clip against a different image than the model did is judging nothing.
    */
   referenceDataUrl?: string
+  /**
+   * SD-098: what the script asked this shot to show. The auditor otherwise compares the
+   * sampled frames against the first frame alone, so a fade-to-black or a character the
+   * shot itself introduces reads as a continuity break — and the fix costs another paid
+   * roll for doing exactly what was written. Absent for artifacts with no shot behind
+   * them (assets, storyboards) and for older callers.
+   */
+  shotIntent?: ShotIntent
+}
+
+/**
+ * The two shot fields that decide whether a change of picture is a defect: what the
+ * shot asked to happen, and the state its last frame owes the next shot.
+ */
+export interface ShotIntent {
+  description: string
+  continuityOut: string
+}
+
+/** US-032: one structured problem the auditor saw, pinned to a frame when it can be. */
+export interface AuditFinding {
+  dimension: 'content' | 'aesthetic' | 'continuity'
+  severity: 'warning' | 'info'
+  message: string
+  /**
+   * The timestamp of the sampled frame the problem is visible at. `null` = the
+   * model named no time point (or the artifact is a still image): evidence stays
+   * unpinned rather than pinned to a guess.
+   */
+  evidenceTimeSeconds: number | null
+}
+
+/** US-032: the per-frame 0..1 score the multi-point audit asks the model for. */
+export interface AuditFrameScore {
+  /** Relative position inside the clip (0..1), matching the prompt's frame labels. */
+  position: number
+  score: number
 }
 
 /**
  * `unjudged` is not a soft pass and not a soft fail: the audit could not happen,
  * so the score stays null and the caller must not regenerate the artifact.
+ *
+ * `findings`/`frameScores` are US-032 evidence only: they ride along on scored
+ * verdicts and never influence the pass/rework decision, which stays a function
+ * of `score` and `QC_THRESHOLD` alone.
  */
 export type QcVerdict =
-  | { kind: QcKind; decision: 'pass'; score: number }
-  | { kind: QcKind; decision: 'rework'; score: number; reasons: string[] }
+  | { kind: QcKind; decision: 'pass'; score: number; findings?: AuditFinding[]; frameScores?: AuditFrameScore[] }
+  | { kind: QcKind; decision: 'rework'; score: number; reasons: string[]; findings?: AuditFinding[]; frameScores?: AuditFrameScore[] }
   | { kind: QcKind; decision: 'unjudged'; reasons: string[] }
 
 export interface QualityChecker {

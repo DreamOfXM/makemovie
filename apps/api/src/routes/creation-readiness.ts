@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { wiredRequiredSlots, type CapabilitySlot } from '@studio/domain'
 import { listCatalogs } from '@studio/providers'
 import { gapSlots, planAutoBind, readyCount, requiredSlotCoverage, slotReadiness, minimumConnections } from '@studio/domain'
-import { loadOrgModelPool, createBinding } from '../lib/bindings.js'
+import { loadProjectModelPool, createBinding } from '../lib/bindings.js'
 import { recommendedForPredicate } from './bindings.js'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -20,7 +20,9 @@ export async function creationReadinessRoutes(app: FastifyInstance): Promise<voi
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'project not found' })
-      const { connections, bindings } = await loadOrgModelPool(app.db, auth.organizationId)
+      // R03:项目就绪必须消费目标项目的有效视图(组织继承+本项目覆盖),与执行器同一语义;
+      // 其他项目的专属绑定不可见,否则 B 会拿 A 的配置误报就绪。
+      const { connections, bindings } = await loadProjectModelPool(app.db, auth.organizationId, project.id)
       const readiness = slotReadiness(connections, bindings, {})
       const catalogs = listCatalogs()
       const required = wiredRequiredSlots()
@@ -66,7 +68,8 @@ export async function creationReadinessRoutes(app: FastifyInstance): Promise<voi
       const auth = request.auth!
       const project = await app.db.project.findFirst({ where: { id: request.params.projectId, organizationId: auth.organizationId } })
       if (!project) return reply.code(404).send({ error: 'project not found' })
-      const { connections, bindings } = await loadOrgModelPool(app.db, auth.organizationId)
+      // 自动绑定规划同样吃项目有效视图:只补本项目的真实缺口,不把别家项目的绑定当已有配置。
+      const { connections, bindings } = await loadProjectModelPool(app.db, auth.organizationId, project.id)
       const plan = planAutoBind(connections, bindings, wiredRequiredSlots(), recommendedForPredicate())
       if (plan.planned.length === 0) {
         return reply.code(409).send({ error: 'nothing to bind', unfulfilled: plan.unfulfilled })
@@ -79,7 +82,7 @@ export async function creationReadinessRoutes(app: FastifyInstance): Promise<voi
         else skipped.push(`${choice.slot}: ${result.error}`)
       }
       if (created.length > 0) {
-        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'binding.autoProject', entityType: 'Project', entityId: project.id, payload: { created, skipped } })
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'model_setup_completed', entityType: 'Project', entityId: project.id, payload: { created, skipped } })
       }
       return reply.code(201).send({ created, skipped, unfulfilled: plan.unfulfilled })
     },

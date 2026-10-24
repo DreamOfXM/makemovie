@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { Prisma, type PrismaClient } from '@studio/db'
-import { modelModalities, isModelModality, reduceCallEvidence, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
+import { modelModalities, isModelModality, readDurationEvidence, reduceCallEvidence, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
 import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogModel, type ProviderAdapter, type ProviderCatalog } from '@studio/providers'
 import { decryptSecret, encryptSecret } from '@studio/security'
 import { recordAudit } from '../lib/audit.js'
@@ -323,9 +323,17 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const parsed = parseModelBody(request.body)
       if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
 
+      // A hand-entered row that names a model the vendor catalog already describes is not
+      // a hand-entered row: leaving its spec empty makes the worker drop the shot's planned
+      // length and bill at whatever the vendor defaults to (wan3.0 defaults to 1080P, the
+      // priciest tier). The operator typed the same words the catalog carries.
+      const officialSpec = getCatalog(connection.provider)?.models.find(
+        entry => entry.model === parsed.data.model && entry.modality === parsed.data.modality,
+      )?.spec
+
       try {
         const capability = await app.db.modelCapability.create({
-          data: { connectionId: connection.id, ...parsed.data },
+          data: { connectionId: connection.id, ...parsed.data, ...(officialSpec ? { spec: officialSpec as Prisma.InputJsonValue } : {}) },
         })
         await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.add', entityType: 'ModelCapability', entityId: capability.id, payload: { connectionId: connection.id, provider: connection.provider, model: capability.model, modality: capability.modality } })
         return reply.code(201).send(capability)
@@ -335,6 +343,34 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         }
         throw error
       }
+    },
+  )
+
+  /**
+   * Records what this connection actually did, or what its doc says, next to the
+   * declared duration. Only `probe` lowers the effective max; doc/manual remain labels.
+   * The endpoint refuses a probe without a measured length: "we tried" is not evidence.
+   */
+  app.patch<{ Params: { capabilityId: string }; Body: { durationEvidence?: unknown } }>(
+    '/providers/capabilities/:capabilityId/duration-evidence',
+    { preHandler: requirePermission('providers:manage') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const capability = await findCapability(app.db, request.params.capabilityId, auth.organizationId)
+      if (!capability) return reply.code(404).send({ error: 'capability not found' })
+      // null 是显式撤回（记错/换了供应商），不是「没填」；两者不能混成同一条路径。
+      const clearing = request.body?.durationEvidence === null
+      const evidence = clearing ? undefined : readDurationEvidence(request.body?.durationEvidence)
+      if (!clearing && !evidence) return reply.code(400).send({ error: 'duration evidence needs source (probe|doc|manual) and checkedAt (YYYY-MM-DD)' })
+      if (evidence?.source === 'probe' && evidence.verifiedSeconds === undefined) {
+        return reply.code(400).send({ error: 'a probe must carry verifiedSeconds — the longest clip it actually produced' })
+      }
+      await app.db.modelCapability.update({
+        where: { id: capability.id },
+        data: { durationEvidence: clearing ? Prisma.DbNull : (evidence as unknown as Prisma.InputJsonValue) },
+      })
+      await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.durationEvidence', entityType: 'ModelCapability', entityId: capability.id, payload: { model: capability.model, modality: capability.modality, cleared: clearing, ...evidence } })
+      return { capabilityId: capability.id, durationEvidence: evidence ?? null }
     },
   )
 
@@ -559,8 +595,8 @@ function parseModelBody(body: ModelBody | undefined): ParsedModelBody {
   const acceptsReferenceImages = Boolean(body?.acceptsReferenceImages)
   // Refusing beats dropping: a row that quietly lost the flag the operator set would
   // fail at generation time with a message about reference media, far from here.
-  // First frames stay a video dialect, but reference images are not: qwen-image-edit
-  // is an image model that draws its subject from approved asset sheets, so an image
+  // First frames stay a video dialect, but reference images are not: the qwen-image editing
+  // models are image models that draw their subject from approved asset sheets, so an image
   // row may declare references — it just may not take a video's starting frame.
   if (modality !== 'i2v' && modality !== 'r2v' && modality !== 'image' && (acceptsFirstFrame || acceptsReferenceImages || maxReferenceImages > 0)) {
     return { ok: false, error: `first-frame and reference input describe video or image models, not a "${modality}" one` }

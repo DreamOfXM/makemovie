@@ -41,6 +41,8 @@ describe('planStoryboardSegments', () => {
     expect(segments[1]!.content).toContain('场景 4：')
     // 210 秒 / 5 秒 = 42 个镜头,两段等长 → 各 21;预算按字符占比折算。
     expect(segments.map(segment => segment.shotBudget)).toEqual([21, 21])
+    // 每段也拿到自己那份时长:两段等长,各 105 秒,分镜才能按段把总时长对上。
+    expect(segments.map(segment => segment.targetDurationMs)).toEqual([105_000, 105_000])
   })
 
   it('recognises SCENE markers and folds a preamble into the first block', () => {
@@ -68,6 +70,8 @@ describe('planStoryboardSegments', () => {
     // 609 秒 / 5 秒 ≈ 122 镜、五段等长 → 各 24;无时长的反推(~17.4 分钟 ≈ 208 镜)→ 各 42。
     expect(withDuration.map(segment => segment.shotBudget)).toEqual([24, 24, 24, 24, 24])
     expect(withoutDuration.map(segment => segment.shotBudget)).toEqual([42, 42, 42, 42, 42])
+    // 没有集时长的旧集不新增时长约束:prompt 的缺省路径保持不含总时长规则。
+    expect(withoutDuration.every(segment => segment.targetDurationMs === undefined)).toBe(true)
   })
 
   it('never hands a segment a zero budget, however small the block', () => {
@@ -77,6 +81,19 @@ describe('planStoryboardSegments', () => {
     for (const segment of segments) {
       expect(segment.shotBudget).toBeGreaterThanOrEqual(1)
     }
+  })
+
+  it('keeps a script with its own shot table in one call even past the length threshold', () => {
+    // 分镜表是一行一镜的契约:切块会把表撕开,每段都看不到完整行数。
+    const table = [
+      '场景 1：夜色',
+      '| # | 时间 | 时长 | 场景 | 画面 | 台词/VO | 声音 | 生成方式 |',
+      '|---|---|---|---|---|---|---|---|',
+      ...Array.from({ length: 3 }, (_, index) => `| ${index + 1} | 0:0${index}–0:0${index + 1} | 1s | ${index + 1} | 画面 ${index + 1} | — | 雨声 | 视频 |`),
+    ].join('\n')
+    const script = `${scene('1')}\n\n${'雨'.repeat(7_000)}\n\n${table}`
+    expect(shouldSplitStoryboard(script, 210_000, 5_000)).toBe(true)
+    expect(planStoryboardSegments(script, { targetDurationMs: 210_000, shotMs: 5_000 })).toEqual([])
   })
 })
 

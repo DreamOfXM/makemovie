@@ -53,7 +53,7 @@ describe('provider connections', () => {
   it('creates a connection with catalog capabilities and encrypts the api key', async () => {
     const owner = await env.register('mc-conn@example.com', 'Conn Org')
     const connection = await createMockConnection(owner.token, 'mock-main')
-    expect(connection.capabilities.length).toBe(11)
+    expect(connection.capabilities.length).toBe(12)
 
     const stored = await env.db.providerConnection.findUniqueOrThrow({ where: { id: connection.id } })
     expect(stored.encryptedSecret.startsWith('v1.')).toBe(true)
@@ -374,7 +374,7 @@ describe('models entered by hand', () => {
   it('accepts a named model, refuses to repeat one, and rejects a modality we do not speak', async () => {
     const owner = await env.register('mc-add@example.com', 'Add Model Org')
     const connection = await createMockConnection(owner.token, 'add-main')
-    expect(connection.capabilities).toHaveLength(11)
+    expect(connection.capabilities).toHaveLength(12)
 
     const added = await addModel(owner.token, connection.id, { model: '  qwen2.5-72b-instruct  ', modality: 'text', displayName: 'Lab Qwen' })
     expect(added.statusCode).toBe(201)
@@ -397,6 +397,31 @@ describe('models entered by hand', () => {
     expect(badModality.statusCode).toBe(400)
     expect(badModality.json().error).toContain('r2v')
     expect((await addModel(owner.token, connection.id, { model: 'x'.repeat(121), modality: 'text' })).statusCode).toBe(400)
+  })
+
+  it('seeds the catalog spec onto a hand-entered row the catalog already describes', async () => {
+    const owner = await env.register('mc-spec-seed@example.com', 'Spec Seed Org')
+    const created = await env.app.inject({
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'dashscope', name: 'bailian-hand', apiKey: 'sk-test' },
+    })
+    expect(created.statusCode).toBe(201)
+    const connectionId = created.json().id as string
+    const seeded = (created.json().capabilities as { model: string; modality: string; spec: unknown }[])
+      .find(row => row.model === 'wan3.0-video-prime' && row.modality === 'i2v')
+    expect(seeded?.spec).toMatchObject({ duration: { kind: 'range', min: 2, max: 30 }, resolutions: ['480P', '720P', '1080P'] })
+
+    // A connection older than the catalog row reaches the same model by hand. An empty spec
+    // makes the worker take the shot's planned length back out of the request and leave the
+    // resolution unpinned, so the clip bills at the vendor default (wan3.0: 5 s at 1080P).
+    await env.db.modelCapability.deleteMany({ where: { connectionId, model: 'wan3.0-video-prime' } })
+    const added = await addModel(owner.token, connectionId, { model: 'wan3.0-video-prime', modality: 'i2v', acceptsFirstFrame: true })
+    expect(added.statusCode).toBe(201)
+    expect(added.json().spec).toMatchObject({ duration: { kind: 'range', min: 2, max: 30 }, resolutions: ['480P', '720P', '1080P'] })
+
+    // A name the catalog has never heard of stays the operator's bare claim.
+    const unknown = await addModel(owner.token, connectionId, { model: 'my-fine-tune-2026', modality: 'i2v', acceptsFirstFrame: true })
+    expect(unknown.json().spec ?? null).toBeNull()
   })
 
   it('lets one vendor model name carry two modalities on the same connection', async () => {
@@ -439,7 +464,7 @@ describe('models entered by hand', () => {
     const honest = await addModel(owner.token, connection.id, { model: 'claim-r2v', modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
     expect(honest.statusCode).toBe(201)
     expect(honest.json()).toMatchObject({ modality: 'r2v', acceptsReferenceImages: true, maxReferenceImages: 3 })
-    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(12)
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(13)
   })
 
   it('blocks deleting a row a slot still points at, then lets it go', async () => {
@@ -474,7 +499,7 @@ describe('models entered by hand', () => {
     expect((await env.app.inject({ method: 'POST', url: `/api/providers/capabilities/${capabilityId}/probe`, headers: authHeaders(b.token) })).statusCode).toBe(404)
     expect((await env.app.inject({ method: 'DELETE', url: `/api/providers/capabilities/${capabilityId}`, headers: authHeaders(b.token) })).statusCode).toBe(404)
     expect((await addModel(a.token, 'does-not-exist', { model: 'mock-x', modality: 'text' })).statusCode).toBe(404)
-    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(11)
+    expect(await env.db.modelCapability.count({ where: { connectionId: connection.id } })).toBe(12)
   })
 })
 
@@ -749,9 +774,13 @@ describe('candidate resolution filtering', () => {
     // The console renders every one of these; a refactor must not drop a field.
     // connectionId is the one addition: the shared resolver returns what the
     // worker needs too, and the id is already exposed by GET /bindings.
+    // durationEvidence travels with the candidate because the preflight ceiling
+    // is computed from it (a probe that produced less than the declared max
+    // lowers the ceiling); leaving it out would make the console and the gate
+    // disagree about the same model.
     const [candidate] = scopedBody.candidates
     expect(Object.keys(candidate).sort()).toEqual([
-      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
+      'acceptsReferenceImages', 'bindingId', 'capabilityId', 'connectionId', 'connectionName', 'displayName', 'durationEvidence', 'modality', 'model', 'priority', 'provider', 'scope', 'spec',
     ])
     expect(candidate).toMatchObject({
       scope: 'project',

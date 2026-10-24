@@ -13,11 +13,20 @@ const REAL = {
   // 参数三种因并存，界面上只能说一种，说错就把人推向充值页。
   moderation:
     '["dashscope/wan2.2-t2i-flash: DataInspectionFailed | Input data may contain inappropriate content. For details, see: https://help.aliyun.com/zh/model-studio/error-code#inappropriate-content | request_id=06df0643", "dashscope/qwen-image-3.0: AllocationQuota.FreeTierOnly | Free quota exhausted.", "dashscope/qwen-image-3.0-pro: DataInspectionFailed | Green net check rejected text (input)", "dashscope/qwen-image-edit: InvalidParameter | For image editing, the message must contain 1~3 image content items. Got 0 image items."]',
+  // 2026-10-23 从第 1 集 16 个卡死镜头的 SubmissionAttempt.errorSnapshot 原样抄回：
+  // 火山同步回了「预扣费没通过」——钱没扣、单没接，可这套报文当年不在模式里，分类
+  // 落成 unknown → 台账按「上游可能已接单」永久占槽，界面重抽一次撞一次槽位。
+  seedanceQuota: 'insufficient_user_quota | 预扣费额度失败, 用户剩余额度: 灵感2.180000, 需要预扣费额度: 灵感2.300000',
 } as const
 
 describe('classifyFailure', () => {
   it('把额度耗尽认成 quota，而不是「没过线」', () => {
     expect(classifyFailure(REAL.quota)).toBe('quota')
+  })
+
+  it('火山的「预扣费额度失败」是额度，不是含糊的未知提交', () => {
+    expect(classifyFailure(REAL.seedanceQuota)).toBe('quota')
+    expect(isTerminalFailure(classifyFailure(REAL.seedanceQuota))).toBe(true)
   })
 
   it('认得 AccessDenied / InvalidParameter / 网络断 / 审计没过线', () => {

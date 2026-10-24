@@ -76,6 +76,7 @@ interface AudioDto {
 interface StoryboardListRow {
   id: string
   audioSource: string | null
+  ambience: string | null
   importedVoice: { id: string; filename: string | null; durationMs: number | null } | null
   importedAmbience: { id: string; filename: string | null; durationMs: number | null } | null
   voice: { id: string; filename: string | null } | null
@@ -421,6 +422,38 @@ describe('ambience import', () => {
     }
     // 被拒的导入不许留下半条文件：版本号与文件数都得原地不动。
     expect(await env.db.mediaArtifact.count({ where: { storyboardId: spokenId, stage: 'AUDIO' } })).toBe(before)
+  })
+
+  /**
+   * 「声音」列是剧本写给这一镜的氛围底，平台不生成环境音，所以它唯一的出路是被看见。
+   * 库里存的是作者原话（分镜 prompt 明确允许写「无」，英文项目按输出语言写 none），
+   * API 不许把它归一成 null 也不许改一个字——归一化是消费侧的事，前端要靠这一列分得出
+   * 「剧本没点」「点了没导」和「导了但不是这条」，而这三档在「已导入的底」上是看不出来的。
+   */
+  it('carries the script\'s sound column to the workbench without rewriting it', async () => {
+    const asked = '巷口雨声压过远处的车流'
+    const res = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${muteId}`, headers: authHeaders(editorToken), payload: { ambience: ` ${asked} ` },
+    })
+    expect(res.statusCode).toBe(200)
+    expect((await env.db.storyboard.findUniqueOrThrow({ where: { id: muteId }, select: { ambience: true } })).ambience).toBe(asked)
+
+    const list = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(viewerToken) })
+    expect((list.json() as StoryboardListRow[]).find(row => row.id === muteId)?.ambience).toBe(asked)
+
+    const board = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/shotboard`, headers: authHeaders(viewerToken) })
+    const shot = (board.json().shots as { id: string; ambience: string | null; importedAmbience: { id: string } | null }[]).find(item => item.id === muteId)
+    expect(shot?.ambience).toBe(asked)
+    // 这一列与「导入的底」是两件事：写了要什么不代表已经有,所以指针照旧是空的。
+    expect(shot?.importedAmbience).toBeNull()
+
+    // 作者说「无」是一句有内容的指示，不是没填：原样存，前端才不必猜这一镜到底欠不欠底。
+    await env.app.inject({ method: 'PATCH', url: `/api/storyboards/${muteId}`, headers: authHeaders(editorToken), payload: { ambience: '无' } })
+    expect((await env.db.storyboard.findUniqueOrThrow({ where: { id: muteId }, select: { ambience: true } })).ambience).toBe('无')
+
+    const cleared = await env.app.inject({ method: 'PATCH', url: `/api/storyboards/${muteId}`, headers: authHeaders(editorToken), payload: { ambience: '' } })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json().ambience).toBeNull()
   })
 })
 

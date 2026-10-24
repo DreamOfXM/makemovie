@@ -1,24 +1,24 @@
 const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
-const MOTION_RULE_ZH = '运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定或极缓慢推近。'
+const MOTION_RULE_ZH = '运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定、不推不拉。'
 
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { rmSync, writeFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Prisma, type CapabilitySlot } from '@studio/db'
 import { MOCK_SCRIPT_TEXT, MOCK_SCRIPT_TEXT_EN, MOCK_STORYBOARD_JSON, MOCK_STORYBOARD_JSON_EN, MOCK_VLM_VERDICT, MockProviderAdapter } from '@studio/providers'
-import { advancePipeline, generationSeed, planComposition, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
-import { toReferenceImage } from '@studio/media'
+import { advancePipeline, compositionCutChanged, createComposition, generationSeed, planComposition, readCompositionReview, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
+import { AUDIO_BRIDGE_PRE_MS, AUDIO_BRIDGE_TAIL_MS, probeDuration, synthesizeMockMedia, toReferenceImage } from '@studio/media'
 import { encryptSecret } from '@studio/security'
 import type { RunTaskCandidate } from '@studio/jobs'
 import { composeEpisode } from '../src/compose.js'
 import { recordGeneratedContent } from '../src/content.js'
 import type { QcSubject, QualityChecker } from '../src/qc.js'
-import { pinBilledParameters, runTask } from '../src/run-task.js'
+import { measureMissingMeta, pinBilledParameters, runTask } from '../src/run-task.js'
 import { runArtifactOperation } from '../src/run-artifact-operation.js'
 import { ModelQualityChecker } from '../src/visual-audit.js'
 import { MASTER_KEY, startTestEnv, type Seed, type WorkerTestEnv } from './env.js'
@@ -112,51 +112,56 @@ describe('run-task', () => {
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
 
-  it('reworks a rejected artifact up to the default two attempts, then fails the task', async () => {
-    // 默认上限 2026-09-29 从 3 调到 2（每次重抽都计费，花几次由不得机器慷慨）；
-    // 项目可用 Project.qcMaxAttempts 调回 3——下一用例覆盖。
+  it('stops and asks on the first creative rework under the default policy', async () => {
+    // 2026-10-19 拍板：创作性失败默认先问。首次判回不自动重抽，任务停下并留下
+    // 一份 pending 快照——候选链原样保存，人工「重抽」直接复用。
     const seed = await env.seed()
     const deps = env.deps({ qcMode: 'fail', pollIntervalMs: 10 })
 
     await runTask(env.runPayload(seed, 1), deps)
-    const running = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
-    expect(running.status).toBe('RUNNING')
-
-    const second = await env.takeWaitingRunTasks()
-    expect(second.map(payload => payload.attempt)).toEqual([2])
-    expect(second[0]!.candidates).toEqual(seed.candidates)
-    await runTask(second[0]!, deps)
 
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
-    expect(task.attempts).toBe(2)
-    expect(task.errorSnapshot).toBe('fake-qc: threshold not met after 2 attempts')
+    expect(task.attempts).toBe(1)
+    const review = JSON.parse(task.reviewSnapshot!) as {
+      state: string
+      retryClass: string
+      policy: string
+      askReason: string
+      attempt: number
+      retriesUsed: number
+      candidates: unknown[]
+    }
+    expect(review).toMatchObject({ state: 'pending', retryClass: 'creative', policy: 'ask', askReason: 'policy', attempt: 1, retriesUsed: 0 })
+    expect(review.candidates).toEqual(seed.candidates)
 
     const checks = await env.db.qualityCheck.findMany({ where: { artifact: { taskId: seed.taskId } } })
-    expect(checks).toHaveLength(2)
-    expect(checks.every(check => check.status === 'NEEDS_REVIEW' && check.kind === 'fake-qc' && check.score === 0.1)).toBe(true)
-    expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(2)
+    expect(checks).toHaveLength(1)
+    expect(checks[0]).toMatchObject({ status: 'NEEDS_REVIEW', kind: 'fake-qc', score: 0.1 })
+    expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(1)
     expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
   })
 
-  it('honors a per-project re-roll limit of 3 and carries the audit rejection into the retry prompt', async () => {
+  it('auto-retries once when creative failures are set to auto1, then asks', async () => {
     const seed = await env.seed()
-    // 项目把上限调回 3——上限是花钱决策，归项目主人。
-    await env.db.project.update({ where: { id: seed.projectId }, data: { qcMaxAttempts: 3 } })
+    // 每镜上限 3（新建项目的界面默认值）：这里要验的是策略只买到一次，而不是上限先到。
+    await env.db.project.update({ where: { id: seed.projectId }, data: { retryCreative: 'auto1', maxRetriesPerShot: 3 } })
     const deps = env.deps({ qcMode: 'fail', pollIntervalMs: 10 })
 
     await runTask(env.runPayload(seed, 1), deps)
     const second = (await env.takeWaitingRunTasks())[0]!
+    expect(second.attempt).toBe(2)
+    expect(second.candidates).toEqual(seed.candidates)
     await runTask(second, deps)
-    const third = (await env.takeWaitingRunTasks())[0]!
-    expect(third.attempt).toBe(3)
-    await runTask(third, deps)
 
+    // 策略只买到一次自动重抽；第二次判回就停下问，不是继续烧。
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
-    expect(task.attempts).toBe(3)
-    expect(task.errorSnapshot).toBe('fake-qc: threshold not met after 3 attempts')
+    expect(task.attempts).toBe(2)
+    const review = JSON.parse(task.reviewSnapshot!) as { state: string; policy: string; askReason: string; retryClass: string; retriesUsed: number }
+    expect(review).toMatchObject({ state: 'pending', retryClass: 'creative', policy: 'auto1', askReason: 'policy', retriesUsed: 1 })
 
     // 返工抽必须带着审计否决原因（2026-09-29 用户拍板）：同一提示词盲抽是烧钱。
     const logs = await env.db.generationLog.findMany({ where: { taskId: seed.taskId, event: 'qc.reworkPrompt' } })
@@ -164,19 +169,32 @@ describe('run-task', () => {
     expect(JSON.stringify(logs[0]!.data)).toContain('below threshold')
   })
 
-  it('fails with per-candidate errors when no candidate is usable', async () => {
+  it('auto-retries technical failures up to the default two, then asks', async () => {
     const seed = await env.seed({ connectionEnabled: false })
-    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    await env.db.project.update({ where: { id: seed.projectId }, data: { maxRetriesPerShot: 3 } })
+    const deps = env.deps({ qcMode: 'pass', pollIntervalMs: 10 })
 
+    await runTask(env.runPayload(seed, 1), deps)
+    const second = (await env.takeWaitingRunTasks())[0]!
+    expect(second.attempt).toBe(2)
+    await runTask(second, deps)
+    const third = (await env.takeWaitingRunTasks())[0]!
+    expect(third.attempt).toBe(3)
+    await runTask(third, deps)
+
+    // 技术档默认自动 2 次（attempt 2、3）；第 3 次仍失败才停下问。
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
+    expect(task.attempts).toBe(3)
     const errors = JSON.parse(task.errorSnapshot!) as string[]
     expect(errors).toHaveLength(1)
     expect(errors[0]).toContain('mock/mock-t2v')
     expect(errors[0]).toContain('unavailable')
+    const review = JSON.parse(task.reviewSnapshot!) as { state: string; retryClass: string; askReason: string; kind: string }
+    expect(review).toMatchObject({ state: 'pending', retryClass: 'technical', askReason: 'policy', kind: 'provider-exhausted' })
     expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(0)
     expect(await env.db.qualityCheck.count({ where: { artifact: { taskId: seed.taskId } } })).toBe(0)
-    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
 
   it('leaves a cancelled task untouched', async () => {
@@ -324,31 +342,97 @@ describe('model-driven visual audit', () => {
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
 
-  it('reworks a rejected artifact through the retry path', async () => {
+  it('asks on a rejected artifact, and a continuity finding is classed as consistency', async () => {
     const seed = await env.seed()
+    // 创作性给了自动额度也不该吞掉一致性问题：连续性优先归类，默认先问（Q3）。
+    await env.db.project.update({ where: { id: seed.projectId }, data: { retryCreative: 'auto1' } })
     const rejecting: QualityChecker = {
       async check() {
-        return { kind: 'visual-audit', decision: 'rework', score: 0.2, reasons: ['lead actor is missing from the shot'] }
+        return {
+          kind: 'visual-audit',
+          decision: 'rework',
+          score: 0.2,
+          reasons: ['lead actor is missing from the shot'],
+          findings: [{ dimension: 'continuity', severity: 'warning', message: 'lead actor is missing from the shot', evidenceTimeSeconds: 0.5 }],
+        }
       },
     }
     const deps = modelDeps(rejecting)
 
     await runTask(env.runPayload(seed, 1), deps)
-    const second = await env.takeWaitingRunTasks()
-    expect(second.map(payload => payload.attempt)).toEqual([2])
-    await runTask(second[0]!, deps)
 
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
     expect(task.status).toBe('FAILED')
-    expect(task.attempts).toBe(2)
-    expect(task.errorSnapshot).toBe('visual-audit: threshold not met after 2 attempts')
+    expect(task.attempts).toBe(1)
+    const review = JSON.parse(task.reviewSnapshot!) as {
+      state: string
+      retryClass: string
+      kind: string
+      findings: Array<{ dimension: string }>
+      artifactId: string | null
+    }
+    expect(review).toMatchObject({ state: 'pending', retryClass: 'consistency', kind: 'visual-audit' })
+    expect(review.findings[0]).toMatchObject({ dimension: 'continuity' })
 
     const checks = await env.db.qualityCheck.findMany({ where: { artifact: { taskId: seed.taskId } } })
-    expect(checks).toHaveLength(2)
-    expect(checks.every(check => check.status === 'NEEDS_REVIEW' && check.kind === 'visual-audit' && check.score === 0.2)).toBe(true)
-    expect(JSON.parse(checks[0]!.report)).toMatchObject({ reasons: ['lead actor is missing from the shot'] })
+    expect(checks).toHaveLength(1)
+    expect(checks[0]).toMatchObject({ status: 'NEEDS_REVIEW', kind: 'visual-audit', score: 0.2 })
+    expect(review.artifactId).toBe(checks[0]!.artifactId)
     expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+  })
+
+  // SD-098: an auditor that only ever sees the first frame scores a scripted fade-out as
+  // the scene breaking apart, and the only remedy it offers is another paid take. The
+  // shot's own script therefore has to reach the checker — from the task's storyboard.
+  it('hands the checker what the shot asked to show, and nothing when no shot is behind the task', async () => {
+    const seen: QcSubject[] = []
+    const spy: QualityChecker = {
+      async check(subject) {
+        seen.push(subject)
+        return { kind: 'visual-audit', decision: 'pass', score: 1 }
+      },
+    }
+
+    const seed = await env.seed()
+    const shot = seed.storyboardIds[0]!
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: '灯逐盏熄灭，一个弯腰的黑影拾起电缆', continuityOut: '林栖独自站在黑暗里' } })
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { storyboardId: shot } })
+    await runTask(env.runPayload(seed), modelDeps(spy))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.shotIntent).toEqual({ description: '灯逐盏熄灭，一个弯腰的黑影拾起电缆', continuityOut: '林栖独自站在黑暗里' })
+
+    // A queued task with no shot behind it gets no intent rather than a fabricated one,
+    // and the audit prompt then keeps its old absolute continuity rule.
+    const unbound = await env.seed()
+    seen.length = 0
+    await runTask(env.runPayload(unbound), modelDeps(spy))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.shotIntent).toBeUndefined()
+  })
+
+  it('stops on the episode budget even when the policy still allows an auto retry', async () => {
+    const seed = await env.seed({ connectionEnabled: false })
+    const shot = seed.storyboardIds[0]!
+    // 1 镜 × 每镜上限 3 = 额度 3。另一条镜头任务已经用掉 2 次重抽，本任务只剩 1 次：
+    // 首次失败自动重抽，第二次失败时额度见底——策略 auto2 还剩一次也不许再买。
+    await env.db.project.update({ where: { id: seed.projectId }, data: { maxRetriesPerShot: 3 } })
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { storyboardId: shot } })
+    await env.db.generationTask.create({
+      data: { organizationId: seed.organizationId, batchId: seed.batchId, stage: 'VIDEO', status: 'SUCCEEDED', attempts: 3, storyboardId: shot },
+    })
+    const deps = env.deps({ qcMode: 'pass', pollIntervalMs: 10 })
+
+    await runTask(env.runPayload(seed, 1), deps)
+    const second = (await env.takeWaitingRunTasks())[0]!
+    expect(second.attempt).toBe(2)
+    await runTask(second, deps)
+
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('FAILED')
+    const review = JSON.parse(task.reviewSnapshot!) as { askReason: string; budgetUsed: number; budgetLimit: number; retryClass: string }
+    expect(review).toMatchObject({ askReason: 'budget', budgetUsed: 3, budgetLimit: 3, retryClass: 'technical' })
   })
 
   it('approves a video through a frame extracted by ffmpeg', async () => {
@@ -511,6 +595,284 @@ describe('asset-approval gate', () => {
     expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'FIRST_FRAME' } })).toBe(0)
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
+
+  it('leaves a failed task stopped for a decision alone when a plain trigger collides', async () => {
+    // 停在问询上的 FAILED 欠的不是一次自动重抽,而是人先回答抽不抽;普通触发若把
+    // 它当失败复活,人还没看到问询面板,这一镜就又被买了一次。
+    const seed = await env.seed({ storyboards: 2 })
+    await approveScript(seed)
+    await bindImageSlot(seed)
+    const scene = await env.db.asset.create({ data: { episodeId: seed.episodeId, kind: 'scene', name: '青石巷', description: '夜色下的青石板路', status: 'APPROVED' } })
+    for (const storyboardId of seed.storyboardIds as string[]) {
+      await env.db.storyboardAsset.create({ data: { storyboardId, assetId: scene.id, role: 'scene' } })
+    }
+    const first = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
+    expect(first.ok).toBe(true)
+    const queued = await env.takeWaitingRunTasks()
+    expect(queued).toHaveLength(2)
+
+    const reviewSnapshot = JSON.stringify({
+      state: 'pending',
+      retryClass: 'creative',
+      kind: 'visual-audit',
+      reasons: [],
+      findings: [{ dimension: 'aesthetic', message: '招牌上的英文清晰可辨' }],
+      score: 0.42,
+      attempt: 2,
+      cap: 3,
+      retriesUsed: 1,
+      budgetLimit: 6,
+      budgetUsed: 1,
+      policy: 'ask',
+      autoRetries: 0,
+      askReason: 'policy',
+      candidates: queued[0]!.candidates,
+      artifactId: null,
+      error: 'below threshold',
+      createdAt: new Date().toISOString(),
+    })
+    const tasks = await env.db.generationTask.findMany({ where: { batchId: (first as { batchId: string }).batchId } })
+    for (const task of tasks) {
+      await env.db.generationTask.update({
+        where: { id: task.id },
+        data: { status: 'FAILED', attempts: 2, provider: 'mock', model: 'mock-image', errorSnapshot: 'below threshold', reviewSnapshot },
+      })
+    }
+
+    const again = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
+    expect(again.ok).toBe(true)
+    if (again.ok) expect(again.created).toBe(false)
+
+    const stored = await env.db.generationTask.findMany({ where: { batchId: (first as { batchId: string }).batchId } })
+    expect(stored.every(task => task.status === 'FAILED' && task.attempts === 2 && task.reviewSnapshot === reviewSnapshot)).toBe(true)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+  })
+})
+
+/**
+ * UX-P01（2026-10-19 实测 UX-04 根因二）：显式重试的提交身份。撞键重试把 FAILED
+ * 任务按 attempt 1 重新入队，而上一轮真实烧过的 SubmissionAttempt 台账还占着
+ * (taskId, 1, slot)——旧候选的失败检查点被套到新候选头上，改绑后的模型整排被
+ * 「previous candidate already failed」跳过。重试必须按既有契约换基到新 attempt
+ * （任务行 attempt 递增、新 jobId、新台账空间）；submission_unknown 的停止续烧与
+ * 查单保护不得放松。
+ */
+describe('explicit retry identity (UX-P01)', () => {
+  /** 把一个已验证的 mock 文本模型绑到分镜槽位，优先级决定它在候选链里的顺位。 */
+  async function bindStoryboardModel(seed: Seed, model: string, priority: number): Promise<RunTaskCandidate> {
+    const connection = await env.db.providerConnection.create({
+      data: {
+        organizationId: seed.organizationId,
+        provider: 'mock',
+        name: `storyboard-${model}-${randomUUID().slice(0, 8)}`,
+        baseUrl: 'mock://local',
+        encryptedSecret: encryptSecret('storyboard-key', MASTER_KEY),
+        capabilities: { create: [{ model, modality: 'text', entitlementVerifiedAt: new Date() }] },
+      },
+    })
+    const capability = await env.db.modelCapability.findFirstOrThrow({ where: { connectionId: connection.id } })
+    await env.db.capabilityBinding.create({
+      data: { organizationId: seed.organizationId, slot: 'STORYBOARD_TEXT', capabilityId: capability.id, priority },
+    })
+    return { connectionId: connection.id, capabilityId: capability.id, provider: 'mock', model }
+  }
+
+  it('runs the rebound model on a fresh attempt instead of tripping over the old settled ledger', async () => {
+    // 复刻现场：分镜槽位绑上 mock-script（文本类模型），真实烧一次——mock 按模型名
+    // 回剧本文本，分镜解析失败，留下 settled/content_rejected 台账。
+    const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await approveScript(seed)
+    await bindStoryboardModel(seed, 'mock-script', 10)
+    const first = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'STORYBOARD')
+    expect(first.ok).toBe(true)
+    const [firstJob] = await env.takeWaitingRunTasks()
+    expect(firstJob!.candidates.map(candidate => candidate.model)).toEqual(['mock-script'])
+    await runTask(firstJob!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const failed = await env.db.generationTask.findUniqueOrThrow({ where: { id: firstJob!.taskId } })
+    expect(failed.status).toBe('FAILED')
+    expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
+    // 本案钉的是「失败任务撞键重排」的提交身份,不是 Q3 的先问闸门:摘掉问询快照,
+    // 还原成已裁决 / 迁移前的普通失败,让重排路径照旧可测(先问另有用例守着)。
+    await env.db.generationTask.update({ where: { id: firstJob!.taskId }, data: { reviewSnapshot: null } })
+    const deadLedger = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: firstJob!.taskId, attemptNumber: 1, slot: 0 } },
+    })
+    expect(deadLedger.status).toBe('settled')
+    expect(deadLedger.resolution).toBe('content_rejected')
+
+    // 人工改绑：mock-storyboard 优先级更高，重试的候选链里它排第一。
+    await bindStoryboardModel(seed, 'mock-storyboard', 20)
+    const second = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'STORYBOARD')
+    expect(second.ok).toBe(true)
+    if (second.ok) expect(second.created).toBe(false)
+    const [retryJob] = await env.takeWaitingRunTasks()
+    expect(retryJob!.attempt).toBe(1)
+    expect(retryJob!.candidates.map(candidate => candidate.model)).toEqual(['mock-storyboard', 'mock-script'])
+
+    // 修复点：这封 attempt 1 投递不再被旧台账拦死，而是换基到全新 attempt 2
+    // （新 jobId、新台账空间）让当前绑定真正执行。
+    await runTask(retryJob!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const [rebased] = await env.takeWaitingRunTasks()
+    expect(rebased).toBeDefined()
+    expect(rebased!.attempt).toBe(2)
+    expect(rebased!.taskId).toBe(retryJob!.taskId)
+    expect(rebased!.candidates).toEqual(retryJob!.candidates)
+    await expect(env.db.jobOutbox.findUniqueOrThrow({ where: { id: `intent-run-${retryJob!.taskId}-2` } })).resolves.toBeTruthy()
+
+    await runTask(rebased!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: retryJob!.taskId } })
+    expect(succeeded.status).toBe('SUCCEEDED')
+    expect(succeeded.model).toBe('mock-storyboard')
+    expect(succeeded.attempts).toBe(2)
+
+    // 旧失败提交原样留证（审计链不动），新 attempt 在自己的空间里落定成功。
+    const preserved = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: retryJob!.taskId, attemptNumber: 1, slot: 0 } },
+    })
+    expect(preserved.resolution).toBe('content_rejected')
+    expect(preserved.model).toBe('mock-script')
+    const fresh = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: retryJob!.taskId, attemptNumber: 2, slot: 0 } },
+    })
+    expect(fresh.model).toBe('mock-storyboard')
+    expect(fresh.resolution).toBe('succeeded')
+
+    const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId } })
+    expect(boards).toHaveLength(MOCK_STORYBOARD.shots.length)
+  })
+
+  it('a stale redelivery of the same attempt still skips the settled candidate instead of re-billing it', async () => {
+    // 崩溃重放语义保持不变：投递的 attempt 与任务行相等（没有重试重置的落差）时，
+    // 已终局失败的槽位让位下一候选，绝不重新提交、绝不换基。
+    const seed = await env.seed({ model: 'mock-script', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    const mockStoryboard = await bindStoryboardModel(seed, 'mock-storyboard', 20)
+    const dead = await env.db.submissionAttempt.create({
+      data: {
+        taskId: seed.taskId,
+        attemptNumber: 1,
+        slot: 0,
+        status: 'settled',
+        resolution: 'failed',
+        provider: 'mock',
+        model: 'mock-script',
+        connectionId: seed.connectionId,
+        capabilityId: seed.capabilityId,
+        promptChars: 40,
+      },
+    })
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { status: 'QUEUED', attempts: 1 } })
+
+    await runTask(
+      { kind: 'run-task', taskId: seed.taskId, organizationId: seed.organizationId, attempt: 1, candidates: [seed.candidates[0]!, mockStoryboard] },
+      env.deps({ qcMode: 'pass', pollIntervalMs: 10 }),
+    )
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    expect(task.model).toBe('mock-storyboard')
+    // 槽位 0 的旧失败行原样只有一条（没被重提、没被换基），槽位 1 是新提交。
+    expect(await env.db.submissionAttempt.count({ where: { taskId: seed.taskId, attemptNumber: 1, slot: 0 } })).toBe(1)
+    const slotOne = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: seed.taskId, attemptNumber: 1, slot: 1 } },
+    })
+    expect(slotOne.model).toBe('mock-storyboard')
+    expect(await env.db.submissionAttempt.count({ where: { taskId: seed.taskId } })).toBe(2)
+    expect(dead.resolution).toBe('failed')
+  })
+
+  it('a submission_unknown ledger stays fail-closed through the retry path — no re-submit, no rebase', async () => {
+    // 未知提交是安全边界：上游可能已接单。显式重试落到这种任务上，也必须被
+    // 台账唯一键挡回 BLOCKED「人工查单」，绝不自动换基、绝不再提交。
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await approveScript(seed)
+    await env.db.generationTask.update({
+      where: { id: seed.taskId },
+      data: { idempotencyKey: `${seed.episodeId}:STORYBOARD:${seed.episodeId}`, status: 'BLOCKED', attempts: 1, errorSnapshot: 'submission unknown — manual verification required' },
+    })
+    await env.db.submissionAttempt.create({
+      data: {
+        taskId: seed.taskId,
+        attemptNumber: 1,
+        slot: 0,
+        status: 'submission_unknown',
+        errorSnapshot: 'socket hang up',
+        provider: 'mock',
+        model: 'mock-storyboard',
+        connectionId: seed.connectionId,
+        capabilityId: seed.capabilityId,
+        promptChars: 40,
+      },
+    })
+    await bindStoryboardModel(seed, 'mock-storyboard', 20)
+
+    // 撞键重试会把 BLOCKED 一并复活重排（triggerStage 的 retryable 语义）。
+    const retry = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'STORYBOARD')
+    expect(retry.ok).toBe(true)
+    const [retryJob] = await env.takeWaitingRunTasks()
+    expect(retryJob).toBeDefined()
+
+    await runTask(retryJob!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('BLOCKED')
+    expect(task.errorSnapshot).toContain('refusing to re-submit')
+    // 台账没有第二行，也没有任何新投递——查单人工裁决是唯一出口。
+    expect(await env.db.submissionAttempt.count({ where: { taskId: seed.taskId } })).toBe(1)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+  })
+
+  it('an unknown submission the provider actually rejected (预扣费额度失败) unblocks the retry instead of occupying the slot forever', async () => {
+    // 2026-10-23 实测：第 1 集 16 个镜头全部 BLOCKED，每次点「生成视频片段」都撞回
+    // 「submission ledger slot (1/0) is already occupied」。台账里那行 submission_unknown
+    // 是火山同步回的「预扣费额度失败」——没接单、没扣钱，本该按 settled failed 让位，
+    // 却被当年的分类器当成含糊失败永久占槽，而 BLOCKED 任务没有审核快照，问询重抽
+    // /豁免端点够不到它。这条钉住：明确的「没接单」报文不锁死重抽路。
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await approveScript(seed)
+    await env.db.generationTask.update({
+      where: { id: seed.taskId },
+      data: { idempotencyKey: `${seed.episodeId}:STORYBOARD:${seed.episodeId}`, status: 'BLOCKED', attempts: 1, errorSnapshot: 'submission unknown — manual verification required' },
+    })
+    await env.db.submissionAttempt.create({
+      data: {
+        taskId: seed.taskId,
+        attemptNumber: 1,
+        slot: 0,
+        status: 'submission_unknown',
+        errorSnapshot: 'insufficient_user_quota | 预扣费额度失败, 用户剩余额度: 灵感2.180000, 需要预扣费额度: 灵感2.300000',
+        provider: 'mock',
+        model: 'mock-script',
+        connectionId: seed.connectionId,
+        capabilityId: seed.capabilityId,
+        promptChars: 40,
+      },
+    })
+    await bindStoryboardModel(seed, 'mock-storyboard', 20)
+
+    const retry = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'STORYBOARD')
+    expect(retry.ok).toBe(true)
+    const [retryJob] = await env.takeWaitingRunTasks()
+    expect(retryJob).toBeDefined()
+
+    await runTask(retryJob!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    const [rebased] = await env.takeWaitingRunTasks()
+    expect(rebased?.attempt).toBe(2)
+    await runTask(rebased!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    // 旧那行未知提交原样留证（谁占过槽、供应商当时答了什么），新提交落在自己的 attempt 空间。
+    const preserved = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: seed.taskId, attemptNumber: 1, slot: 0 } },
+    })
+    expect(preserved.status).toBe('submission_unknown')
+    const fresh = await env.db.submissionAttempt.findUniqueOrThrow({
+      where: { taskId_attemptNumber_slot: { taskId: seed.taskId, attemptNumber: 2, slot: 0 } },
+    })
+    expect(fresh.resolution).toBe('succeeded')
+    expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(MOCK_STORYBOARD.shots.length)
+  })
 })
 
 describe('asset-sheet references', () => {
@@ -527,7 +889,7 @@ describe('asset-sheet references', () => {
   it('plans a first frame carrying the approved asset sheets and sends them as reference images', async () => {
     const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '关师傅', description: '纸扎铺老师傅' } })
     await approveScript(seed)
-    await bindImageSlot(seed, 'qwen-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
+    await bindImageSlot(seed, 'mock-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
     const [shot] = seed.storyboardIds as [string]
     // 参考图只送画面文本提到的素材:描述里写明关师傅入场。
     await env.db.storyboard.update({ where: { id: shot }, data: { description: 'a rainy night market, 关师傅 stands at the door' } })
@@ -567,9 +929,9 @@ describe('asset-sheet references', () => {
     // candidate.params:付费请求实际按什么参数记账(种子/清晰度档)也是打点的一部分。
     const logs = await env.db.generationLog.findMany({ where: { taskId: task.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
     expect(logs.map(log => log.event)).toEqual(['task.start', 'candidate.start', 'candidate.params', 'qc.verdict', 'candidate.success', 'task.success'])
-    expect(logs[0]!.message).toContain('qwen-image-edit')
+    expect(logs[0]!.message).toContain('mock-image-edit')
     const response = JSON.parse(succeeded.responseSnapshot!) as { reference?: { conditioned: boolean }[] }
-    expect(response.reference).toEqual([{ model: 'qwen-image-edit', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-image-edit', conditioned: true }])
   })
 
   it('orders image candidates by the task: sheets take plain t2i first, referenced frames take the edit model first', async () => {
@@ -577,7 +939,7 @@ describe('asset-sheet references', () => {
     // 有参考图的首帧 → 编辑模型优先;纯文字出图的定妆照 → 纯文生图优先,编辑模型垫底。
     const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '小满', description: '十六岁少女' } })
     await approveScript(seed)
-    await bindImageSlot(seed, 'qwen-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
+    await bindImageSlot(seed, 'mock-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
     await bindImageSlot(seed, 'mock-t2i')
     await env.db.capabilityBinding.updateMany({ where: { slot: 'IMAGE_GEN', capability: { model: 'mock-t2i' } }, data: { priority: 1 } })
     const [shot] = seed.storyboardIds as [string]
@@ -592,18 +954,20 @@ describe('asset-sheet references', () => {
     expect(assetRun.ok).toBe(true)
     const assetJobs = await env.takeWaitingRunTasks()
     expect(assetJobs[0]!.candidates[0]!.model).toBe('mock-t2i')
-    expect(assetJobs[0]!.candidates[1]!.model).toBe('qwen-image-edit')
+    expect(assetJobs[0]!.candidates[1]!.model).toBe('mock-image-edit')
 
     // 首帧任务(带定妆照参考):编辑模型先上。
     const frameRun = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE', { storyboardIds: [shot], regenerate: true })
     expect(frameRun.ok).toBe(true)
     const frameJobs = await env.takeWaitingRunTasks()
     expect(frameJobs).toHaveLength(1)
-    expect(frameJobs[0]!.candidates[0]!.model).toBe('qwen-image-edit')
+    expect(frameJobs[0]!.candidates[0]!.model).toBe('mock-image-edit')
     expect(frameJobs[0]!.candidates[1]!.model).toBe('mock-t2i')
   })
 
-  it('keeps a text-only image model working and records the fallback it had to take', async () => {
+  it('blocks a referenced shot when no model on the slot takes reference images, and revives it after one is bound', async () => {
+    // 定妆照是首帧唯一的长相锚点。候选链里一个都不吃参考图时,过去会静默降级成纯文生图:
+    // 钱照烧、视觉 QC 照样通过,买回一张陌生的脸(2026-10-21 SD-066 实测)。现在在计划层拦下。
     const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '小满', description: '十六岁少女' } })
     await approveScript(seed)
     await bindImageSlot(seed, 'mock-image')
@@ -617,24 +981,41 @@ describe('asset-sheet references', () => {
     const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
     expect(result.ok).toBe(true)
     const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: (result as { batchId: string }).batchId } })
+    expect(task.status).toBe('BLOCKED')
+    expect(task.errorSnapshot).toContain('参考图模型缺失')
+    expect(task.errorSnapshot).toContain('mock-image')
+    // 拦下就是拦下:不入队、不预留调用、不产出帧。
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+    expect(await env.db.mediaArtifact.count({ where: { task: { is: { storyboardId: shot } } } })).toBe(0)
+
+    // 补一个吃参考图的模型到同一槽位——同一条 BLOCKED 复活路径(与场景主帧等待共用),重触发即排。
+    await bindImageSlot(seed, 'mock-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
+    const retried = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
+    expect(retried.ok).toBe(true)
+    const revived = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(revived.status).toBe('QUEUED')
+    expect(JSON.parse(revived.requestSnapshot!)).toMatchObject({ referenceArtifacts: [{ type: 'reference_image', artifactId: sheet.artifactId }] })
 
     const [payload] = await env.takeWaitingRunTasks()
     const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
     await runTask(payload!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
 
-    // 不吃参考图的模型照常出图,但降级要留痕:参考图一张都没发,原因写进 response。
     const calls = submitted.mock.calls.filter(([capability]) => capability.modality === 'image')
     expect(calls).toHaveLength(1)
-    expect('media' in calls[0]![1].input && Array.isArray(calls[0]![1].input.media)).toBe(false)
+    expect(calls[0]![0].model).toBe('mock-image-edit')
+    const media = calls[0]![1].input.media as { type: string }[]
+    expect(media).toHaveLength(1)
+    expect(media[0]!.type).toBe('reference_image')
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(succeeded.status).toBe('SUCCEEDED')
-    const response = JSON.parse(succeeded.responseSnapshot!) as { reference?: { model: string; conditioned: boolean; reason?: string }[] }
-    expect(response.reference?.[0]).toMatchObject({ model: 'mock-image', conditioned: false })
-    expect(response.reference?.[0]?.reason).toContain('does not take reference images')
+    const response = JSON.parse(succeeded.responseSnapshot!) as { reference?: { model: string; conditioned: boolean }[] }
+    expect(response.reference).toEqual([{ model: 'mock-image-edit', conditioned: true }])
   })
 })
 
 describe('compose-episode', () => {
+  const pipelineStore = () => ({ db: env.db, enqueueJob: async () => {} })
+
   it('concatenates the newest succeeded video artifact of every storyboard', async () => {
     const seed = await env.seed({ storyboards: 2 })
     const [first, second] = seed.storyboardIds as [string, string]
@@ -674,6 +1055,52 @@ describe('compose-episode', () => {
     expect(artifact.durationMs).toBeGreaterThan(0)
     expect(artifact.objectKey).toContain(`/COMPOSITION/${composition.id}/v1.mp4`)
     expect(await env.storage.exists(artifact.objectKey)).toBe(true)
+  })
+
+  it('leaves the master ledger that the acceptance readings are measured from', async () => {
+    // S5 的门判的是「这条母带自己记下了哪些数」，所以 worker 侧的契约是台账不是读数：
+    // Composition.durationMs 是 ffprobe 探到的文件长度，cuts/audio 是渲染真吃下的那份，
+    // resolved.shots 是排队时定格的台词与转场。这里用审片门同一个函数读这份真台账——
+    // 门不许只靠测试夹具里的假快照撑着。
+    const seed = await env.seed({ storyboards: 2 })
+    const [first, second] = seed.storyboardIds as [string, string]
+    await env.attachSucceededVideo(seed, first, 1, { durationMs: 1_000 })
+    await env.attachSucceededVideo(seed, second, 1, { durationMs: 1_000 })
+    // 台词挂第二镜并配一条人声件：有台词没配音的镜正是 SD-181 那类静音，
+    // 拿它测「三项齐全」就等于把门最该拦的情形漏在测不到的地方。
+    await env.db.storyboard.update({ where: { id: second }, data: { dialogue: '第二镜的台词' } })
+    await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: second, durationMs: 1_000 })
+
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('COMPLETED')
+    expect(composition.durationMs).not.toBeNull()
+    expect(composition.durationMs!).toBeGreaterThan(0)
+
+    const manifest = JSON.parse(composition.manifest) as {
+      cuts?: { clipMs?: number[]; kindAt?: string[]; blended: boolean; storyboardIds: string[] }
+      audio?: Record<string, { mode: string; voiceArtifactId: string | null }>
+    }
+    expect(manifest.cuts!.storyboardIds).toEqual([first, second])
+    // 一刀不使的整集也记全表：片头恒为 cut，没有这一行节奏读数就没有分母。
+    expect(manifest.cuts!.kindAt).toEqual(['cut', 'cut'])
+    expect(manifest.cuts!.clipMs).toEqual([1_000, 1_000])
+    expect(manifest.cuts!.blended).toBe(false)
+    // 声音台账按 storyboardId 记账，一镜不落——缺格就是「这镜在成片里听到什么」读不出来。
+    expect(Object.keys(manifest.audio!).sort()).toEqual([first, second].sort())
+
+    const review = readCompositionReview({ manifest: composition.manifest, masterDurationMs: composition.durationMs })
+    expect(review.complete).toBe(true)
+    expect(review.rhythm.masterDurationMs).toBe(composition.durationMs)
+    // 节奏的分母是探到的母带长度，不是逐镜跨度求和：一重叠两者就分家（SD-182）。
+    expect(review.rhythm.readings!.totalMs).toBe(composition.durationMs)
+    // 碎不等于错：2 镜各 1 秒远低项目节奏门槛，但三项读数齐全，门照样放行。
+    expect(review.rhythm.gate.pass).toBe(false)
+    expect(review.transition.blendedSeamCount).toBe(0)
+    expect(review.transition.requestedNonCutCount).toBe(0)
+    expect(review.sound.dialogueShotCount).toBe(1)
+    expect(review.sound.silentDialogueShots).toEqual([])
   })
 
   it('prefers the newest task over the highest rework version when composing', async () => {
@@ -839,7 +1266,10 @@ describe('compose-episode', () => {
     const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
     expect(updated.status).toBe('COMPLETED')
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
-    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video'])
+    // 无声镜头现在会被垫一条等长静音轨（SD-114：concat demuxer 用第一段的流布局当整条
+    // 母带的布局，一个无声头会把后面每个镜头的原声一起静默丢掉）。所以母带恒有音轨，
+    // 「听不见」这件事由 packages/media 的频段响度实测钉住，不靠「没有音轨」这个形状。
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio'])
     expect(updated.subtitleArtifactId).toBeNull()
     expect(updated.scoreArtifactId).toBeNull()
   })
@@ -879,7 +1309,8 @@ describe('compose-episode', () => {
     const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
     expect(updated.status).toBe('COMPLETED')
     const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: updated.artifactId! } })
-    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'subtitle'])
+    // 台词有、配音没落地：字幕轨照给，音轨是母带自带的静音垫（见上一条的 SD-114 注释）。
+    expect(streamTypes(await env.storage.read(master.objectKey))).toEqual(['video', 'audio', 'subtitle'])
     expect(Buffer.from(await env.storage.read((await env.db.mediaArtifact.findFirstOrThrow({ where: { stage: 'SUBTITLE', organizationId: seed.organizationId } })).objectKey)).toString('utf8')).toContain('走吧。')
   })
 
@@ -1031,6 +1462,38 @@ describe('compose-episode', () => {
       await env.db.storyboard.update({ where: { id: shot }, data: { audioSource: 'VOICE', importedAmbienceArtifactId: bed } })
 
       expect(await composeShot(shot, seed, [shot])).toEqual({ mode: 'voice', voiceArtifactId: tts.artifactId, ambienceArtifactId: bed })
+    })
+
+    // 同一场戏几镜共用一条街声:母带清单里它必须是一条连续声床(带 storyboardIds),
+    // 而不是逐镜各一条——逐镜那条会让每一刀都听见「这条街从头响」。换底的那一刀则要
+    // 看到音频桥:新底提前 400ms 进、旧底拖 200ms 出,否则剪点中台声场瞬断。
+    // 三镜按真实界面走:导入是一镜一上传,前两镜传的是同一个文件(两个制品、同一串字节)。
+    it('runs one shared bed straight through the shots that use it', async () => {
+      const seed = await env.seed({ storyboards: 3 })
+      const [first, second, third] = seed.storyboardIds as [string, string, string]
+      for (const shot of [first, second, third]) await env.attachSucceededVideo(seed, shot, 1, { durationMs: 1000 })
+      const streetOnFirst = await importedBed(seed, first, 1)
+      const streetOnSecond = await importedBed(seed, second, 1)
+      const room = await importedBed(seed, third, 2)
+      await env.db.storyboard.update({ where: { id: first }, data: { importedAmbienceArtifactId: streetOnFirst } })
+      await env.db.storyboard.update({ where: { id: second }, data: { importedAmbienceArtifactId: streetOnSecond } })
+      await env.db.storyboard.update({ where: { id: third }, data: { importedAmbienceArtifactId: room } })
+
+      const composition = await env.db.composition.create({
+        data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: seed.storyboardIds }) },
+      })
+      await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+      const updated = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+      expect(updated.status).toBe('COMPLETED')
+      const beds = (JSON.parse(updated.manifest) as { beds?: unknown[] }).beds ?? []
+      expect(beds).toHaveLength(2)
+      expect(beds[0]).toMatchObject({
+        imported: true, ambienceArtifactId: streetOnFirst, storyboardIds: [first, second], fadeInMs: 0, fadeOutMs: AUDIO_BRIDGE_TAIL_MS,
+      })
+      expect(beds[1]).toMatchObject({
+        imported: true, ambienceArtifactId: room, storyboardIds: [third], fadeInMs: AUDIO_BRIDGE_PRE_MS, fadeOutMs: 0,
+      })
     })
 
     // 与配音同一口径：悬空即当作没导入，退回这一镜原本的声音，绝不谎报氛围底来自哪里。
@@ -1500,9 +1963,58 @@ describe('storyboard content contract', () => {
     expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
   })
 
+  // 2026-10-20 线上实测：63 行分镜表里模型只把第 53 行 2s 抄成 3s，整批付费结果被
+  // 契约审计作废。表内时长是作者拍板的确定性数据，行数对得上时以表为准落库。
+  const contractScript = [
+    '场景 1：雨夜老城区',
+    '',
+    '| # | 时长 | 画面 | 台词 | 生成 |',
+    '| --- | --- | --- | --- | --- |',
+    '| 1 | 2s | 雨夜街道 | | |',
+    '| 2 | 3s | 半张照片 | | 字幕：第七次死亡 |',
+    '| 3 | 2s | 陈默回头 | 陈默：谁？ | |',
+  ].join('\n')
+
+  async function contractTask(seed: Seed) {
+    const script = await env.db.scriptVersion.create({
+      data: { episodeId: seed.episodeId, version: 1, content: contractScript, checksum: `contract-${randomUUID()}`, status: 'APPROVED' },
+    })
+    const taskId = await nextTask(seed)
+    const requestSnapshot = JSON.stringify({ model: 'mock-storyboard', input: {}, parameters: {}, scriptVersionId: script.id })
+    await env.db.generationTask.update({ where: { id: taskId }, data: { requestSnapshot } })
+    return { id: taskId, stage: 'STORYBOARD', requestSnapshot, batch: { episodeId: seed.episodeId } }
+  }
+
+  it('以剧本分镜表的时长落库，不让模型转录的误差作废整批结果', async () => {
+    const seed = await seedStoryboard()
+    await recordGeneratedContent(env.db, await contractTask(seed), JSON.stringify({
+      shots: [
+        { title: '雨夜街道', description: '雨夜街道，霓虹映在积水里', durationMs: 2000, continuityOut: '积水里霓虹的倒影' },
+        { title: '半张照片', description: '半张照片漂在积水上，浮出“第七次死亡”', durationMs: 3000, continuityIn: '积水里霓虹的倒影', continuityOut: '照片背面朝上' },
+        // 模型把第 3 行 2s 抄成 3s——落库应回到表里的 2s。
+        { title: '陈默回头', description: '陈默回头', dialogue: '谁？', speaker: '陈默', durationMs: 3000, continuityIn: '照片背面朝上' },
+      ],
+    }))
+
+    const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId }, orderBy: { number: 'asc' } })
+    expect(boards.map(board => board.durationMs)).toEqual([2000, 3000, 2000])
+    expect(boards.reduce((sum, board) => sum + board.durationMs, 0)).toBe(7000)
+  })
+
+  it('镜数与分镜表不一致时仍拒收，一个镜头都不写', async () => {
+    const seed = await seedStoryboard()
+    await expect(recordGeneratedContent(env.db, await contractTask(seed), JSON.stringify({
+      shots: [
+        { title: '雨夜街道', description: '雨夜街道，霓虹映在积水里', durationMs: 2000 },
+        { title: '半张照片', description: '半张照片漂在积水上，浮出“第七次死亡”', durationMs: 3000 },
+      ],
+    }))).rejects.toThrow('storyboard:contractShotCount')
+    expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(0)
+  })
+
   it('still accepts a bare shot array, which carries no assets', async () => {
     const seed = await seedStoryboard()
-    await recordGeneratedContent(env.db, contentTask(seed), '```json\n[{"title":"Rainy street","description":"neon"},{"description":"no title given"}]\n```')
+    await recordGeneratedContent(env.db, contentTask(seed), '```json\n[{"title":"Rainy street","description":"neon","durationMs":5000,"continuityOut":"neon on wet asphalt"},{"description":"no title given","durationMs":5000,"continuityIn":"neon on wet asphalt"}]\n```')
 
     const boards = await env.db.storyboard.findMany({ where: { episodeId: seed.episodeId }, orderBy: { number: 'asc' } })
     expect(boards.map(board => board.title)).toEqual(['Rainy street', 'Shot 2'])
@@ -1800,10 +2312,13 @@ describe('first-frame conditioning', () => {
     // candidate ends up running), plus the base seed the billing audit answers from —
     // derived from the idempotency key, so a re-plan of the same shot re-derives it.
     // The guard chain has already run by now: the bare prompt gains the style anchor,
-    // and promptGuards records what was touched.
+    // and promptGuards records what was touched. The parameters carry the shot's own
+    // planned length under the platform's name — no vendor's spelling belongs in a snapshot
+    // that any candidate in the slot may run.
+    const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
       input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
-      parameters: { seed: generationSeed(task.idempotencyKey!) },
+      parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
 
@@ -1820,7 +2335,8 @@ describe('first-frame conditioning', () => {
     await approveScript(seed)
     await env.db.storyboard.update({ where: { id: first }, data: { sceneNumber: 1 } })
     await env.db.storyboard.update({ where: { id: second }, data: { sceneNumber: 1 } })
-    await bindImageSlot(seed)
+    // 主帧本身就是参考图,槽位里必须有一个吃参考图的模型,否则 SD-066 的计划层闸门会先拦下。
+    await bindImageSlot(seed, 'mock-image', { acceptsReferenceImages: true, maxReferenceImages: 3 })
     // 无素材守卫会先拦没绑素材的镜——各绑一个已定稿场景让守卫放行，专测主帧闸门。
     const scene = await env.db.asset.create({ data: { episodeId: seed.episodeId, kind: 'scene', name: '老城客厅', description: '九十年代客厅', status: 'APPROVED' } })
     for (const storyboardId of [first, second]) {
@@ -1834,7 +2350,7 @@ describe('first-frame conditioning', () => {
     expect(tasks1).toHaveLength(2)
     const blocked = tasks1.find(task => task.storyboardId === second)!
     expect(blocked.status).toBe('BLOCKED')
-    expect(blocked.errorSnapshot).toContain('等待场景 1 主帧')
+    expect(blocked.errorSnapshot).toContain('等待「场景 1」主帧')
     expect(tasks1.find(task => task.storyboardId === first)!.status).toBe('QUEUED')
 
     // 首镜落帧并钦定 → 重试第二镜：参考图第 1 张=主帧，提示词含「图1＝场景主帧」。
@@ -1882,9 +2398,10 @@ describe('first-frame conditioning', () => {
     // row already carries its checksum. parameters still sits between input and
     // referenceArtifacts, and the guard trail is appended last so every pre-guard key keeps
     // its place — growing either end has to be decided twice.
+    const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
       input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
-      parameters: { seed: generationSeed(task.idempotencyKey!) },
+      parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
       referenceArtifacts: [{ type: 'first_frame', artifactId: frame.artifactId }],
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
@@ -2100,15 +2617,19 @@ describe('first-frame conditioning', () => {
 
   it('keeps planning video freely when no conditioning model is bound, frames or not', async () => {
     const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
     await approveScript(seed)
     const t2v = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
 
     const batchId = await planVideo(seed)
     const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
 
+    const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
       input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
-      parameters: { seed: generationSeed(task.idempotencyKey!) },
+      // Same canonical length whether or not a conditioning model is bound: the shot asked
+      // for its own duration, and the vendor field is decided by whichever candidate runs.
+      parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
     const queued = await env.takeWaitingRunTasks()
@@ -2342,32 +2863,60 @@ describe('billed parameters', () => {
   const request = (parameters: Record<string, unknown>) => ({ model: 'm', input: {}, parameters }) as unknown as Parameters<typeof pinBilledParameters>[0]
 
   it('rotates the base seed per attempt so a rework never re-bills identical bytes', () => {
+    // Every video task states the length it bought, including when it bought none: a model
+    // that declares nothing must not leave the log silent about who set the clip's duration.
     const first = request({ seed: 41 })
-    expect(pinBilledParameters(first, videoCap('i2v'), null, 1)).toEqual({ seed: 41 })
+    expect(pinBilledParameters(first, videoCap('i2v'), null, 1)).toEqual({ seed: 41, duration: 'vendor-default' })
     const second = request({ seed: 41 })
-    expect(pinBilledParameters(second, videoCap('i2v'), null, 2)).toEqual({ seed: 42 })
+    expect(pinBilledParameters(second, videoCap('i2v'), null, 2)).toEqual({ seed: 42, duration: 'vendor-default' })
     expect(second.parameters.seed).toBe(42)
   })
 
   it('pins the 1080-class tier the model declares, in the model\u2019s own spelling', () => {
     const upper = request({ seed: 7 })
-    expect(pinBilledParameters(upper, videoCap('t2v'), { resolutions: ['480P', '720P', '1080P'] }, 1)).toEqual({ seed: 7, resolution: '1080P' })
+    expect(pinBilledParameters(upper, videoCap('t2v'), { resolutions: ['480P', '720P', '1080P'] }, 1)).toEqual({ seed: 7, resolution: '1080P', duration: 'vendor-default' })
     const lower = request({})
-    expect(pinBilledParameters(lower, videoCap('i2v'), { resolutions: ['480p', '720p', '1080p', '4k'] }, 1)).toEqual({ resolution: '1080p' })
+    expect(pinBilledParameters(lower, videoCap('i2v'), { resolutions: ['480p', '720p', '1080p', '4k'] }, 1)).toEqual({ resolution: '1080p', duration: 'vendor-default' })
     // A model that ships one tier only is pinned to exactly that tier; 4k is never a default.
     const sole = request({})
-    expect(pinBilledParameters(sole, videoCap('i2v'), { resolutions: ['720P'] }, 1)).toEqual({ resolution: '720P' })
+    expect(pinBilledParameters(sole, videoCap('i2v'), { resolutions: ['720P'] }, 1)).toEqual({ resolution: '720P', duration: 'vendor-default' })
     const fourKOnly = request({})
-    expect(pinBilledParameters(fourKOnly, videoCap('t2v'), { resolutions: ['2160p', '4k'] }, 1)).toEqual({ resolution: '2160p' })
+    expect(pinBilledParameters(fourKOnly, videoCap('t2v'), { resolutions: ['2160p', '4k'] }, 1)).toEqual({ resolution: '2160p', duration: 'vendor-default' })
+  })
+
+  it('bounds the length the shot asked for to what the winning model declares', () => {
+    // 15 planned on a 4\u201315 model is bought whole.
+    const inside = request({ durationSeconds: 15 })
+    expect(pinBilledParameters(inside, videoCap('i2v'), { duration: { kind: 'range', min: 4, max: 15 } }, 1)).toEqual({ duration: 15 })
+    expect(inside.parameters.durationSeconds).toBe(15)
+
+    // The same shot falls to a 12-second model: the request is rewritten, and the number
+    // asked for is recorded beside it so a re-run can tell a plan from a purchase.
+    const trimmed = request({ durationSeconds: 15 })
+    expect(pinBilledParameters(trimmed, videoCap('i2v'), { duration: { kind: 'range', min: 2, max: 12 } }, 1)).toEqual({ duration: 12, durationAsked: 15 })
+    expect(trimmed.parameters.durationSeconds).toBe(12)
+
+    // Enumerated lengths buy one of the listed values only \u2014 7 is not on Kling's menu, and
+    // neither is the 9 between Veo's 8 and its next tier.
+    const stepped = request({ durationSeconds: 7 })
+    expect(pinBilledParameters(stepped, videoCap('t2v'), { duration: { kind: 'steps', values: [4, 6, 8] } }, 1)).toEqual({ duration: 6, durationAsked: 7 })
+    expect(stepped.parameters.durationSeconds).toBe(6)
+
+    // A model that declares nothing cannot be bounded, so nothing is sent: leaving the
+    // canonical key in place would hand a vendor an unmapped number and a bill nobody read.
+    const undeclared = request({ durationSeconds: 10 })
+    expect(pinBilledParameters(undeclared, videoCap('i2v'), { durations: [5] }, 1)).toEqual({ duration: 'vendor-default' })
+    expect(undeclared.parameters.durationSeconds).toBeUndefined()
   })
 
   it('leaves what the spec does not declare to the vendor, and never overwrites what the caller set', () => {
     const undeclared = request({ seed: 3 })
-    expect(pinBilledParameters(undeclared, videoCap('i2v'), { durations: [5] }, 1)).toEqual({ seed: 3 })
+    expect(pinBilledParameters(undeclared, videoCap('i2v'), { durations: [5] }, 1)).toEqual({ seed: 3, duration: 'vendor-default' })
     expect(undeclared.parameters.resolution).toBeUndefined()
     const setByCaller = request({ resolution: '480P' })
-    // Nothing new is pinned (billed is empty) and the caller's number survives untouched.
-    expect(pinBilledParameters(setByCaller, videoCap('t2v'), { resolutions: ['480P', '1080P'] }, 1)).toEqual({})
+    // Nothing new is pinned for it (billed carries only the length the vendor will decide)
+    // and the caller's number survives untouched.
+    expect(pinBilledParameters(setByCaller, videoCap('t2v'), { resolutions: ['480P', '1080P'] }, 1)).toEqual({ duration: 'vendor-default' })
     expect(setByCaller.parameters.resolution).toBe('480P')
     // Only video models bill by a resolution tier; an image row's sizes follow other keys
     // entirely, so nothing is invented for it here.
@@ -2375,10 +2924,12 @@ describe('billed parameters', () => {
     expect(pinBilledParameters(image, videoCap('image'), { resolutions: ['1024x1024'] }, 1)).toEqual({})
   })
 
-  it('sends the seed and the pinned tier on the wire and records them on the task', async () => {
+  it('sends the seed, the pinned tier and the pinned length on the wire and records them on the task', async () => {
     const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
     await approveScript(seed)
-    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v', { resolutions: ['480P', '720P', '1080P'] })
+    const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v', { resolutions: ['480P', '720P', '1080P'], duration: { kind: 'range', min: 2, max: 15 } })
     const batchId = await planVideo(seed)
     const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
 
@@ -2386,24 +2937,91 @@ describe('billed parameters', () => {
     const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
     await runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
 
-    // The snapshot held the base; the wire carries what was billed. Both land in rows a
+    // The snapshot held the plan; the wire carries what was bought. Both land in rows a
     // later "what did we pay for" question can be answered from without re-deriving.
-    const billed = { seed: generationSeed(task.idempotencyKey!), resolution: '1080P' }
+    const asked = Math.round(planned.durationMs / 1000)
+    const bought = Math.min(Math.max(asked, 2), 15)
+    const billed = { seed: generationSeed(task.idempotencyKey!), resolution: '1080P', duration: bought }
     const call = submitted.mock.calls.find(([capability]) => capability.modality === 't2v')
-    expect(call?.[1].parameters).toEqual(billed)
+    // Both the wire and the stored row name the length with the platform's own key: the
+    // vendor's spelling is added inside the adapter at the last moment, and the execution
+    // log carries the plain `duration=<seconds>` a billing question is read from.
+    const wire = { seed: billed.seed, resolution: billed.resolution, durationSeconds: billed.duration }
+    expect(call?.[1].parameters).toEqual(wire)
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
-    expect(JSON.parse(succeeded.responseSnapshot!).parameters).toEqual(billed)
+    expect(JSON.parse(succeeded.responseSnapshot!).parameters).toEqual(wire)
   })
 })
 
 
 describe('video extend (artifact operation)', () => {
+  it('blocks the operation on an ambiguous submit — redelivery never resubmits; a prior accepted submission resumes polling instead of re-submitting (Q01)', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    const candidate = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
+    const makeOperation = () => env.db.artifactOperation.create({
+      data: {
+        organizationId: seed.organizationId,
+        kind: 'video_extend',
+        sourceArtifactId: clip.artifactId,
+        connectionId: candidate.connectionId,
+        capabilityId: candidate.capabilityId,
+        provider: candidate.provider,
+        model: candidate.model,
+        requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜' }, parameters: { durationMs: 5000 }, sourceArtifactId: clip.artifactId, storyboardId: shot, applyPolicy: 'candidate_only' }),
+        applyPolicy: 'candidate_only',
+      },
+    })
+
+    // 首次:上游可能接单但回包丢失——操作 BLOCKED,extend 恰被调 1 次。
+    const opBlocked = await makeOperation()
+    const extend = vi.spyOn(MockProviderAdapter.prototype, 'extend')
+      .mockImplementationOnce(() => { throw new Error('ECONNRESET: socket hang up — the request may have reached the provider') })
+    const payload = { kind: 'run-artifact-operation' as const, operationId: opBlocked.id, organizationId: seed.organizationId, attempt: 1, candidate }
+    await runArtifactOperation(payload, env.deps({ pollIntervalMs: 10 }))
+    expect(extend).toHaveBeenCalledTimes(1)
+    const blocked = await env.db.artifactOperation.findUniqueOrThrow({ where: { id: opBlocked.id } })
+    expect(blocked.status).toBe('BLOCKED')
+    expect(blocked.errorSnapshot).toContain('submission unknown')
+    expect(await env.db.submissionAttempt.count({ where: { operationId: opBlocked.id, status: 'submission_unknown' } })).toBe(1)
+
+    // 队列重投同操作:终态去重,一次都不许再调用供应商。
+    extend.mockClear()
+    extend.mockImplementation(() => { throw new Error('must not be called on redelivery') })
+    await runArtifactOperation({ ...payload, attempt: 2 }, env.deps({ pollIntervalMs: 10 }))
+    expect(extend).not.toHaveBeenCalled()
+    expect((await env.db.artifactOperation.findUniqueOrThrow({ where: { id: opBlocked.id } })).status).toBe('BLOCKED')
+
+    // 恢复路径:另一次操作提交成功拿到 providerTaskId 后中断,重投不得重新提交,
+    // 而是续查同一个上游任务。
+    const opResume = await makeOperation()
+    extend.mockClear()
+    extend.mockRestore()
+    const resumePayload = { kind: 'run-artifact-operation' as const, operationId: opResume.id, organizationId: seed.organizationId, attempt: 1, candidate }
+    // 先真实提交一次拿到 providerTaskId,然后人工把操作拉回 RUNNING 模拟中途崩溃。
+    await runArtifactOperation(resumePayload, env.deps({ pollIntervalMs: 10 }))
+    const accepted = await env.db.submissionAttempt.findFirstOrThrow({ where: { operationId: opResume.id, providerTaskId: { not: null } } })
+    const counted = await env.db.submissionAttempt.count({ where: { operationId: opResume.id } })
+    expect(counted).toBe(1)
+    const extendSpy2 = vi.spyOn(MockProviderAdapter.prototype, 'extend')
+    await runArtifactOperation({ ...resumePayload, attempt: 2 }, env.deps({ pollIntervalMs: 10 }))
+    expect(extendSpy2).not.toHaveBeenCalled()
+    extendSpy2.mockRestore()
+    // 续查走的是同一个 providerTaskId,不新开台账行。
+    expect(await env.db.submissionAttempt.count({ where: { operationId: opResume.id } })).toBe(counted)
+    expect((await env.db.submissionAttempt.findFirstOrThrow({ where: { operationId: opResume.id, providerTaskId: { not: null } } })).providerTaskId).toBe(accepted.providerTaskId)
+    expect((await env.db.artifactOperation.findUniqueOrThrow({ where: { id: opResume.id } })).status).toBe('SUCCEEDED')
+  })
+
   it('extends the shot\u2019s clip and pins the longer cut as the master selection', async () => {
     const seed = await env.seed({ storyboards: 1 })
     const [shot] = seed.storyboardIds as [string]
     await approveScript(seed)
     const candidate = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
-    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot })
+    // Q05 回归前提:源片 5 秒——延长输出必须保留源前段,总长 = 源 + 追加。
+    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
 
     const operation = await env.db.artifactOperation.create({
       data: {
@@ -2435,6 +3053,48 @@ describe('video extend (artifact operation)', () => {
     // 延长即采用:加长版直接落钦定,否则自动选版(只看任务制品)永远看不见它。
     const storyboard = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot } })
     expect(storyboard.selectedVideoArtifactId).toBe(output.id)
+
+    // R02:延长契约=源片时长+追加时长。压缩字节估算曾把 5 秒源片估成 1 秒,输出
+    // 「5 秒加长片」冒充成功;现在 worker 用 ffprobe 实测源时长传给适配器——断言
+    // 输出 ≈ 实测源 + 5s 追加(各留 0.5s 容器取整容差)。
+    {
+      const clipRow = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: clip.artifactId } })
+      const srcBytes = await env.deps().storage.read(clipRow.objectKey)
+      const probeDir = await mkdtemp(path.join(os.tmpdir(), 'extend-check-'))
+      try {
+        const srcFile = path.join(probeDir, 'src.mp4')
+        const { writeFile } = await import('node:fs/promises')
+        await writeFile(srcFile, srcBytes)
+        const srcMs = await probeDuration(srcFile)
+        expect(srcMs).toBeGreaterThan(0)
+        expect(output.durationMs!).toBeGreaterThanOrEqual(srcMs + 4500)
+        expect(output.durationMs!).toBeLessThanOrEqual(srcMs + 5500)
+        // Q05:延长=保留源前段的完整加长片——输出的第一帧必须是源片的第一帧,
+        // 而不是从 0 起的全新 testsrc。逐帧身份用首帧缩放成 8x8 的 RGB 均值对比。
+        const { execFile: probeExec } = await import('node:child_process')
+        const { promisify: probePromisify } = await import('node:util')
+        const probeRun = probePromisify(probeExec)
+        const frameSignature = async (file: string): Promise<number[]> => {
+          const { stdout } = await probeRun('ffmpeg', ['-v', 'error', '-i', file, '-vf', 'scale=8:8', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1 << 24, encoding: 'buffer' }) as { stdout: Buffer }
+          const first = stdout.subarray(0, 8 * 8 * 3)
+          const means: number[] = []
+          for (let channel = 0; channel < 3; channel++) {
+            let sum = 0
+            for (let pixel = 0; pixel < 64; pixel++) sum += first[pixel * 3 + channel]!
+            means.push(sum / 64)
+          }
+          return means
+        }
+        const outputRow = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: done.outputArtifactId! } })
+        const outputFile = path.join(probeDir, 'out.mp4')
+        await (await import('node:fs/promises')).writeFile(outputFile, await env.deps().storage.read(outputRow.objectKey))
+        const [srcSig, outSig] = await Promise.all([frameSignature(srcFile), frameSignature(outputFile)])
+        const distance = Math.max(Math.abs(srcSig[0]! - outSig[0]!), Math.abs(srcSig[1]! - outSig[1]!), Math.abs(srcSig[2]! - outSig[2]!))
+        expect(distance).toBeLessThan(16)
+      } finally {
+        await rm(probeDir, { recursive: true, force: true })
+      }
+    }
 
     // 钦定必须真正被合成消费:曾出现"钦定字段写了、compose 解析不到(操作产物
     // 无任务),静默回退取最新任务产物"——加长片永远进不了母带。断言入片的那一
@@ -2533,5 +3193,907 @@ describe('structured control injection (US-016)', () => {
     expect(prompt).not.toContain('景别:')
     expect(prompt).not.toContain('机位:')
     void shot
+  })
+})
+
+describe('edit timeline render (R04)', () => {
+  it('mixes edit-timeline tracks into the master and links the consumed revision', async () => {
+    // 修复前:compose 解析了 editTracks 却从不传给混音器——轨道参数改了,成片一字
+    // 不变。无声素材 + 一条 AUDIO 轨道:成片必须有音轨,且 composition 记录它消费
+    // 的编辑修订(freshness/交付冻结的数据基础)。
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await env.attachSucceededVideo(seed, shot, 1, { durationMs: 5000 })
+    const track = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts' })
+    const edit = await env.db.episodeEdit.create({
+      data: {
+        episodeId: seed.episodeId, organizationId: seed.organizationId, headRevision: 1,
+        revisions: { create: { revision: 1, fpsNum: 25, fpsDen: 1, clips: JSON.stringify([{ clipId: 'clip-1', storyboardId: shot, artifactId: '', sourceInFrame: 0, sourceOutFrame: 125 }]), tracks: JSON.stringify([{ elementId: 't1', sourceArtifactId: track.artifactId, anchor: 'sequence', offsetFrame: 25, gain: 1, muted: false, locked: false }]), outputSpec: '{}', fingerprint: 'r04-track', author: 'test' } },
+      },
+      include: { revisions: true },
+    })
+    const composition = await env.db.composition.create({ data: { episodeId: seed.episodeId, status: 'READY', manifest: JSON.stringify({ storyboardIds: [shot] }) } })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+
+    const done = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(done.status).toBe('COMPLETED')
+    expect(done.editRevisionId).toBe(edit.revisions[0]!.id)
+    expect(done.inputFingerprint).toBe('r04-track')
+    // 轨道真的进输出:源素材无声,成片的音轨只可能来自 extras 混音。
+    const artifact = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: done.artifactId! } })
+    const bytes = await env.deps().storage.read(artifact.objectKey)
+    const checkDir = await mkdtemp(path.join(os.tmpdir(), 'r04-check-'))
+    try {
+      const file = path.join(checkDir, 'master.mp4')
+      const { writeFile } = await import('node:fs/promises')
+      await writeFile(file, bytes)
+      const { stdout } = await run('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_streams', file])
+      const streams = (JSON.parse(stdout) as { streams: Array<{ codec_type: string }> }).streams
+      expect(streams.some(stream => stream.codec_type === 'audio')).toBe(true)
+    } finally {
+      await rm(checkDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('submission_unknown reliability (R01)', () => {
+  it('blocks the task on an ambiguous submit — the next candidate is never called, redelivery never resubmits', async () => {
+    // 复现口径对齐第三轮复核:上游已受理后断线(提交抛错但请求可能已到达)。
+    // 修复前:抛错被候选循环 catch 成 next → 第二候选继续提交 → 重投再提交,
+    // submit 累计 3 次。修复后:unknown 即持久终止。
+    const seed = await env.seed()
+    const payload = env.runPayload(seed, 1)
+    const chain: RunTaskCandidate[] = [payload.candidates[0]!, { ...payload.candidates[0]! }]
+    const submit = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+      .mockImplementationOnce(() => { throw new Error('ECONNRESET: socket hang up — the request may have reached the provider') })
+
+    await runTask({ ...payload, candidates: chain }, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    // 只有第一个候选提交过——第二候选被阻断,不再产生可能重复计费的调用。
+    expect(submit).toHaveBeenCalledTimes(1)
+
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('BLOCKED')
+    expect(task.errorSnapshot).toContain('submission unknown')
+    // 来源必须可查单:哪个 provider/model/第几次尝试。
+    expect(task.errorSnapshot).toContain('provider mock')
+    expect(task.errorSnapshot).toContain('attempt 1')
+    const attempt = await env.db.submissionAttempt.findFirst({ where: { taskId: seed.taskId } })
+    expect(attempt?.status).toBe('submission_unknown')
+
+    // 队列重投同任务:终态去重,一次都不许再提交。
+    submit.mockClear()
+    submit.mockImplementation(() => { throw new Error('must not be called on redelivery') })
+    await runTask({ ...payload, candidates: chain, attempt: 2 }, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect(submit).not.toHaveBeenCalled()
+    const still = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(still.status).toBe('BLOCKED')
+    // 台账不新增——重投不是新的提交尝试。
+    expect(await env.db.submissionAttempt.count({ where: { taskId: seed.taskId } })).toBe(1)
+  })
+
+  it('degrades to the next candidate on a deterministic quota rejection instead of blocking the task', async () => {
+    // 2026-10-21 实测:DashScope 免费额度耗尽时 submit 抛 4xx 报文
+    // (AllocationQuota.FreeTierOnly)。修复前它被归成 submission_unknown → 任务
+    // BLOCKED,候选链停在第一个模型,后面还有额度的模型一次都没被尝试。
+    // 修复后:确定性拒绝记为 settled/failed,候选链继续,任务照常完成。
+    const seed = await env.seed()
+    const payload = env.runPayload(seed, 1)
+    const chain: RunTaskCandidate[] = [payload.candidates[0]!, { ...payload.candidates[0]! }]
+    const submit = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+      .mockImplementationOnce(() => {
+        throw new Error('AllocationQuota.FreeTierOnly | Free quota exhausted. To continue accessing the model on a paid basis, please add funds or disable the "use free tier only" mode in the management console. | request_id=e56839c')
+      })
+
+    await runTask({ ...payload, candidates: chain }, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    // 第一候选被拒后第二候选真的被提交,任务没有被卡成 BLOCKED。
+    expect(submit).toHaveBeenCalledTimes(2)
+    const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
+    expect(task.status).toBe('SUCCEEDED')
+    const attempts = await env.db.submissionAttempt.findMany({ where: { taskId: seed.taskId }, orderBy: { slot: 'asc' } })
+    expect(attempts).toHaveLength(2)
+    // 被拒的那次留痕为已裁决的失败(可查单),不是 submission_unknown。
+    expect(attempts[0]?.status).toBe('settled')
+    expect(attempts[0]?.resolution).toBe('failed')
+    expect(attempts[0]?.errorSnapshot).toContain('FreeTierOnly')
+    expect(attempts[1]?.status).toBe('settled')
+    expect(attempts[1]?.resolution).toBe('succeeded')
+  })
+})
+
+describe('execution safety: atomic claim, leases, resume (V01)', () => {
+  it('a redelivery while the first consumer is mid-submit never submits twice', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    const queued = await env.takeWaitingRunTasks()
+
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const submit = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+      .mockImplementation(async () => { await gate; return { taskId: 'hang-1' } })
+    const first = runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 })).catch(() => undefined)
+    // 第一个消费者真正进入 submit:台账 submitting 行已落库。
+    await vi.waitFor(async () => {
+      if (!(await env.db.submissionAttempt.findFirst({ where: { taskId: task.id, status: 'submitting' } }))) throw new Error('submitting row not yet visible')
+    })
+    const before = submit.mock.calls.length
+    // 同 taskId/attempt 重投:抢不到租约,一次都不许再碰上游。
+    await runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect(submit.mock.calls.length).toBe(before)
+    expect((await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('RUNNING')
+    release()
+    await first
+    // 挂起释放后第一消费者拿到 taskId 续走;整个生命周期上游恰被提交一次。
+    expect(submit.mock.calls.length).toBe(1)
+    await vi.waitFor(async () => {
+      if ((await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })).status === 'RUNNING') throw new Error('not settled')
+    })
+    expect(await env.db.submissionAttempt.count({ where: { taskId: task.id } })).toBe(1)
+    submit.mockRestore()
+  })
+
+  it('treats a poll timeout as pending-query: task BLOCKED without fallback, redelivery resumes polling the same provider task', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    const queued = await env.takeWaitingRunTasks()
+
+    const submit = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+    const poll = vi.spyOn(MockProviderAdapter.prototype, 'poll').mockImplementation(async () => ({ status: 'running' as const }))
+    await runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 5, pollTimeoutMs: 60 }))
+    expect(submit).toHaveBeenCalledTimes(1)
+    const blocked = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(blocked.status).toBe('BLOCKED')
+    expect(blocked.errorSnapshot).toContain('pending query')
+    const ledger = await env.db.submissionAttempt.findFirstOrThrow({ where: { taskId: task.id } })
+    expect(ledger.providerTaskId).toBeTruthy()
+    expect(ledger.status).toBe('accepted') // 续查凭据在,不是 submission_unknown
+
+    poll.mockRestore()
+    await runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect(submit).toHaveBeenCalledTimes(1) // 续查零新提交
+    const done = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(done.status).toBe('SUCCEEDED')
+    const settled = await env.db.submissionAttempt.findFirstOrThrow({ where: { taskId: task.id } })
+    expect(settled.status).toBe('settled')
+    expect(settled.resolution).toBe('succeeded')
+    submit.mockRestore()
+  })
+
+  it('refuses to submit without a free attempt slot: an occupied ledger slot blocks instead of re-submitting', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const batchId = await planVideo(seed)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId } })
+    const queued = await env.takeWaitingRunTasks()
+    // 模拟「上一个消费者在 submitting 阶段失联」:同槽位台账行存在但没有 providerTaskId。
+    await env.db.submissionAttempt.create({ data: { taskId: task.id, attemptNumber: 1, slot: 0, status: 'submitting' } })
+
+    const submit = vi.spyOn(MockProviderAdapter.prototype, 'submit').mockImplementation(async () => { throw new Error('must not submit over an occupied ledger slot') })
+    await runTask(queued[0]!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect(submit).not.toHaveBeenCalled()
+    const blocked = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(blocked.status).toBe('BLOCKED')
+    expect(blocked.errorSnapshot).toContain('ledger slot')
+    submit.mockRestore()
+  })
+})
+
+describe('adoption CAS protects human intent (V02)', () => {
+  it('never overwrites a selection a human pinned and locked while the operation ran', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    const candidate = await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const clip = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
+
+    const operation = await env.db.artifactOperation.create({
+      data: {
+        organizationId: seed.organizationId,
+        kind: 'video_extend',
+        sourceArtifactId: clip.artifactId,
+        connectionId: candidate.connectionId,
+        capabilityId: candidate.capabilityId,
+        provider: candidate.provider,
+        model: candidate.model,
+        requestSnapshot: JSON.stringify({ input: { prompt: '延长这一镜' }, parameters: { durationMs: 4000 }, sourceArtifactId: clip.artifactId, storyboardId: shot, applyPolicy: 'apply_if_empty' }),
+        applyPolicy: 'apply_if_empty',
+      },
+    })
+
+    // 在操作读取策略状态之后、CAS 写入之前,人工选 B 并加锁(真实 DB 写,复现
+    // 「读取之后、写入之前」的竞态窗口)。monkey-patch 只控制时序,不伪造读值。
+    const transaction = env.db.$transaction.bind(env.db)
+    let humanChoiceId = ''
+    let humanDone = false
+    const interleavedTransaction = ((action: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => transaction(async tx => {
+      const find = tx.storyboard.findUnique.bind(tx.storyboard)
+      tx.storyboard.findUnique = (async (args: Parameters<typeof find>[0]) => {
+        const result = await find(args)
+        if (!humanDone && args.where.id === shot && args.select?.lockedVideoSelection) {
+          humanDone = true
+          const chosen = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000, version: 2 })
+          humanChoiceId = chosen.artifactId
+          await env.db.storyboard.update({ where: { id: shot }, data: { selectedVideoArtifactId: chosen.artifactId, lockedVideoSelection: true, stateRevision: { increment: 1 } } })
+        }
+        return result
+      }) as unknown as typeof tx.storyboard.findUnique
+      return action(tx)
+    }, options as never)) as unknown as typeof env.db.$transaction
+    const interleavedDb = new Proxy(env.db, { get: (target, key) => key === '$transaction' ? interleavedTransaction : Reflect.get(target, key) })
+    {
+      await runArtifactOperation({ kind: 'run-artifact-operation', operationId: operation.id, organizationId: seed.organizationId, attempt: 1, candidate }, env.deps({ db: interleavedDb, pollIntervalMs: 10 }))
+    }
+    expect(humanDone).toBe(true)
+
+    const done = await env.db.artifactOperation.findUniqueOrThrow({ where: { id: operation.id } })
+    expect(done.status).toBe('SUCCEEDED')
+    expect(done.applyStatus).toBe('skipped')
+    expect(done.applyReason).toContain('CAS')
+    // 人工的选择与锁原样保留,延长结果只作为候选存在。
+    const shotRow = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot } })
+    expect(shotRow.selectedVideoArtifactId).toBe(humanChoiceId)
+    expect(shotRow.lockedVideoSelection).toBe(true)
+  })
+})
+
+describe('queue-time resolved inputs (V03) and CFR conform (V05)', () => {
+  const pipelineStore = () => ({ db: env.db, enqueueJob: async () => {} })
+
+  it('freezes subtitles at queue time — edits after enqueue do not enter the composition', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    const [shotA, shotB] = seed.storyboardIds as [string, string]
+    for (const shot of [shotA, shotB]) {
+      await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
+    }
+    // 排队前:两镜各有一行自己的字幕。
+    await env.db.storyboard.update({ where: { id: shotA }, data: { subtitleText: 'OLD subtitle frozen at queue' } })
+    await env.db.storyboard.update({ where: { id: shotB }, data: { subtitleText: 'OLD second line' } })
+
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds as string[])
+    // 排队后改字幕——新字幕绝不能混进这次合成。
+    await env.db.storyboard.update({ where: { id: shotA }, data: { subtitleText: 'NEW subtitle after enqueue' } })
+    await env.db.storyboard.update({ where: { id: shotB }, data: { subtitleText: 'NEW second line' } })
+
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('COMPLETED')
+    expect(composition.subtitleArtifactId).toBeTruthy()
+    const subtitleRow = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: composition.subtitleArtifactId! } })
+    const srt = new TextDecoder().decode(await env.deps().storage.read(subtitleRow.objectKey))
+    expect(srt).toContain('OLD subtitle frozen at queue')
+    expect(srt).toContain('OLD second line')
+    expect(srt).not.toContain('NEW')
+    // manifest 记录的是排队定格的 resolved 输入。
+    const manifest = JSON.parse(composition.manifest) as { resolved?: { shots: Array<{ subtitle: string }> } }
+    expect(manifest.resolved?.shots).toHaveLength(2)
+    expect(manifest.resolved!.shots.every(entry => entry.subtitle.startsWith('OLD'))).toBe(true)
+  })
+
+  it('conforms a 30fps source to the 25fps sequence before frame-exact trimming', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    // 真实 30fps 源片:修复前直接按秒裁 raw,1 个序列帧(0.04s@25fps)会被裁成
+    // 0.033s 的 30fps 帧;修复后先 conform 成 25fps CFR。
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'v05-src-'))
+    try {
+      const src30 = path.join(dir, 'src30.mp4')
+      await promisify(execFile)('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=duration=5:size=320x240:rate=30', '-pix_fmt', 'yuv420p', src30], { timeout: 60_000 })
+      const bytes = new Uint8Array(await readFile(src30))
+      const attached = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000, source: { bytes, mimeType: 'video/mp4' } })
+      // 编辑:25fps 序列,取 [25,50) = 1 秒。
+      await env.db.episodeEdit.create({
+        data: {
+          episodeId: seed.episodeId, organizationId: seed.organizationId, headRevision: 1,
+          revisions: { create: { revision: 1, fpsNum: 25, fpsDen: 1, clips: JSON.stringify([{ clipId: 'clip-1', storyboardId: shot, artifactId: attached.artifactId, sourceInFrame: 25, sourceOutFrame: 50 }]), tracks: '[]', outputSpec: '{}', fingerprint: 'v05-r1', author: 'test' } },
+        },
+      })
+      const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+      await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+      const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+      expect(composition.status).toBe('COMPLETED')
+      const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: composition.artifactId! } })
+      const outDir = await mkdtemp(path.join(os.tmpdir(), 'v05-out-'))
+      try {
+        const out = path.join(outDir, 'master.mp4')
+        await (await import('node:fs/promises')).writeFile(out, await env.deps().storage.read(master.objectKey))
+        const { stdout } = await promisify(execFile)('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate', '-show_entries', 'format=duration', '-of', 'json', out])
+        const probe = JSON.parse(stdout) as { streams: Array<{ avg_frame_rate: string }>; format: { duration: string } }
+        expect(probe.streams[0]!.avg_frame_rate).toBe('25/1')
+        const duration = Number(probe.format.duration)
+        expect(duration).toBeGreaterThan(0.85)
+        expect(duration).toBeLessThan(1.3)
+      } finally {
+        await rm(outDir, { recursive: true, force: true })
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('edit track hardening (V03+): negative offsets, source ranges, missing blocks', () => {
+  const pipelineStore = () => ({ db: env.db, enqueueJob: async () => {} })
+
+  it('cuts the source head on a negative offset instead of clamping to zero', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    const video = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
+    // 3 秒 440Hz 附加轨,序列锚定 offsetFrame=-25(提前 1 秒):听得到的是源片
+    // 第 1..3 秒,从时间线 0 起播——修复前钳到 0 会把完整 3 秒从头播。
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'v03-extra-'))
+    try {
+      const extraFile = path.join(dir, 'extra.wav')
+      await promisify(execFile)('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'pcm_s16le', extraFile], { timeout: 60_000 })
+      const extraBytes = new Uint8Array(await readFile(extraFile))
+      const extra = await env.attachSucceededMedia(seed, { stage: 'AUDIO', modality: 'tts', storyboardId: shot, durationMs: 3000, source: { bytes: extraBytes, mimeType: 'audio/wav' } })
+      await env.db.episodeEdit.create({
+        data: {
+          episodeId: seed.episodeId, organizationId: seed.organizationId, headRevision: 1,
+          revisions: { create: { revision: 1, fpsNum: 25, fpsDen: 1, clips: JSON.stringify([{ clipId: 'clip-1', storyboardId: shot, artifactId: video.artifactId, sourceInFrame: 0, sourceOutFrame: 125 }]), tracks: JSON.stringify([{ elementId: 'trk-1', sourceArtifactId: extra.artifactId, anchor: 'sequence', offsetFrame: -25, gain: 1, muted: false, locked: false }]), outputSpec: '{}', fingerprint: 'neg-off', author: 'test' } },
+        },
+      })
+      const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+      await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+      const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+      expect(composition.status).toBe('COMPLETED')
+      const master = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: composition.artifactId! } })
+      const outDir = await mkdtemp(path.join(os.tmpdir(), 'v03-out-'))
+      try {
+        const out = path.join(outDir, 'master.mp4')
+        await (await import('node:fs/promises')).writeFile(out, await env.deps().storage.read(master.objectKey))
+        const windowVolume = async (from: number, seconds: number): Promise<number> => {
+          try {
+            const { stderr } = await promisify(execFile)('ffmpeg', ['-ss', String(from), '-t', String(seconds), '-i', out, '-af', 'highpass=f=350,lowpass=f=550,volumedetect', '-f', 'null', '-'], { timeout: 30_000 })
+            const match = /mean_volume:\s*(-?[\d.]+) dB/.exec(stderr)
+            return match ? Number(match[1]) : -999
+          } catch {
+            return -999
+          }
+        }
+        const early = await windowVolume(0.2, 0.5) // 附加轨应在响(源片 1.2–1.7s 段)
+        const late = await windowVolume(2.6, 0.6) // 附加轨 2s 处已结束,只剩静音底
+        expect(early).toBeGreaterThan(-35)
+        expect(late).toBeLessThan(early - 10)
+      } finally {
+        await rm(outDir, { recursive: true, force: true })
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('blocks the composition when an edit track cannot be resolved — no silent skips', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    const [shot] = seed.storyboardIds as [string]
+    const video = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot, durationMs: 5000 })
+    // 直接构造 manifest:快照音轨引用一个不存在的制品——修复前 stderr 跳过照常
+    // 出片,编辑意图蒸发;现在必须 BLOCKED。
+    const composition = await env.db.composition.create({
+      data: {
+        episodeId: seed.episodeId, status: 'RUNNING',
+        manifest: JSON.stringify({
+          storyboardIds: [shot],
+          editSnapshot: {
+            revisionId: 'r-x', revision: 1, fpsNum: 25, fpsDen: 1, fingerprint: 'missing-track',
+            clips: [{ clipId: 'clip-1', storyboardId: shot, artifactId: video.artifactId, sourceInFrame: 0, sourceOutFrame: 125 }],
+            tracks: [{ elementId: 'trk-ghost', sourceArtifactId: 'artifact-that-does-not-exist', anchor: 'sequence', offsetFrame: 0, gain: 1, muted: false, locked: false }],
+            outputSpec: {},
+          },
+          resolved: { shots: [{ storyboardId: shot, videoArtifactId: video.artifactId, videoSource: 'manual', trimInFrame: null, trimOutFrame: null, dialogue: '', subtitle: '', audioSource: null, voiceArtifactId: null, ambienceArtifactId: null }], musicArtifactId: null },
+        }),
+      },
+    })
+    await composeEpisode(env.composePayload(composition.id, seed), env.deps())
+    expect((await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })).status).toBe('BLOCKED')
+  })
+})
+
+// SD-068：只有 URL 的供应商回执落库后 width/height/durationMs 全 NULL，而时间线把
+// NULL 当素材长度用——4.04 秒的已付费成片被裁成 2 秒。字节到手就得实测补齐。
+describe('measured artifact metadata', () => {
+  let workdir: string
+
+  beforeEach(async () => {
+    workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-measure-'))
+  })
+
+  afterEach(async () => {
+    await rm(workdir, { recursive: true, force: true })
+  })
+
+  it('fills the size and length a download-only vendor never reported', async () => {
+    const source = path.join(workdir, 'source.mp4')
+    await synthesizeMockMedia('t2v', source, { durationMs: 4000 })
+    const measured = await measureMissingMeta({ bytes: new Uint8Array(await readFile(source)), mimeType: 'video/mp4' }, workdir)
+    expect(measured.width).toBeGreaterThan(0)
+    expect(measured.height).toBeGreaterThan(0)
+    expect(measured.durationMs).toBeGreaterThan(3000)
+    expect(measured.durationMs).toBeLessThan(5000)
+  })
+
+  it('keeps what the vendor already said', async () => {
+    const reported = { bytes: new Uint8Array(0), mimeType: 'video/mp4', width: 720, height: 1280, durationMs: 5000 }
+    expect(await measureMissingMeta(reported, workdir)).toBe(reported)
+  })
+
+  it('ships paid bytes it cannot read instead of failing or inventing a length', async () => {
+    const unreadable = { bytes: new TextEncoder().encode('not a media container'), mimeType: 'video/mp4' }
+    expect(await measureMissingMeta(unreadable, workdir)).toBe(unreadable)
+    const text = { bytes: new TextEncoder().encode('script body'), mimeType: 'text/plain' }
+    expect(await measureMissingMeta(text, workdir)).toBe(text)
+  })
+})
+
+/**
+ * 一颗 12 秒的镜头绑在只卖 5 秒的图生视频模型上：预检逼出一次取舍，人选同镜拼接。
+ * 这里要的是真计划——快照里的 takes 与库里的段行都由生产代码产出，测试只负责说出
+ * 「拼接」这个决定，不然测的是我手里捏的那份 JSON，不是用户点出来的那条链。
+ */
+async function planSplicedShot() {
+  const seed = await env.seed()
+  const [shot] = seed.storyboardIds as [string]
+  await env.db.storyboard.update({ where: { id: shot }, data: { durationMs: 12_000 } })
+  await approveScript(seed)
+  await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+  await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v', { duration: { kind: 'range', min: 2, max: 5 } })
+  const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot })
+  const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO', {
+    durationDecisions: [{ storyboardId: shot, strategy: 'splice' }],
+  })
+  if (!result.ok) throw new Error(`VIDEO refused to plan the spliced shot: ${result.error} ${(result as { reasons?: string[] }).reasons ?? ''}`)
+  const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: result.batchId, storyboardId: shot } })
+  const snapshot = JSON.parse(task.requestSnapshot!) as {
+    referenceArtifacts: { type: string; artifactId: string }[]
+    parameters: Record<string, unknown>
+    durationPlan: { strategy: string; intentMs: number; ceilingMs: number; takeCount: number; perTakeMs: number; takes: { order: number; plannedMs: number; promptDelta: string }[] }
+  }
+  return { seed, shot, frame, task, snapshot }
+}
+
+describe('spliced shot execution (S2c)', () => {
+  it('plans takes from the shot length and the bound ceiling, and starts every row unproduced', async () => {
+    const { shot, snapshot } = await planSplicedShot()
+    // 整镜意图 12 秒、单次能力 5 秒 → 3 段各 4 秒；这一击买的是段长，不是整镜。
+    expect(snapshot.durationPlan).toMatchObject({ strategy: 'splice', intentMs: 12_000, ceilingMs: 5_000, takeCount: 3, perTakeMs: 4_000 })
+    expect(snapshot.durationPlan.takes.map(take => take.plannedMs)).toEqual([4_000, 4_000, 4_000])
+    expect(snapshot.parameters.durationSeconds).toBe(4)
+    expect(snapshot.referenceArtifacts).toEqual([{ type: 'first_frame', artifactId: expect.any(String) }])
+
+    const rows = await env.db.shotTake.findMany({ where: { storyboardId: shot }, orderBy: { order: 'asc' } })
+    expect(rows.map(row => [row.order, row.plannedMs, row.status])).toEqual([[1, 4_000, 'DRAFT'], [2, 4_000, 'DRAFT'], [3, 4_000, 'DRAFT']])
+    // 段与段之间的契约在落库那一刻就写死了：承接上一段的动作、同一条声床、不许「同上」。
+    expect(rows[1]!.promptDelta).toContain('承接上段：')
+    expect(rows[1]!.promptDelta).toContain('声床：')
+    expect(rows[1]!.promptDelta).not.toContain('同上')
+  })
+
+  it('buys each take on the previous take\'s end frame and ships one master for the shot', async () => {
+    const { seed, shot, frame, task } = await planSplicedShot()
+    const queued = await env.takeWaitingRunTasks()
+    const payload = queued.find(entry => entry.taskId === task.id)!
+    // 条件模型排前，纯文字兜底排后；拼接任务只有前者能接。
+    expect(payload.candidates.map(candidate => candidate.model)).toEqual(['mock-i2v', 'mock-t2v'])
+
+    const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+    const audited: QcSubject[] = []
+    await runTask(payload, env.deps({ qcMode: 'pass', pollIntervalMs: 10, checker: recordingChecker(audited) }))
+
+    // 三段三次下单，每一次都只带一张首帧槽的图。
+    expect(submitted.mock.calls).toHaveLength(3)
+    const conditioning = submitted.mock.calls.map(([, request]) => (request.input.media as { type: string; url: string }[]).filter(media => media.type === 'first_frame'))
+    expect(conditioning.map(media => media.length)).toEqual([1, 1, 1])
+
+    const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(succeeded.status).toBe('SUCCEEDED')
+    expect(succeeded.model).toBe('mock-i2v')
+    const response = JSON.parse(succeeded.responseSnapshot!) as {
+      takes: { order: number; plannedMs: number; durationMs: number; artifactId: string; endFrameArtifactId: string; firstFrameArtifactId: string | null; reused: boolean }[]
+      artifactId: string
+      durationMs: number | null
+      reference: { model: string; conditioned: boolean }[]
+      qc: { score: number; threshold: number; aggregated: boolean }
+    }
+    expect(response.takes.map(take => take.order)).toEqual([1, 2, 3])
+    expect(response.takes.map(take => take.plannedMs)).toEqual([4_000, 4_000, 4_000])
+    // 帧链是同一颗 artifact，不是「长得像」。
+    expect(response.takes[0]!.firstFrameArtifactId).toBe(frame.artifactId)
+    expect(response.takes[1]!.firstFrameArtifactId).toBe(response.takes[0]!.endFrameArtifactId)
+    expect(response.takes[2]!.firstFrameArtifactId).toBe(response.takes[1]!.endFrameArtifactId)
+    // 三段的条件帧是三颗不同的 artifact——mock 出的画面字节相同，data URL 分不出彼此，
+    // 身份只认号：第 1 段是批准首帧，第 2、3 段各是上一段刚抽出来的末帧。
+    expect(new Set(response.takes.map(take => take.firstFrameArtifactId)).size).toBe(3)
+    // 首帧只解析一次：候选入口读过一遍，段循环不该再读一遍、更不该记第二笔。
+    expect(response.reference).toEqual([{ model: 'mock-i2v', conditioned: true }])
+    // 结论是各段合成的，不是对母带字节重新审过一遍：报告里必须写着 aggregated 并带上最差那段的读数。
+    expect(response.qc).toMatchObject({ aggregated: true })
+
+    // 台账按段分格（段号×100+候选序号），重投才落得回同一格、不会重复计费。
+    const attempts = await env.db.submissionAttempt.findMany({ where: { taskId: task.id }, orderBy: { slot: 'asc' } })
+    expect(attempts.map(attempt => attempt.slot)).toEqual([100, 200, 300])
+    expect(attempts.map(attempt => attempt.status)).toEqual(['settled', 'settled', 'settled'])
+    // 一段过审记一笔：后面某段失败时，前面付过的钱不从账本里消失。
+    expect(await env.db.usageLedger.count({ where: { taskId: task.id } })).toBe(3)
+
+    const master = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: task.id } })
+    expect(master.stage).toBe('VIDEO')
+    // 母带时长是量出来的：三段各 ~1 秒，不是计划里的 12 秒。
+    expect(master.durationMs).not.toBeNull()
+    expect(master.durationMs!).toBeLessThan(12_000)
+    const masterCheck = await env.db.qualityCheck.findFirstOrThrow({ where: { artifactId: master.id } })
+    expect(masterCheck.status).toBe('APPROVED')
+    const report = JSON.parse(masterCheck.report!) as { aggregated: boolean; takes: { order: number }[] }
+    expect(report.aggregated).toBe(true)
+    expect(report.takes.map(take => take.order)).toEqual([1, 2, 3])
+
+    // 段产物既不挂任务也不挂镜头：它们不是这一镜的可选版本，进了列表就有人把
+    // 三分之一段当成整镜收下。归属只写在 metadata 里，供审计从母带回跳。
+    expect(await env.db.mediaArtifact.count({ where: { taskId: null, storyboardId: null, organizationId: seed.organizationId } })).toBe(6)
+
+    const rows = await env.db.shotTake.findMany({ where: { storyboardId: shot }, orderBy: { order: 'asc' } })
+    expect(rows.map(row => row.status)).toEqual(['SUCCEEDED', 'SUCCEEDED', 'SUCCEEDED'])
+    expect(rows[1]!.firstFrameArtifactId).toBe(rows[0]!.endFrameArtifactId)
+    expect(rows.map(row => row.videoArtifactId)).toEqual(response.takes.map(take => take.artifactId))
+
+    // 每一段都被出示过条件帧——审核看不见接缝，帧链就只是账面上的。
+    expect(audited).toHaveLength(3)
+    expect(audited.every(subject => subject.referenceDataUrl !== undefined)).toBe(true)
+  })
+
+  it('reuses a take that was already paid for and audited instead of buying it twice', async () => {
+    const { seed, shot, frame, task } = await planSplicedShot()
+    // 上一个消费者停在第 1 段之后：段行、片子、过审结论都在库里。
+    const paid = await env.attachSucceededMedia(seed, { stage: 'VIDEO', modality: 't2v', storyboardId: shot })
+    await verdictOnFrame(paid.artifactId, 'APPROVED')
+    await env.db.shotTake.update({
+      where: { storyboardId_order: { storyboardId: shot, order: 1 } },
+      data: { status: 'SUCCEEDED', videoArtifactId: paid.artifactId, firstFrameArtifactId: frame.artifactId },
+    })
+
+    const queued = await env.takeWaitingRunTasks()
+    const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+    await runTask(queued.find(entry => entry.taskId === task.id)!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    // 已付过的段不重买：三段里只下两单。
+    expect(submitted.mock.calls).toHaveLength(2)
+    const rows = await env.db.shotTake.findMany({ where: { storyboardId: shot }, orderBy: { order: 'asc' } })
+    expect(rows[0]!.videoArtifactId).toBe(paid.artifactId)
+    expect(rows[0]!.status).toBe('SUCCEEDED')
+    // 复用段也得有末帧，否则第 2 段无从接起——末帧从已付的片子里抽，不是再买一段。
+    expect(rows[0]!.endFrameArtifactId).not.toBeNull()
+    expect(rows[1]!.firstFrameArtifactId).toBe(rows[0]!.endFrameArtifactId)
+    // 只有新买的两段进账本。
+    expect(await env.db.usageLedger.count({ where: { taskId: task.id } })).toBe(2)
+    const done = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(done.status).toBe('SUCCEEDED')
+    const response = JSON.parse(done.responseSnapshot!) as { takes: { order: number; artifactId: string; reused: boolean }[] }
+    expect(response.takes.map(take => take.reused)).toEqual([true, false, false])
+    expect(response.takes[0]!.artifactId).toBe(paid.artifactId)
+  })
+
+  it('refuses a spliced shot whose takes the bound model cannot buy in one call', async () => {
+    const { shot, task } = await planSplicedShot()
+    // 计划时按 8 秒一段批准，绑定后来缩到 5 秒：段买不满计划长度，接缝就是断的。
+    // 这时不许买半段、也不许退给纯文字模型，而是在花钱之前整条链退回。
+    const snapshot = JSON.parse(task.requestSnapshot!) as { durationPlan: Record<string, unknown> }
+    await env.db.generationTask.update({
+      where: { id: task.id },
+      data: {
+        requestSnapshot: JSON.stringify({
+          ...snapshot,
+          durationPlan: {
+            ...snapshot.durationPlan,
+            takes: [
+              { order: 1, plannedMs: 8_000, promptDelta: '第 1/2 段 · 同镜拼接' },
+              { order: 2, plannedMs: 8_000, promptDelta: '第 2/2 段 · 同镜拼接\n承接上段：动作尚未收尾\n声床：雨声' },
+            ],
+          },
+        }),
+      },
+    })
+    await env.db.shotTake.updateMany({ where: { storyboardId: shot }, data: { plannedMs: 8_000 } })
+
+    const queued = await env.takeWaitingRunTasks()
+    const submitted = vi.spyOn(MockProviderAdapter.prototype, 'submit')
+    const deps = env.deps({ qcMode: 'pass', pollIntervalMs: 10 })
+    // 整条候选链都在花钱之前退回，就按技术档的重抽策略走：每一轮都必须还是零下单，
+    // 直到策略用完停在问。这里跑到不再有排队意图为止，不把「自动几次」钉进断言。
+    let payload = queued.find(entry => entry.taskId === task.id)!
+    let rounds = 0
+    for (;;) {
+      await runTask(payload, deps)
+      rounds += 1
+      if (rounds > 4) throw new Error('the unbuyable spliced shot kept re-queueing itself')
+      const next = (await env.takeWaitingRunTasks()).find(entry => entry.taskId === task.id)
+      if (!next) break
+      payload = next
+    }
+
+    expect(rounds).toBeGreaterThan(1)
+    expect(submitted.mock.calls).toHaveLength(0)
+    const failed = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
+    expect(failed.status).toBe('FAILED')
+    expect(failed.errorSnapshot).toContain('can only buy 5s')
+    const review = JSON.parse(failed.reviewSnapshot!) as { state: string; kind: string; retryClass: string }
+    expect(review).toMatchObject({ state: 'pending', kind: 'provider-exhausted', retryClass: 'technical' })
+    expect(await env.db.mediaArtifact.count({ where: { taskId: task.id } })).toBe(0)
+    expect(await env.db.usageLedger.count({ where: { taskId: task.id } })).toBe(0)
+    // 段行停在没 produced 的那一档：半段都不许被记成已付。
+    const rows = await env.db.shotTake.findMany({ where: { storyboardId: shot }, orderBy: { order: 'asc' } })
+    expect(rows.map(row => row.status)).toEqual(['DRAFT', 'DRAFT', 'DRAFT'])
+  })
+})
+
+describe('spliced shot consumption (S2d)', () => {
+  const pipelineStore = () => ({ db: env.db, enqueueJob: async () => {} })
+
+  interface FrozenTake {
+    order: number
+    plannedMs: number | null
+    videoArtifactId: string
+    firstFrameArtifactId: string | null
+    endFrameArtifactId: string | null
+  }
+  interface CompositionManifest {
+    storyboardIds: string[]
+    selections?: Record<string, { artifactId: string; source: string }>
+    resolved?: {
+      takeCut: string
+      takeSignature: string
+      shots: { storyboardId: string; videoArtifactId: string | null; takes: FrozenTake[]; spliceMs: number | null }[]
+    }
+  }
+
+  /** 段集只从母带自己的 metadata 读——那是唯一与母带同生的来源。 */
+  function masterTakes(metadata: string): FrozenTake[] {
+    return (JSON.parse(metadata) as { takes: FrozenTake[] }).takes
+  }
+
+  async function produceSplicedMaster() {
+    const { seed, shot, task } = await planSplicedShot()
+    const queued = await env.takeWaitingRunTasks()
+    await runTask(queued.find(entry => entry.taskId === task.id)!, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect((await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('SUCCEEDED')
+    const master = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: task.id } })
+    return { seed, shot, task, master }
+  }
+
+  /** 同一镜再拼一次：出新母带，段行复用已付的那几段。 */
+  async function recutSplicedShot(seed: Seed, shot: string) {
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO', {
+      storyboardIds: [shot], regenerate: true, durationDecisions: [{ storyboardId: shot, strategy: 'splice' }],
+    })
+    if (!result.ok) throw new Error(`VIDEO refused to re-cut the spliced shot: ${result.error}`)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: result.batchId, storyboardId: shot } })
+    const payload = (await env.takeWaitingRunTasks()).find(entry => entry.taskId === task.id)!
+    await runTask(payload, env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+    expect((await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('SUCCEEDED')
+    return env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: task.id } })
+  }
+
+  it('cuts the shot as one clip at its master and freezes the take set beside it', async () => {
+    const { seed, shot, master } = await produceSplicedMaster()
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+    const queued = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    const manifest = JSON.parse(queued.manifest) as CompositionManifest
+    const entry = manifest.resolved!.shots[0]!
+
+    // 口径是「一镜一刀，刀指向拼好的母带」：段本身不进时间线，接缝不由编辑文档决定。
+    expect(manifest.resolved!.takeCut).toBe('master-clip')
+    expect(entry.videoArtifactId).toBe(master.id)
+    expect(entry.takes.map(take => take.videoArtifactId)).toEqual(masterTakes(master.metadata!).map(take => take.videoArtifactId))
+    expect(entry.takes.map(take => take.plannedMs)).toEqual([4_000, 4_000, 4_000])
+    // 同组固化总长：三段各 4 秒就是 12 秒，与镜头计划一致，不是渲染时再猜。
+    expect(entry.spliceMs).toBe(12_000)
+    expect(manifest.resolved!.takeSignature).toMatch(/^[0-9a-f]{64}$/)
+    // 快照里只有一个片段——三段各自成刀的话这里就是三行。
+    expect(manifest.resolved!.shots).toHaveLength(1)
+
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('COMPLETED')
+    expect((JSON.parse(composition.manifest) as CompositionManifest).selections![shot]!.artifactId).toBe(master.id)
+
+    // 成片里这一镜就母带那么长：多出一刀（段被重复入片）或少一刀都会在这里露出来。
+    const rendered = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: composition.artifactId! } })
+    const dir = await mkdtemp(path.join(os.tmpdir(), 's2d-render-'))
+    try {
+      const out = path.join(dir, 'master.mp4')
+      await writeFile(out, await env.deps().storage.read(rendered.objectKey))
+      const renderedMs = await probeDuration(out)
+      expect(Math.abs(renderedMs - master.durationMs!)).toBeLessThan(400)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reads a re-cut segment as stale even when the edit never moved', async () => {
+    const { seed, shot, master } = await produceSplicedMaster()
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const rendered = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(rendered.status).toBe('COMPLETED')
+    // 首合成把自动选版固化（US-015），此刻当前段集就是快照里那份，不该判过期。
+    expect(await compositionCutChanged(env.db, seed.episodeId, rendered.manifest)).toBe(false)
+    expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: false, reason: 'composition:alreadyPlanned' })
+
+    // 人重跑了这一镜（新母带），然后把钦定清空回到自动——剪辑结构一个字没改，
+    // 编辑指纹照样匹配：没有第二条轴的话，旧成片会继续冒充当前。
+    const recut = await recutSplicedShot(seed, shot)
+    expect(recut.id).not.toBe(master.id)
+    await env.db.storyboard.update({ where: { id: shot }, data: { selectedVideoArtifactId: null, lockedVideoSelection: false } })
+
+    expect(await compositionCutChanged(env.db, seed.episodeId, rendered.manifest)).toBe(true)
+    expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: true })
+  })
+
+  it('normalizes a legacy single-artifact shot to one take and still composes it', async () => {
+    const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
+    const attached = await env.attachSucceededVideo(seed, shot, 1, { durationMs: 5_000 })
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+    const manifest = JSON.parse((await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })).manifest) as CompositionManifest
+    const entry = manifest.resolved!.shots[0]!
+
+    // 存量迁移要的就是这个形态：一段就是一刀，编辑文档一行都不用重写。
+    expect(entry.takes).toEqual([{ order: 1, plannedMs: 5_000, videoArtifactId: attached.artifactId, firstFrameArtifactId: null, endFrameArtifactId: null }])
+    expect(entry.spliceMs).toBeNull()
+    expect(manifest.resolved!.takeSignature).toMatch(/^[0-9a-f]{64}$/)
+
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('COMPLETED')
+    // 单段镜头没有段集可言：换掉它的版本走的是选版轴，不是段轴。
+    expect(await compositionCutChanged(env.db, seed.episodeId, composition.manifest)).toBe(false)
+  })
+
+  it('refuses to render a master whose own segments no longer match the frozen take set', async () => {
+    const { seed, shot, master } = await produceSplicedMaster()
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, [shot])
+    // 母带的第 2 段换成另一颗产物（重建过、或 metadata 被动过）：快照说这一镜的
+    // 三段是这几颗，母带自己说不是——渲出来就是一条看着完整、里面错接的片子。
+    const tamperedMetadata = JSON.stringify({
+      role: 'spliced-master',
+      takes: masterTakes(master.metadata!).map((take, index) => (index === 1 ? { ...take, videoArtifactId: 'some-other-take' } : take)),
+    })
+    await env.db.mediaArtifact.update({ where: { id: master.id }, data: { metadata: tamperedMetadata } })
+
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('BLOCKED')
+    expect(composition.artifactId).toBeNull()
+  })
+})
+
+/**
+ * S4② 转场消费链：分镜表上那一列必须一路走到母带——排队时定格进快照、渲染时按重叠
+ * 重算整条时间线、事后能从文件反查「这一刀真的使了 400ms」。三段各管一个真实缺陷：
+ * 快照漏字段＝同一修订能渲出两种接法；时间线不重算＝画面按重叠走、字幕按标称走
+ * (SD-182 同一类)；没有失效轴＝改了转场旧成片继续冒充当前。
+ */
+describe('transition consumption (S4②)', () => {
+  const pipelineStore = () => ({ db: env.db, enqueueJob: async () => {} })
+
+  interface CompositionManifest {
+    resolved?: {
+      transitionSignature: string
+      shots: { storyboardId: string; transition: string; transitionMs: number }[]
+    }
+    cuts?: {
+      blended: boolean
+      shotStartMs?: number[]
+      overlapMs?: number[]
+      totalMs: number
+      storyboardIds: string[]
+    }
+  }
+
+  /** 两镜各 1 秒，第二镜点转场；台词挂在第二镜，字幕落位才有可读的证据。 */
+  async function seedTransitionedPair(transition: string, transitionMs: number) {
+    const seed = await env.seed({ storyboards: 2 })
+    const [first, second] = seed.storyboardIds as [string, string]
+    await env.attachSucceededVideo(seed, first, 1, { durationMs: 1_000 })
+    await env.attachSucceededVideo(seed, second, 1, { durationMs: 1_000 })
+    await env.db.storyboard.update({ where: { id: second }, data: { transition, transitionMs, dialogue: '第二镜的台词' } })
+    return { seed, first, second }
+  }
+
+  /** 把成片母带从存储里取回来实测——断言要落在文件上，不是落在计划上。 */
+  async function renderedDurationMs(artifactId: string): Promise<number> {
+    const artifact = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: artifactId } })
+    const dir = await mkdtemp(path.join(os.tmpdir(), 's42-render-'))
+    try {
+      const out = path.join(dir, 'master.mp4')
+      await writeFile(out, await env.deps().storage.read(artifact.objectKey))
+      return await probeDuration(out)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('freezes the storyboard transition into the queued snapshot', async () => {
+    const { seed, second } = await seedTransitionedPair('dissolve', 400)
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    const manifest = JSON.parse((await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })).manifest) as CompositionManifest
+
+    expect(manifest.resolved!.shots.map(shot => [shot.transition, shot.transitionMs])).toEqual([['cut', 0], ['dissolve', 400]])
+    expect(manifest.resolved!.transitionSignature).toMatch(/^[0-9a-f]{64}$/)
+    // 首镜那一刀前面没有画面，写什么都进不了重叠——口径由计划侧兜住，快照仍如实记原值。
+    expect(second).toBe(manifest.resolved!.shots[1]!.storyboardId)
+  })
+
+  it('blends the dissolve into the master and rebases the subtitle onto it', async () => {
+    const { seed, second } = await seedTransitionedPair('dissolve', 400)
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(composition.status).toBe('COMPLETED')
+
+    const manifest = JSON.parse(composition.manifest) as CompositionManifest
+    expect(manifest.cuts!.blended).toBe(true)
+    expect(manifest.cuts!.overlapMs).toEqual([0, 400])
+    expect(manifest.cuts!.shotStartMs).toEqual([0, 600])
+    expect(manifest.cuts!.totalMs).toBe(1_600)
+    expect(manifest.cuts!.storyboardIds).toEqual(seed.storyboardIds)
+
+    // 母带当场短 400ms：计划说得漂亮但文件还是 2 秒，就是「点了叠化、成片里一个字没发生」。
+    expect(Math.abs(await renderedDurationMs(composition.artifactId!) - 1_600)).toBeLessThan(120)
+
+    // 字幕排在重叠之后的那一格，不是标称的 1000ms。
+    const subtitle = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: composition.subtitleArtifactId! } })
+    const srt = new TextDecoder().decode(await env.deps().storage.read(subtitle.objectKey))
+    expect(srt).toContain('00:00:00,600 --> 00:00:01,600')
+    expect(srt).not.toContain('00:00:01,000 --> 00:00:02,000')
+    expect(srt).toContain('第二镜的台词')
+    expect(second).toBe(seed.storyboardIds[1])
+  })
+
+  it('keeps an all-cut episode on the stream-copy path with an identical timeline', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    await env.attachSucceededVideo(seed, seed.storyboardIds[0]!, 1, { durationMs: 1_000 })
+    await env.attachSucceededVideo(seed, seed.storyboardIds[1]!, 1, { durationMs: 1_000 })
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+
+    const manifest = JSON.parse(composition.manifest) as CompositionManifest
+    expect(manifest.cuts!.blended).toBe(false)
+    expect(manifest.cuts!.totalMs).toBe(2_000)
+    expect(Math.abs(await renderedDurationMs(composition.artifactId!) - 2_000)).toBeLessThan(120)
+  })
+
+  it('reads a changed transition as stale even when the edit never moved', async () => {
+    const { seed, second } = await seedTransitionedPair('cut', 0)
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const rendered = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    expect(rendered.status).toBe('COMPLETED')
+    expect(await compositionCutChanged(env.db, seed.episodeId, rendered.manifest)).toBe(false)
+    expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: false, reason: 'composition:alreadyPlanned' })
+
+    // 人回头把那一刀改成叠化：剪辑结构、选版、声音一个字没动，旧母带却是按另一套
+    // 接法粘出来的。没有这一轴，界面会继续报「成片与当前编辑一致」。
+    await env.db.storyboard.update({ where: { id: second }, data: { transition: 'dissolve', transitionMs: 400 } })
+    expect(await compositionCutChanged(env.db, seed.episodeId, rendered.manifest)).toBe(true)
+    expect(await planComposition(env.db, seed.episodeId)).toMatchObject({ ready: true })
+  })
+
+  it('does not invent a fade that the storyboard never asked for', async () => {
+    // 词表外的写法（「划像」）必须退回硬切并留痕，而不是静默变成某个别的接法。
+    const { seed, second } = await seedTransitionedPair('wipe', 400)
+    const compositionId = await createComposition(pipelineStore(), seed.organizationId, seed.episodeId, seed.storyboardIds)
+    await composeEpisode(env.composePayload(compositionId, seed), env.deps())
+    const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
+    const manifest = JSON.parse(composition.manifest) as CompositionManifest
+
+    expect(manifest.resolved!.shots[1]).toMatchObject({ transition: 'cut', transitionMs: 0 })
+    expect(manifest.cuts!.blended).toBe(false)
+    expect(second).toBe(seed.storyboardIds[1])
   })
 })

@@ -211,10 +211,18 @@ export default function ProjectsPage() {
               description={t('projects.emptyHint')}
               action={
                 can('project:create') ? (
-                  <Button size="sm" onClick={() => setProjectDialog({ mode: 'create' })}>
-                    <PlusIcon />
-                    {t('projects.new')}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    {/* P05 唯一主入口是故事建项:空空间的第一步是「写下故事」,
+                        快捷建空项目只是次级出口,不与新用户抢主按钮。 */}
+                    <Button size="sm" onClick={() => void router.push('/projects/new')}>
+                      <NotebookPenIcon />
+                      {t('projects.startCreating')}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setProjectDialog({ mode: 'create' })}>
+                      <PlusIcon />
+                      {t('projects.new')}
+                    </Button>
+                  </div>
                 ) : undefined
               }
             />

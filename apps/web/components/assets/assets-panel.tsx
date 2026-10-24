@@ -197,13 +197,14 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
   /**
    * 单条触发。0 版本 = 首次生成（幂等路径，同键不重烧已成功的那次）；
    * 已有版本 = 重跑并新增一版，这时才允许说「重生成」。
+   * 停在问询上的任务同样走重跑：普通触发会被有意跳过，只用当前绑定另起一跑。
    */
   async function triggerCostume(asset: Asset, note?: string) {
     if (!episodeId) return
-    const regenerate = asset.versions.length > 0
+    const regenerate = asset.versions.length > 0 || asset.run?.reviewPending === true
     setBusy(`regen-${asset.id}`)
     try {
-      await api(`/episodes/${episodeId}/generations`, {
+      const result = await api<{ created?: boolean }>(`/episodes/${episodeId}/generations`, {
         method: 'POST',
         body: JSON.stringify({
           stage: 'ASSET',
@@ -212,10 +213,14 @@ export function AssetsPanel({ episodeId, projectId }: AssetsPanelProps) {
           promptNote: note?.trim() || undefined,
         }),
       })
-      toast.success(t(regenerate ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
       setRegenDialog(null)
       setRegenNote('')
-      setAwaiting(current => new Map(current).set(asset.id, asset.versions.length))
+      // created:false = 撞上同键已有结果，没有新任务。说「已生成/已重新生成」是在骗人。
+      if (result.created === false) toast.message(t('assets.alreadyGenerated', { name: asset.name }))
+      else {
+        toast.success(t(regenerate ? 'assets.regenerated' : 'assets.generated', { name: asset.name }))
+        setAwaiting(current => new Map(current).set(asset.id, asset.versions.length))
+      }
       reload()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
@@ -808,7 +813,7 @@ function AssetCard({ asset, busy, phase, runError, onApprove, onRemoveVersion, o
                 {busy === `regen-${asset.id}` ? <LoaderCircleIcon className="animate-spin" /> : <SparklesIcon />}
                 {busy === `regen-${asset.id}`
                   ? t('assets.generating')
-                  : asset.versions.length > 0
+                  : asset.versions.length > 0 || asset.run?.reviewPending === true
                     ? t('assets.regenerate')
                     : t('assets.generateNow')}
               </Button>

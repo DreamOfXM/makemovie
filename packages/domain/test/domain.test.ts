@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canBind, canTransition, capabilitySlots, planVideoModels, slotModality, type ModelCapability } from '../src/index.js'
+import { canBind, canTransition, capabilitySlots, isVoiceOverSpeaker, modalityInputs, normalizeSoundBed, normalizeSpeaker, planVideoModels, slotModality, type ModelCapability } from '../src/index.js'
 
 function capability(overrides: Partial<ModelCapability> = {}): ModelCapability {
   return {
@@ -116,5 +116,63 @@ describe('canBind', () => {
   it('accepts a fully compatible binding', () => {
     expect(canBind('video_r2v', capability({ modality: 'r2v', acceptsFirstFrame: true, acceptsReferenceImages: true, maxReferenceImages: 4 })).ok).toBe(true)
     expect(canBind('script_text', capability({ modality: 'text' })).ok).toBe(true)
+  })
+})
+
+describe('normalizeSpeaker', () => {
+  it('canonicalizes voice-over aliases so VO never gets matched as a character name', () => {
+    for (const alias of ['VO', 'vo', 'V.O.', 'voice-over', '画外音', '旁白', '内心独白']) {
+      expect(normalizeSpeaker(alias)).toBe('VO')
+      expect(isVoiceOverSpeaker(alias)).toBe(true)
+    }
+  })
+
+  it('trims and strips a trailing colon, and keeps character names untouched', () => {
+    expect(normalizeSpeaker('  陈默： ')).toBe('陈默')
+    expect(normalizeSpeaker('陈默')).toBe('陈默')
+    expect(normalizeSpeaker('系统：')).toBe('系统音')
+    expect(normalizeSpeaker('创作者')).toBe('创作者')
+  })
+
+  it('treats empty and whitespace as no speaker', () => {
+    expect(normalizeSpeaker(null)).toBeNull()
+    expect(normalizeSpeaker(undefined)).toBeNull()
+    expect(normalizeSpeaker('   ')).toBeNull()
+  })
+})
+
+describe('normalizeSoundBed', () => {
+  /**
+   * 分镜 prompt 明确允许作者在「声音」列写「无」，而这一列的值会进付费请求
+   * （逐镜连续段的声床提示）。所以这一组的重点不是能认出多少种写法，是别把
+   * 「巷口无风」这种带字的正常描述误判成不要底——那等于悄悄删掉剧本要的氛围。
+   */
+  it('recognizes the author saying "no bed" in both output languages', () => {
+    for (const no of ['无', '无 ', 'NONE', 'No', 'n/a', '-', '—']) {
+      expect(normalizeSoundBed(no)).toBeNull()
+    }
+    expect(normalizeSoundBed(null)).toBeNull()
+    expect(normalizeSoundBed(undefined)).toBeNull()
+    expect(normalizeSoundBed('   ')).toBeNull()
+  })
+
+  it('passes the requested atmosphere through untouched, including text that merely mentions 无', () => {
+    expect(normalizeSoundBed('  巷口雨声压过远处的车流  ')).toBe('巷口雨声压过远处的车流')
+    expect(normalizeSoundBed('巷口无风，只有远处车流')).toBe('巷口无风，只有远处车流')
+    expect(normalizeSoundBed('no rain, only traffic')).toBe('no rain, only traffic')
+  })
+})
+
+describe('modalityInputs', () => {
+  it('lets an image row declare reference images, since an edited frame is still an image model', () => {
+    expect(modalityInputs('image')).toEqual({ takesInput: true, firstFrame: false })
+  })
+
+  it('keeps video rows offering both switches and text rows neither', () => {
+    expect(modalityInputs('i2v')).toEqual({ takesInput: true, firstFrame: true })
+    expect(modalityInputs('r2v')).toEqual({ takesInput: true, firstFrame: false })
+    expect(modalityInputs('t2v')).toEqual({ takesInput: false, firstFrame: false })
+    expect(modalityInputs('text')).toEqual({ takesInput: false, firstFrame: false })
+    expect(modalityInputs('tts')).toEqual({ takesInput: false, firstFrame: false })
   })
 })

@@ -90,6 +90,25 @@ export interface WorkerTestEnv {
   stop(): Promise<void>
 }
 
+/**
+ * 测试文件并行共用同一 Redis:obliterate 内部先 pause 再清库并删 meta,另一个
+ * 文件的 pause→obliterate 窗口撞上 meta 被清就会报 non-paused。重试即可跨过
+ * 这类瞬时竞态;连续失败仍抛出(真没清干净不该静默)。
+ */
+async function wipeQueue(queue: ReturnType<typeof createPipelineQueue>, attempts = 5): Promise<void> {
+  let lastError: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await queue.obliterate({ force: true })
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+  throw lastError
+}
+
 export async function startTestEnv(): Promise<WorkerTestEnv> {
   const port = await acquirePort()
   const dataDir = mkdtempSync(path.join(tmpdir(), 'studio-worker-it-'))
@@ -116,7 +135,7 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
   const db = new PrismaClient({ datasources: { db: { url: databaseUrl } } })
   const storage = new DiskStorage(artifactsDir)
   const queue = createPipelineQueue({ url: REDIS_URL })
-  await queue.obliterate({ force: true })
+  await wipeQueue(queue)
 
   const env: WorkerTestEnv = {
     db,
@@ -300,10 +319,10 @@ export async function startTestEnv(): Promise<WorkerTestEnv> {
       return payloads.sort((a, b) => a.attempt - b.attempt)
     },
     async drain() {
-      await queue.obliterate({ force: true })
+      await wipeQueue(queue).catch(() => undefined)
     },
     async stop() {
-      await queue.obliterate({ force: true }).catch(() => undefined)
+      await wipeQueue(queue).catch(() => undefined)
       await queue.close()
       await db.$disconnect()
       try { await pg.stop() } catch { /* already stopped */ }

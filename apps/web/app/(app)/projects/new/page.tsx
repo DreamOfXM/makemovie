@@ -4,15 +4,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { LoaderCircleIcon, NotebookPenIcon, SparklesIcon } from 'lucide-react'
 import { toast } from 'sonner'
+import { contentLocales, type ContentLocale } from '@studio/domain'
 import {
-  createProjectFromStory, getToken, listRecipes, listStoryDrafts, saveStoryDraft,
+  createProjectFromStory, getToken, listRecipes, listStoryDrafts, request, saveStoryDraft,
   type RecipeInfo, type StoryDraft,
 } from '@/lib/api'
-import { useI18n } from '@/lib/i18n'
+import { translateEnum, useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
 import { useSession } from '@/lib/session'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { HelpHint } from '@/components/ui/help-hint'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -35,20 +37,35 @@ export default function NewProjectPage() {
   const [storyText, setStoryText] = useState('')
   const [recipeKey, setRecipeKey] = useState<string>('drama-serial')
   const [format, setFormat] = useState<string>('short_drama')
+  const [contentLocale, setContentLocale] = useState<ContentLocale>('zh')
   const [saving, setSaving] = useState(false)
   const [creating, setCreating] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const dirty = useRef(false)
+  const localeTouched = useRef(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 空间默认语言只作预填：用户改过或草稿自带语言后，这条响应不再覆盖。
+  useEffect(() => {
+    void api<{ defaultContentLocale?: string | null }>('/organization')
+      .then(org => {
+        if (!localeTouched.current) setContentLocale(org.defaultContentLocale === 'en' ? 'en' : 'zh')
+      })
+      .catch(() => undefined)
+  }, [api])
 
   useEffect(() => {
     const token = getToken()
     void listRecipes(token).then(setRecipes).catch(() => setRecipes([]))
     // 恢复最近一份未消费草稿——「继续创作」而不是从零开始。
     void listStoryDrafts(token)
-      .then(drafts => {
+      .then(async drafts => {
         const open = drafts.find(draft => draft.consumedProjectId === null)
-        if (open) setRestored({ id: open.id, title: open.title, storyText: '', recipeKey: open.recipeKey, styleId: null, contentLocale: null, targetDurationMs: null, consumedProjectId: null, updatedAt: open.updatedAt } as StoryDraft)
+        if (open) {
+          const detailResponse = await request<{ draft: StoryDraft }>(`/story-drafts/${open.id}`, { token }).catch(() => null)
+          const detail = detailResponse?.draft ?? null
+          setRestored(detail ?? ({ id: open.id, title: open.title, storyText: '', recipeKey: open.recipeKey, styleId: null, contentLocale: null, targetDurationMs: null, consumedProjectId: null, updatedAt: open.updatedAt } as StoryDraft))
+        }
       })
       .catch(() => undefined)
   }, [])
@@ -58,14 +75,19 @@ export default function NewProjectPage() {
     setDraftId(restored.id)
     if (restored.title) setTitle(restored.title)
     if (restored.recipeKey) setRecipeKey(restored.recipeKey)
+    if (restored.storyText) setStoryText(restored.storyText)
+    if (restored.contentLocale === 'zh' || restored.contentLocale === 'en') {
+      localeTouched.current = true
+      setContentLocale(restored.contentLocale)
+    }
     setRestored(null)
   }, [restored])
 
-  const persist = useCallback(async (values: { title: string; storyText: string; recipeKey: string }) => {
+  const persist = useCallback(async (values: { title: string; storyText: string; recipeKey: string; contentLocale: ContentLocale }) => {
     if (values.storyText.trim() === '') return
     setSaving(true)
     try {
-      const draft = await saveStoryDraft(getToken(), { title: values.title || null, storyText: values.storyText, recipeKey: values.recipeKey }, draftId ?? undefined)
+      const draft = await saveStoryDraft(getToken(), { title: values.title || null, storyText: values.storyText, recipeKey: values.recipeKey, contentLocale: values.contentLocale }, draftId ?? undefined)
       setDraftId(draft.id)
       setSavedAt(new Date().toLocaleTimeString())
     } catch (error) {
@@ -79,9 +101,9 @@ export default function NewProjectPage() {
   useEffect(() => {
     if (!dirty.current || creating) return
     if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => { void persist({ title, storyText, recipeKey }) }, 1500)
+    timer.current = setTimeout(() => { void persist({ title, storyText, recipeKey, contentLocale }) }, 1500)
     return () => { if (timer.current) clearTimeout(timer.current) }
-  }, [title, storyText, recipeKey, persist, creating])
+  }, [title, storyText, recipeKey, contentLocale, persist, creating])
 
   async function create() {
     if (storyText.trim() === '') {
@@ -91,19 +113,21 @@ export default function NewProjectPage() {
     setCreating(true)
     try {
       // 先把最后一版输入落进草稿,再消费——失败时输入在草稿里,不丢。
-      const draft = await saveStoryDraft(getToken(), { title: title || null, storyText, recipeKey }, draftId ?? undefined)
+      const draft = await saveStoryDraft(getToken(), { title: title || null, storyText, recipeKey, contentLocale }, draftId ?? undefined)
       const result = await createProjectFromStory(getToken(), draft.id, format)
       dirty.current = false
       toast.success(result.idempotentReplay ? t('newStory.replayUsed') : t('newStory.created'))
-      router.push(`/projects/${result.project.id}`)
+      // P06 建项即进创作:故事建项的终点是首集的创作现场,不是项目管理页——
+      // 用户刚写完故事,下一步是确认剧本,不是管理项目。重放路径同样带首集。
+      router.push(result.firstEpisodeId
+        ? `/projects/${result.project.id}/episodes/${result.firstEpisodeId}`
+        : `/projects/${result.project.id}`)
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
     } finally {
       setCreating(false)
     }
   }
-
-  void api
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-6">
@@ -157,16 +181,41 @@ export default function NewProjectPage() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label>{t('newStory.formatLabel')}</Label>
-            <Select value={format} onValueChange={setFormat}>
-              <SelectTrigger className="max-w-64"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="short_drama">{t('newStory.formatShortDrama')}</SelectItem>
-                <SelectItem value="series">{t('newStory.formatSeries')}</SelectItem>
-                <SelectItem value="film">{t('newStory.formatFilm')}</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>{t('newStory.formatLabel')}</Label>
+              <Select value={format} onValueChange={setFormat}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="short_drama">{t('newStory.formatShortDrama')}</SelectItem>
+                  <SelectItem value="series">{t('newStory.formatSeries')}</SelectItem>
+                  <SelectItem value="film">{t('newStory.formatFilm')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-1">
+                <Label>{t('projects.contentLanguageLabel')}</Label>
+                <HelpHint text={t('projects.contentLanguageHint')} />
+              </div>
+              <Select
+                value={contentLocale}
+                onValueChange={value => {
+                  localeTouched.current = true
+                  dirty.current = true
+                  setContentLocale(value as ContentLocale)
+                }}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {contentLocales.map(item => (
+                    <SelectItem key={item} value={item}>
+                      {translateEnum(t, 'projects.contentLocale', item)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div className="flex items-center justify-between">

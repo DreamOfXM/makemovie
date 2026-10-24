@@ -4,6 +4,7 @@ import { basename, extname, join } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import type { Asset, AssetVersion, MediaArtifact, PrismaClient, WorkflowStatus } from '@studio/db'
 import { buildObjectKey, probeDuration } from '@studio/media'
+import { parseGenerationReview } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 import { toArtifactDto, type ArtifactDto } from './artifacts.js'
@@ -74,6 +75,11 @@ interface AssetDto {
 interface AssetRunDto {
   status: 'QUEUED' | 'RUNNING' | 'FAILED' | 'BLOCKED'
   error: string | null
+  /**
+   * 任务停在人工问询上（等重抽还是豁免）。这种任务被普通触发有意跳过，
+   * 界面必须知道，否则点「生成」只会拿到一次空成功的 200。
+   */
+  reviewPending: boolean
 }
 
 type AssetVersionRow = AssetVersion & { artifact: MediaArtifact | null }
@@ -122,7 +128,11 @@ async function assetRuns(db: PrismaClient, episodeId: string): Promise<Map<strin
       }
     }
     for (const asset of task.assets) {
-      runs.set(asset.id, { status: task.status as AssetRunDto['status'], error })
+      runs.set(asset.id, {
+        status: task.status as AssetRunDto['status'],
+        error,
+        reviewPending: task.status === 'FAILED' && parseGenerationReview(task.reviewSnapshot)?.state === 'pending',
+      })
     }
   }
   return runs

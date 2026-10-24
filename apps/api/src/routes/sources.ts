@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { PrismaClient, WorkflowStatus } from '@studio/db'
-import { advancePipeline, cascadeScriptApproval } from '@studio/pipeline'
+import { advancePipeline, cascadeScriptApproval, evaluateShotRhythm, measureShotRhythm, resolveShotRhythm, type ShotRhythmGate, type ShotRhythmReadings, type ShotRhythmSettings } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -22,6 +22,7 @@ interface VersionRow {
 
 interface ScriptVersionRow extends VersionRow {
   generationTaskId: string | null
+  rhythm: string | null
 }
 
 interface VersionSummaryDto {
@@ -37,8 +38,26 @@ interface VersionDto extends VersionSummaryDto {
   content: string
 }
 
+/**
+ * 批准时的量测快照。存快照而不是每次重算：阈值以后改了，这一版当年按什么尺子
+ * 量的不能跟着变；`accepted` 记录的是「门没过，人看过读数后仍然收下」这一次决定。
+ */
+interface StoredShotRhythm {
+  settings: ShotRhythmSettings
+  readings: ShotRhythmReadings | null
+  gate: ShotRhythmGate
+  measuredAt: string
+  accepted: boolean
+}
+
+interface ShotRhythmDto extends StoredShotRhythm {
+  /** live = 按当前正文与项目阈值现算；snapshot = 批准时存下的。 */
+  source: 'live' | 'snapshot'
+}
+
 interface ScriptVersionSummaryDto extends VersionSummaryDto {
   generationTaskId: string | null
+  rhythm: ShotRhythmDto
 }
 
 interface ScriptVersionDto extends ScriptVersionSummaryDto {
@@ -51,6 +70,11 @@ interface SourceBody {
 
 interface ScriptBody {
   sourceVersion?: number
+}
+
+interface ScriptApproveBody {
+  /** 门未通过时显式收下这份节奏：只有人看过读数并点头，才允许继续。 */
+  acceptRhythm?: boolean
 }
 
 async function findEpisodeInOrg(db: PrismaClient, episodeId: string, organizationId: string) {
@@ -82,12 +106,45 @@ function toVersionDto(version: VersionRow): VersionDto {
   return { ...toVersionSummary(version), content: version.content }
 }
 
-function toScriptVersionSummary(version: ScriptVersionRow): ScriptVersionSummaryDto {
-  return { ...toVersionSummary(version), generationTaskId: version.generationTaskId }
+function parseStoredRhythm(raw: string | null): StoredShotRhythm | null {
+  if (!raw) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object') return null
+    const value = parsed as Partial<StoredShotRhythm>
+    const settings = resolveShotRhythm(JSON.stringify(value.settings ?? null))
+    const readings = value.readings ?? null
+    const gate = value.gate && typeof value.gate === 'object' && Array.isArray(value.gate.failures)
+      ? { pass: value.gate.pass === true, failures: value.gate.failures }
+      : evaluateShotRhythm(readings, settings)
+    return { settings, readings, gate, measuredAt: typeof value.measuredAt === 'string' ? value.measuredAt : '', accepted: value.accepted === true }
+  } catch {
+    return null
+  }
 }
 
-function toScriptVersionDto(version: ScriptVersionRow): ScriptVersionDto {
-  return { ...toVersionDto(version), generationTaskId: version.generationTaskId }
+/**
+ * 已存档快照优先，草稿按当前正文与项目阈值现算——写作者在按「批准」之前就该看见
+ * 读数，而不是被门拦下才知道。没有分镜表的剧本读数为 null，门视为不适用。
+ */
+function shotRhythmOf(version: ScriptVersionRow, settings: ShotRhythmSettings): ShotRhythmDto {
+  const stored = parseStoredRhythm(version.rhythm)
+  if (stored) return { ...stored, source: 'snapshot' }
+  const readings = measureShotRhythm(version.content, settings)
+  return { settings, readings, gate: evaluateShotRhythm(readings, settings), measuredAt: '', accepted: false, source: 'live' }
+}
+
+function toScriptVersionSummary(version: ScriptVersionRow, settings: ShotRhythmSettings): ScriptVersionSummaryDto {
+  return { ...toVersionSummary(version), generationTaskId: version.generationTaskId, rhythm: shotRhythmOf(version, settings) }
+}
+
+function toScriptVersionDto(version: ScriptVersionRow, settings: ShotRhythmSettings): ScriptVersionDto {
+  return { ...toVersionDto(version), generationTaskId: version.generationTaskId, rhythm: shotRhythmOf(version, settings) }
+}
+
+async function shotRhythmSettingsFor(db: PrismaClient, projectId: string): Promise<ShotRhythmSettings> {
+  const project = await db.project.findUnique({ where: { id: projectId }, select: { shotRhythm: true } })
+  return resolveShotRhythm(project?.shotRhythm)
 }
 
 async function findSourceVersion(db: PrismaClient, episodeId: string, raw: string) {
@@ -215,6 +272,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const versions = await app.db.scriptVersion.findMany({ where: { episodeId: episode.id }, orderBy: { version: 'desc' } })
+      const settings = await shotRhythmSettingsFor(app.db, episode.projectId)
       // A failed AI derivation must surface where the writer is looking. The copy-draft in
       // this list reads as success, so the error rides along instead of living only in the
       // generation panel's batch rows.
@@ -239,7 +297,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
           lastAiError = { model: failed.model, error: message.slice(0, 400), at: failed.updatedAt.toISOString() }
         }
       }
-      return { versions: versions.map(toScriptVersionSummary), lastAiError }
+      return { versions: versions.map(version => toScriptVersionSummary(version, settings)), lastAiError }
     },
   )
 
@@ -252,7 +310,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const version = await findScriptVersion(app.db, episode.id, request.params.version)
       if (!version) return reply.code(404).send({ error: 'Script version not found' })
-      return { version: toScriptVersionDto(version) }
+      return { version: toScriptVersionDto(version, await shotRhythmSettingsFor(app.db, episode.projectId)) }
     },
   )
 
@@ -282,7 +340,8 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         entityId: created.id,
         payload: { episodeId: episode.id, version: created.version, sourceVersion: source.version },
       })
-      return reply.code(201).send({ version: toScriptVersionDto(created) })
+      const settings = await shotRhythmSettingsFor(app.db, episode.projectId)
+      return reply.code(201).send({ version: toScriptVersionDto(created, settings) })
     },
   )
 
@@ -301,10 +360,11 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       if (content.length > maxContentLength) return reply.code(400).send({ error: `content must not exceed ${maxContentLength} characters` })
 
       // Editing invalidates any prior approval: the changed words need re-approval
-      // before downstream stages should rely on them.
+      // before downstream stages should rely on them. The rhythm snapshot goes with
+      // it — it measured the old words, and a stale reading would clear the gate.
       const updated = await app.db.scriptVersion.update({
         where: { id: current.id },
-        data: { content, checksum: checksumOf(content), status: 'DRAFT' },
+        data: { content, checksum: checksumOf(content), status: 'DRAFT', rhythm: null },
       })
       await recordAudit(app.db, {
         organizationId: auth.organizationId,
@@ -314,11 +374,11 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         entityId: updated.id,
         payload: { episodeId: episode.id, version: updated.version, contentLength: content.length },
       })
-      return { version: toScriptVersionDto(updated) }
+      return { version: toScriptVersionDto(updated, await shotRhythmSettingsFor(app.db, episode.projectId)) }
     },
   )
 
-  app.post<{ Params: { episodeId: string; version: string } }>(
+  app.post<{ Params: { episodeId: string; version: string }; Body: ScriptApproveBody }>(
     '/episodes/:episodeId/script-versions/:version/approve',
     { preHandler: requirePermission('episode:write') },
     async (request, reply) => {
@@ -329,7 +389,24 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
       if (!current) return reply.code(404).send({ error: 'Script version not found' })
       if (current.status === 'APPROVED') return reply.code(409).send({ error: 'sources:alreadyApproved' })
 
-      const approved = await app.db.scriptVersion.update({ where: { id: current.id }, data: { status: 'APPROVED' } })
+      // 节奏门只在「剧本自带分镜表」时生效（没有表就读数为 null，门视为不适用）。
+      // 它不判好坏，只把读数摆在批准人面前；不显式收下就拦，避免碎镜在无人知情时
+      // 流进分镜阶段，最后变成整集的硬切。
+      const settings = await shotRhythmSettingsFor(app.db, episode.projectId)
+      const readings = measureShotRhythm(current.content, settings)
+      const gate = evaluateShotRhythm(readings, settings)
+      if (!gate.pass && request.body?.acceptRhythm !== true) {
+        return reply.code(409).send({ error: 'script:rhythmGate', rhythm: { settings, readings, gate } })
+      }
+      const snapshot: StoredShotRhythm = {
+        settings,
+        readings,
+        gate,
+        measuredAt: new Date().toISOString(),
+        accepted: !gate.pass,
+      }
+
+      const approved = await app.db.scriptVersion.update({ where: { id: current.id }, data: { status: 'APPROVED', rhythm: JSON.stringify(snapshot) } })
       // One approved script per episode: this approval retires the previous one, so
       // "已通过" always names the version the pipeline treats as current writing.
       await app.db.scriptVersion.updateMany({
@@ -354,7 +431,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         action: 'script.approve',
         entityType: 'ScriptVersion',
         entityId: approved.id,
-        payload: { episodeId: episode.id, version: approved.version, storyboardsUpdated: repointed.count },
+        payload: { episodeId: episode.id, version: approved.version, storyboardsUpdated: repointed.count, rhythm: readings },
       })
       if (cascade.cascaded) {
         await recordAudit(app.db, {
@@ -374,7 +451,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         // let the chain run through it. A cascade already started the next step.
         await advanceAfterApproval(request, auth.organizationId, auth.userId, episode.id)
       }
-      return { version: toScriptVersionDto(approved), storyboardsUpdated: repointed.count, cascaded: cascade.cascaded }
+      return { version: toScriptVersionDto(approved, settings), storyboardsUpdated: repointed.count, cascaded: cascade.cascaded }
     },
   )
 
@@ -399,7 +476,7 @@ export async function sourceRoutes(app: FastifyInstance): Promise<void> {
         entityId: updated.id,
         payload: { episodeId: episode.id, version: updated.version, archived },
       })
-      return { version: toScriptVersionDto(updated) }
+      return { version: toScriptVersionDto(updated, await shotRhythmSettingsFor(app.db, episode.projectId)) }
     },
   )
 

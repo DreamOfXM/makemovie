@@ -1,5 +1,6 @@
 export * from './types.js'
 export * from './catalog.js'
+export * from './duration.js'
 export * from './mock.js'
 export * from './dashscope.js'
 export * from './voicebox.js'

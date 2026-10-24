@@ -86,11 +86,11 @@ describe('kling submit body', () => {
     })
   })
 
-  it('sends duration as a string even when the caller passes a number', () => {
+  it('sends duration as a string even though the platform asks in whole seconds', () => {
     const body = buildKlingSubmitBody(t2v, {
       model: 'kling-v2-5-turbo',
       input: { prompt: 'a lantern swaying' },
-      parameters: { mode: 'pro', duration: 10, aspectRatio: '9:16', negativePrompt: 'blurry, watermark', cfgScale: 0.5, callbackUrl: 'https://hook.example/kling' },
+      parameters: { mode: 'pro', durationSeconds: 10, aspectRatio: '9:16', negativePrompt: 'blurry, watermark', cfgScale: 0.5, callbackUrl: 'https://hook.example/kling' },
     })
     expect(body.duration).toBe('10')
     expect(typeof body.duration).toBe('string')

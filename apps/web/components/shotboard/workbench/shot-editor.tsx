@@ -1,12 +1,16 @@
-import { ShotControlPanel } from './shot-control-panel'
 'use client'
+
+import { VersionCompare } from './version-compare'
+import { ShotControlPanel } from './shot-control-panel'
+import { TransitionRow } from './transition-row'
 
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { CheckIcon, ChevronDownIcon, LoaderCircleIcon, SaveIcon, WorkflowIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, Columns2Icon, LoaderCircleIcon, SaveIcon, WorkflowIcon } from 'lucide-react'
 import type { Asset, ShotboardShot, Storyboard } from '@/lib/api'
 import { toWorkflowStatus } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
+import { CREATOR_SPEAKER, SYSTEM_SPEAKER, VOICE_OVER_SPEAKER, normalizeSpeaker } from '@studio/domain'
 import { apiErrorMessage } from '@/lib/api-error'
 import { useSession } from '@/lib/session'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -23,7 +27,7 @@ interface ShotEditorProps {
   shot: ShotboardShot
   episodeAssets: Asset[]
   canWrite: boolean
-  onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
+  onBindAssets(storyboardId: string, assets: { assetId: string }[]): Promise<void>
   /** 打开页面持有的状态流转弹窗（映射出 StatusDialog 需要的最小字段）。 */
   onChangeStatus(shot: Pick<Storyboard, 'id' | 'number' | 'title' | 'status'>): void
   /** 跳去流程页这一镜的上下文。 */
@@ -57,6 +61,10 @@ export function ShotEditor({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [savingAsset, setSavingAsset] = useState<string | null>(null)
+  // US-018 版本比较（UX-P04 挂载）：≥2 条视频候选才有比较的意义，入口随之出现；
+  // 采用走既有选版接口，成功后 onSaved() 刷新整板。
+  const [compareOpen, setCompareOpen] = useState(false)
+  useEffect(() => { setCompareOpen(false) }, [shot.id])
 
   // 换镜即换稿：不跟随上一镜的草稿。
   useEffect(() => {
@@ -65,6 +73,15 @@ export function ShotEditor({
   }, [shot.id])
 
   const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(pickFields(shot)), [form, shot])
+  const speaker = normalizeSpeaker(form.speaker)
+  const speakerNote =
+    speaker === VOICE_OVER_SPEAKER
+      ? t('storyboards.speakerVoiceOver')
+      : speaker === SYSTEM_SPEAKER
+        ? t('storyboards.speakerSystem')
+        : speaker === CREATOR_SPEAKER
+          ? t('storyboards.speakerCreator')
+          : ''
 
   function field<K extends keyof ReturnType<typeof pickFields>>(key: K, value: ReturnType<typeof pickFields>[K]) {
     setForm(current => ({ ...current, [key]: value }))
@@ -85,6 +102,8 @@ export function ShotEditor({
           sourceExcerpt: form.sourceExcerpt,
           continuityIn: form.continuityIn,
           continuityOut: form.continuityOut,
+          transition: form.transition,
+          transitionMs: form.transitionMs,
         }),
       })
       toast.success(t('workbench.shotSaved', { number: shot.number }))
@@ -100,9 +119,9 @@ export function ShotEditor({
   const status = toWorkflowStatus(shot.status)
 
   async function toggleAsset(assetId: string) {
-    const next = boundIds.has(assetId)
-      ? shot.assets.filter(link => link.id !== assetId).map(link => ({ assetId: link.id, role: link.role }))
-      : [...shot.assets.map(link => ({ assetId: link.id, role: link.role })), { assetId, role: 'appears' }]
+    const next: { assetId: string }[] = boundIds.has(assetId)
+      ? shot.assets.filter(link => link.id !== assetId).map(link => ({ assetId: link.id }))
+      : [...shot.assets.map(link => ({ assetId: link.id })), { assetId }]
     setSavingAsset(assetId)
     try {
       await onBindAssets(shot.id, next)
@@ -131,6 +150,18 @@ export function ShotEditor({
         <StatusBadge status={status} label={t(`status.${status}`)} className="h-5 px-1.5 text-[11px]" />
         <span className="text-subtle-foreground text-xs tabular-nums">{formatDuration(shot.durationMs)}</span>
         <div className="ml-auto flex items-center gap-1">
+          {shot.videoCandidates.length >= 2 && (
+            <Button
+              variant="outline"
+              size="sm"
+              aria-expanded={compareOpen}
+              onClick={() => setCompareOpen(value => !value)}
+            >
+              <Columns2Icon />
+              {t('workbench.compareVersions')}
+              <ChevronDownIcon className={cn('size-3.5 transition-transform', compareOpen ? '' : '-rotate-90')} />
+            </Button>
+          )}
           {canWrite && (
             <Button variant="outline" size="sm" onClick={() => onChangeStatus({ id: shot.id, number: shot.number, title: shot.title, status: shot.status as Storyboard['status'] })}>
               <WorkflowIcon />
@@ -222,8 +253,17 @@ export function ShotEditor({
             />
           </label>
           <label className="block">
-            <span className="text-muted-foreground mb-1 block text-xs font-medium">{t('storyboards.speaker')}</span>
-            <Input value={form.speaker} disabled={!canWrite} onChange={event => field('speaker', event.target.value)} />
+            <span className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs font-medium">
+              {t('storyboards.speaker')}
+              <HelpHint text={t('storyboards.speakerHint')} />
+            </span>
+            <Input
+              value={form.speaker}
+              disabled={!canWrite}
+              onChange={event => field('speaker', event.target.value)}
+              onBlur={() => field('speaker', normalizeSpeaker(form.speaker) ?? '')}
+            />
+            {speakerNote && <span className="text-muted-foreground mt-1 block text-[11px]">{speakerNote}</span>}
           </label>
         </div>
 
@@ -257,6 +297,30 @@ export function ShotEditor({
           </label>
         </div>
 
+        {/* 转场与入点衔接是同一件事的两半：文字说「怎么接」，这一格说「母带上那一刀
+            是什么形状」。它改的是接缝，不改素材——下次合成才会重算时间线。 */}
+        <TransitionRow
+          transition={form.transition}
+          transitionMs={form.transitionMs}
+          disabled={!canWrite}
+          onChange={next => setForm(current => ({ ...current, ...next }))}
+        />
+
+        {/* 逐镜体检结论（服务端算，见 storyboard-gaps.ts）。只提示：挡路的仍是人，不锁保存。 */}
+        {shot.storyboardGaps.length > 0 && (
+          <div className="border-border/60 rounded-md border px-3 py-2">
+            <span className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium">
+              {t('storyboardGap.editorTitle')}
+              <HelpHint text={t('storyboardGap.chipHint')} />
+            </span>
+            <ul className="text-muted-foreground mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] leading-relaxed">
+              {shot.storyboardGaps.map(code => (
+                <li key={code}>{t(`storyboardGap.${code}`)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <details className="group border-border/60 rounded-md border px-3 py-2">
           <summary className="text-muted-foreground flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium">
             <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
@@ -272,6 +336,27 @@ export function ShotEditor({
         </details>
 
         {error && <p className="text-destructive-ink text-xs">{error}</p>}
+
+        {/* US-018 版本比较（UX-P04 挂载）：来源/时长/时间在候选格里看，比较器负责
+            并排可播与采用——媒体鉴权与加载失败走 ArtifactMedia 既有链路。 */}
+        {compareOpen && shot.videoCandidates.length >= 2 && (
+          <VersionCompare
+            storyboardId={shot.id}
+            artifacts={shot.videoCandidates.map(candidate => ({
+              id: candidate.artifactId,
+              version: candidate.version,
+              mimeType: candidate.mimeType,
+              createdAt: candidate.createdAt,
+              downloadUrl: `/artifacts/${candidate.artifactId}/content`,
+              label: candidate.origin === 'extend'
+                ? t('candidate.origin.extend')
+                : candidate.origin === 'directed_edit'
+                  ? t('candidate.origin.directed_edit')
+                  : t('candidate.origin.generation'),
+            }))}
+            onAdopted={() => onSaved()}
+          />
+        )}
       </div>
 
       <div className="border-border/60 flex items-center gap-2 border-t px-4 py-2.5">
@@ -296,9 +381,11 @@ function pickFields(shot: ShotboardShot) {
     durationMs: shot.durationMs,
     description: shot.description,
     dialogue: shot.dialogue,
-    speaker: shot.speaker ?? '',
+    speaker: normalizeSpeaker(shot.speaker) ?? '',
     sourceExcerpt: shot.sourceExcerpt,
     continuityIn: shot.continuityIn,
     continuityOut: shot.continuityOut,
+    transition: shot.transition,
+    transitionMs: shot.transitionMs,
   }
 }

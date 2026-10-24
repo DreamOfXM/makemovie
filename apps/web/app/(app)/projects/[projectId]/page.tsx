@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { FilmIcon, MoreHorizontalIcon, MoreVerticalIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { FilmIcon, MoreHorizontalIcon, MoreVerticalIcon, PencilIcon, PlusIcon, Settings2Icon, Trash2Icon } from 'lucide-react'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   ApiError,
@@ -46,7 +46,6 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { EpisodeDialog, ProjectDeleteDialog, ProjectDialog, type ProjectDialogState } from '@/components/episode/production-dialogs'
 import { BookSplitPanel } from '@/components/sources/book-split-panel'
-import { ProjectSettingsDialog, SettingsButton } from '@/components/ProjectSettingsDialog'
 import { ModelGuidanceCard } from '@/components/models/model-guidance-card'
 
 /** The strip's four colours plus the pipeline's own, in the same tokens the
@@ -164,7 +163,6 @@ export default function ProjectPage() {
   const [episodeDeleteTarget, setEpisodeDeleteTarget] = useState<Episode | null>(null)
   const [episodeDeleteAllOpen, setEpisodeDeleteAllOpen] = useState(false)
   const [episodeDeleting, setEpisodeDeleting] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
 
   async function removeEpisode(target: Episode) {
     setEpisodeDeleting(true)
@@ -259,7 +257,10 @@ export default function ProjectPage() {
 
   return (
     <>
-      <ModelGuidanceCard projectId={projectId} />
+      <ModelGuidanceCard
+        projectId={projectId}
+        continueHref={board.rows[0] ? `/projects/${projectId}/episodes/${board.rows[0].episode.id}` : undefined}
+      />
     <PageHeader
         title={project?.name ?? t('common.loading')}
         description={
@@ -277,7 +278,12 @@ export default function ProjectPage() {
             {/* 新建剧集只住在剧集卡上:动作按钮归属其结果所在的模块,页头再放一份
                 只会和它抢注意(用户实测两次提出)。 */}
             {project && (
-              <SettingsButton onClick={() => setSettingsOpen(true)} />
+              <Button asChild variant="outline" size="sm">
+                <Link href={`/settings?project=${projectId}`}>
+                  <Settings2Icon className="size-4" />
+                  {t('settings.open')}
+                </Link>
+              </Button>
             )}
             <GuardedButton
               action="project:update"
@@ -523,18 +529,6 @@ export default function ProjectPage() {
         onConfirm={() => {
           if (deleteTarget) void removeProject(deleteTarget)
         }}
-      />
-
-      <ProjectSettingsDialog
-        open={settingsOpen}
-        projectId={projectId}
-        currentStyleId={project?.stylePresetId ?? null}
-        qcMaxAttempts={project?.qcMaxAttempts ?? null}
-        audioMode={project?.audioMode ?? null}
-        contentLocale={project?.contentLocale ?? null}
-        automationGate={project?.automationGate ?? null}
-        onOpenChange={setSettingsOpen}
-        onStyleChanged={projects.reload}
       />
     </>
   )

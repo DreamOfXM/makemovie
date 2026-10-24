@@ -1,11 +1,19 @@
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PrismaClient } from '@studio/db'
+import { probeDuration } from '@studio/media'
 import { MOCK_VLM_VERDICT, resetDashScopeSyncResults } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
 import { loadWorkerConfig } from '../src/config.js'
-import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type QcSubject, type QualityChecker } from '../src/qc.js'
-import { ModelQualityChecker, auditImages, buildAuditPrompt, parseVerdict } from '../src/visual-audit.js'
+import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type AuditFinding, type AuditFrameScore, type QcSubject, type QualityChecker } from '../src/qc.js'
+import { AUDIT_CALL_BUDGET_PER_TASK, AUDIT_FRAME_POSITIONS, ModelQualityChecker, auditImages, buildAuditPrompt, parseVerdict } from '../src/visual-audit.js'
 import { MASTER_KEY } from './env.js'
+
+const run = promisify(execFile)
 
 // The mock auditor's fixed answer, read rather than restated so a change to it moves
 // these assertions instead of silently invalidating them.
@@ -235,17 +243,64 @@ describe('buildAuditPrompt', () => {
     expect(clip).toContain('A second image is attached')
     expect(clip).toContain('The image is a single frame taken from the middle')
   })
+
+  // SD-098: only a sampled-clip audit can call a scripted change a break, so only that
+  // audit is told what the script asked this shot to show.
+  const SAMPLED_FRAMES = [
+    { position: 0.1, timestampSeconds: 0.3 },
+    { position: 0.5, timestampSeconds: 1.5 },
+    { position: 0.9, timestampSeconds: 2.7 },
+  ]
+
+  it('judges a scripted fade-out against the shot script, not against the first frame alone', () => {
+    const shot = { description: '灯逐盏熄灭，一个弯腰的黑影拾起电缆', continuityOut: '林栖独自站在黑暗里' }
+    const prompt = buildAuditPrompt(subject({ stage: 'VIDEO', modality: 't2v', shotIntent: shot }), 'frame', SAMPLED_FRAMES)
+    expect(prompt).toContain(`- 画面内容：${shot.description}`)
+    expect(prompt).toContain(`- 本镜交给下一镜的结尾状态：${shot.continuityOut}`)
+    expect(prompt).toContain('以上点名的变化是这一镜要拍的东西，不是断裂')
+    expect(prompt).toContain('不得在「本镜剧本要求」之外改变')
+    expect(prompt).not.toContain('不得无声改变')
+    // 剧本要求是后续所有连贯性判句的基准，必须排在它们之前。
+    expect(prompt.indexOf('本镜剧本要求')).toBeLessThan(prompt.indexOf('多时点核对'))
+    // The two-sided rule: the state this shot owes the next one is itself checked.
+    expect(prompt).toContain('上面那个结尾状态在片段末尾没有兑现')
+  })
+
+  it('records an unscripted hand-off as unrecorded instead of inventing one', () => {
+    const prompt = buildAuditPrompt(subject({ stage: 'VIDEO', modality: 't2v', shotIntent: { description: '喜忽然抬头', continuityOut: '' } }), 'frame', SAMPLED_FRAMES)
+    expect(prompt).toContain('- 画面内容：喜忽然抬头')
+    expect(prompt).toContain('- 本镜交给下一镜的结尾状态：(未记录)')
+  })
+
+  it('keeps the absolute continuity rule verbatim when no shot script is available', () => {
+    const prompt = buildAuditPrompt(subject({ stage: 'VIDEO', modality: 't2v' }), 'frame', SAMPLED_FRAMES)
+    expect(prompt).toContain('多时点核对:frameScores 按每帧标注的 position 逐帧给出 0..1 分;帧与帧之间出场主体、服装与场景不得无声改变——跨时点不一致记 dimension="continuity" 的 finding。')
+    expect(prompt).not.toContain('本镜剧本要求')
+  })
+
+  it('leaves the still-image and single-frame audits byte-identical even with a shot script', () => {
+    const shot = { description: '灯逐盏熄灭', continuityOut: '黑暗中的林栖' }
+    expect(buildAuditPrompt(subject({ shotIntent: shot }), 'image')).toBe(UNCONDITIONED_IMAGE_PROMPT)
+    expect(buildAuditPrompt(subject({ stage: 'VIDEO', modality: 't2v', shotIntent: shot }), 'frame')).toBe(UNCONDITIONED_FRAME_PROMPT)
+  })
+
+  it('puts the shot script beside the first-frame basis for an i2v clip', () => {
+    const prompt = buildAuditPrompt(subject({ stage: 'VIDEO', modality: 'i2v', referenceDataUrl: REFERENCE_DATA_URL, shotIntent: { description: '灯逐盏熄灭', continuityOut: '黑影离场' } }), 'frame', SAMPLED_FRAMES)
+    expect(prompt).toContain('这是图生视频:最后一张图(首帧)是这段视频的画面基准。')
+    expect(prompt).toContain('- 画面内容：灯逐盏熄灭')
+    expect(prompt).toContain('- 本镜交给下一镜的结尾状态：黑影离场')
+  })
 })
 
 describe('auditImages', () => {
   it('sends one image when nothing conditioned the shot', () => {
     const artifact = subject()
-    expect(auditImages(artifact, { bytes: artifact.bytes, mimeType: artifact.mimeType })).toEqual([ARTIFACT_DATA_URL])
+    expect(auditImages(artifact, [{ bytes: artifact.bytes, mimeType: artifact.mimeType }])).toEqual([ARTIFACT_DATA_URL])
   })
 
   it('appends the reference instead of putting it where the artifact belongs', () => {
     const artifact = subject({ referenceDataUrl: REFERENCE_DATA_URL })
-    expect(auditImages(artifact, { bytes: artifact.bytes, mimeType: artifact.mimeType })).toEqual([ARTIFACT_DATA_URL, REFERENCE_DATA_URL])
+    expect(auditImages(artifact, [{ bytes: artifact.bytes, mimeType: artifact.mimeType }])).toEqual([ARTIFACT_DATA_URL, REFERENCE_DATA_URL])
   })
 })
 
@@ -397,6 +452,198 @@ describe('ModelQualityChecker against a bound auditor', () => {
     const verdict = await auditor(unboundAuditorDb()).check(subject({ referenceDataUrl: REFERENCE_DATA_URL }))
     expect(verdict).toEqual({ kind: 'visual-audit', decision: 'unjudged', reasons: ['no verified visual_audit binding'] })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// US-032 FR-Q01/Q02: a clip is audited from sampled positions in one multi-image
+// request, and every way the sampling or the answer breaks lands as `unjudged`
+// with a reason — never as a score nobody earned.
+describe('multi-point video audit (US-032)', () => {
+  let workdir: string
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    resetDashScopeSyncResults()
+    workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-visual-audit-'))
+  })
+
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    await rm(workdir, { recursive: true, force: true })
+  })
+
+  /** A real 3-second clip, plus the timestamps 10%/50%/90% sampling must produce. */
+  async function testsrcClip(): Promise<{ bytes: Uint8Array; timestamps: number[] }> {
+    const clip = path.join(workdir, 'clip.mp4')
+    await run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=duration=3:size=320x240:rate=25', '-pix_fmt', 'yuv420p', clip])
+    const durationSeconds = (await probeDuration(clip)) / 1000
+    expect(durationSeconds).toBeGreaterThan(0)
+    return {
+      bytes: new Uint8Array(await readFile(clip)),
+      timestamps: AUDIT_FRAME_POSITIONS.map(position => position * durationSeconds),
+    }
+  }
+
+  function videoSubject(bytes: Uint8Array, overrides: Partial<QcSubject> = {}): QcSubject {
+    return subject({ stage: 'VIDEO', modality: 't2v', mimeType: 'video/mp4', bytes, workdir, durationMs: 3_000, ...overrides })
+  }
+
+  it('sends every sampled position in one request, each labeled with its timestamp', async () => {
+    const clip = await testsrcClip()
+    fetchMock.mockResolvedValue(answeredWith(MOCK_VLM_VERDICT))
+    const verdict = await auditor().check(videoSubject(clip.bytes))
+
+    // The plain mock verdict still parses through the multi-image request, which
+    // is the same guarantee the pipeline chain relies on.
+    expect(verdict).toEqual({ kind: 'visual-audit', decision: 'pass', score: MOCK_VLM_SCORE })
+
+    const sent = sentRequest()
+    expect(sent.images).toHaveLength(3)
+    for (const image of sent.images) expect(image.startsWith('data:image/')).toBe(true)
+    // AC17: each frame is labeled with its position and its real timestamp, and
+    // the reply contract asks for per-frame scores and timestamped findings.
+    const labels = [...sent.prompt.matchAll(/- Image (\d+): (\d+)% into the clip \(([\d.]+)s\)/g)]
+    expect(labels.map(label => label[1])).toEqual(['1', '2', '3'])
+    expect(labels.map(label => label[2])).toEqual(['10', '50', '90'])
+    for (const [index, label] of labels.entries()) {
+      expect(Math.abs(Number(label[3]) - clip.timestamps[index]!)).toBeLessThan(0.01)
+    }
+    expect(sent.prompt).toContain('frameScores')
+    expect(sent.prompt).toContain('findings')
+  })
+
+  it('stays unjudged with a reason when the model answers nothing parseable', async () => {
+    const clip = await testsrcClip()
+    fetchMock.mockResolvedValue(answeredWith('the frames look fine to me'))
+    const verdict = await auditor().check(videoSubject(clip.bytes))
+    expect(verdict).toEqual({
+      kind: 'visual-audit',
+      decision: 'unjudged',
+      reasons: ['dashscope/qwen3-vl-plus returned no parseable verdict: the frames look fine to me'],
+    })
+  })
+
+  it('stays unjudged when every sampled position fails to extract, and never dials the provider', async () => {
+    const garbage = new TextEncoder().encode('this is not a video at all')
+    fetchMock.mockResolvedValue(answeredWith(MOCK_VLM_VERDICT))
+    const verdict = await auditor().check(videoSubject(garbage))
+
+    expect(verdict).toMatchObject({ kind: 'visual-audit', decision: 'unjudged' })
+    expect((verdict as { reasons: string[] }).reasons[0]).toContain('frame extraction failed at every position')
+    expect((verdict as { reasons: string[] }).reasons[0]).toContain('10%, 50%, 90%')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('carries structured findings back, with times snapped onto the sampled timestamps', async () => {
+    const clip = await testsrcClip()
+    const withFindings = JSON.stringify({
+      score: 0.4,
+      reasons: ['subject drifts across the clip'],
+      frameScores: AUDIT_FRAME_POSITIONS.map((position, index) => ({ position, score: 0.8 - index * 0.3 })),
+      findings: [
+        { dimension: 'continuity', severity: 'warning', message: 'jacket turns red mid-clip', timeSeconds: clip.timestamps[1]! + 0.11 },
+        { dimension: 'aesthetic', severity: 'info', message: 'mild compression noise throughout' },
+      ],
+    })
+    fetchMock.mockResolvedValue(answeredWith(withFindings))
+    const verdict = await auditor().check(videoSubject(clip.bytes))
+
+    expect(verdict).toMatchObject({ kind: 'visual-audit', decision: 'rework', score: 0.4, reasons: ['subject drifts across the clip'] })
+    const detailed = verdict as { findings?: AuditFinding[]; frameScores?: AuditFrameScore[] }
+
+    // 时间点归位:模型说的 1.61s 落到最近一个被抽帧的时间戳上,不原样透传。
+    const snapped = detailed.findings![0]!.evidenceTimeSeconds
+    expect(snapped).not.toBeNull()
+    expect(clip.timestamps.some(timestamp => Math.abs(timestamp - snapped!) < 0.01)).toBe(true)
+    expect(Math.abs(snapped! - clip.timestamps[1]!)).toBeLessThan(0.01)
+    expect(detailed.findings![0]).toMatchObject({ dimension: 'continuity', severity: 'warning', message: 'jacket turns red mid-clip' })
+    // 模型没给时间点 → null,不猜一个位置。
+    expect(detailed.findings![1]).toMatchObject({ dimension: 'aesthetic', severity: 'info', message: 'mild compression noise throughout' })
+    expect(detailed.findings![1]!.evidenceTimeSeconds).toBeNull()
+    expect(detailed.frameScores).toHaveLength(3)
+  })
+
+  it('drops findings whose dimension or severity the contract never allowed', () => {
+    const answer = JSON.stringify({
+      score: 0.9,
+      reasons: [],
+      findings: [
+        { dimension: 'plot', severity: 'warning', message: 'unknown dimension' },
+        { dimension: 'content', severity: 'blocking', message: 'unknown severity' },
+        { dimension: 'content', severity: 'info', message: '' },
+        { dimension: 'continuity', severity: 'warning', message: 'kept: subject swap at the tail' },
+      ],
+    })
+    expect(parseVerdict(answer, [0.3, 1.5, 2.7])).toEqual({
+      score: 0.9,
+      reasons: [],
+      findings: [{ dimension: 'continuity', severity: 'warning', message: 'kept: subject swap at the tail', evidenceTimeSeconds: null }],
+    })
+  })
+
+  it('keeps a finding unpinned when the audit is a still image with no timestamps', () => {
+    const answer = JSON.stringify({ score: 0.5, reasons: [], findings: [{ dimension: 'aesthetic', severity: 'info', message: 'soft focus', timeSeconds: 3 }] })
+    expect(parseVerdict(answer)).toEqual({
+      score: 0.5,
+      reasons: [],
+      findings: [{ dimension: 'aesthetic', severity: 'info', message: 'soft focus', evidenceTimeSeconds: null }],
+    })
+  })
+})
+
+// US-032 FR-Q04: visual-audit calls have their own per-task budget, so a re-audit
+// loop cannot bill the auditor forever. Spending the budget is an audit that must
+// not happen — `unjudged`, before any frame extraction or upstream call.
+describe('audit call budget (FR-Q04)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+    resetDashScopeSyncResults()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function budgetDb(used: number): { db: PrismaClient; count: ReturnType<typeof vi.fn> } {
+    const count = vi.fn(async () => used)
+    const db = { ...boundAuditorDb(), qualityCheck: { count } } as unknown as PrismaClient
+    return { db, count }
+  }
+
+  it('refuses to dial the provider once the per-task budget is spent', async () => {
+    const { db, count } = budgetDb(AUDIT_CALL_BUDGET_PER_TASK)
+    fetchMock.mockResolvedValue(answeredWith(MOCK_VLM_VERDICT))
+
+    const verdict = await auditor(db).check(subject({ taskId: 'task-budget' }))
+
+    expect(verdict).toMatchObject({ kind: 'visual-audit', decision: 'unjudged' })
+    const reasons = (verdict as { reasons: string[] }).reasons
+    expect(reasons[0]).toContain('审核预算已用尽')
+    expect(reasons[0]).toContain('task-budget')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(count).toHaveBeenCalledWith({ where: { kind: 'visual-audit', artifact: { taskId: 'task-budget' } } })
+  })
+
+  it('still audits while the budget has room, and counts only the task it is checking', async () => {
+    const { db, count } = budgetDb(AUDIT_CALL_BUDGET_PER_TASK - 1)
+    fetchMock.mockResolvedValue(answeredWith(MOCK_VLM_VERDICT))
+
+    const verdict = await auditor(db).check(subject({ taskId: 'task-budget' }))
+
+    expect(verdict).toEqual({ kind: 'visual-audit', decision: 'pass', score: MOCK_VLM_SCORE })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(count).toHaveBeenCalledWith({ where: { kind: 'visual-audit', artifact: { taskId: 'task-budget' } } })
+  })
+
+  it('does not consult the budget at all for a subject that carries no task id', async () => {
+    const db = boundAuditorDb() // no qualityCheck delegate on this mock
+    fetchMock.mockResolvedValue(answeredWith(MOCK_VLM_VERDICT))
+
+    const verdict = await auditor(db).check(subject())
+    expect(verdict).toEqual({ kind: 'visual-audit', decision: 'pass', score: MOCK_VLM_SCORE })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 

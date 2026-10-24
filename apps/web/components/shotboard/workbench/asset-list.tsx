@@ -90,10 +90,10 @@ export function AssetList({
                   </span>
                   <span className="text-subtle-foreground mt-0.5 block truncate text-[11px]">
                     {t('workbench.assetUsage', { count: asset.usageCount ?? 0, versions: asset.versions.length })}
-                    {asset.run && asset.run.status !== 'FAILED' && (
+                    {(asset.run?.status === 'QUEUED' || asset.run?.status === 'RUNNING') && (
                       <span className="text-primary"> · {t('workbench.assetRunning')}</span>
                     )}
-                    {asset.run?.status === 'FAILED' && asset.status !== 'APPROVED' && (
+                    {(asset.run?.status === 'FAILED' || asset.run?.status === 'BLOCKED') && asset.status !== 'APPROVED' && (
                       <span className="text-destructive-ink"> · {t('workbench.assetFailed')}</span>
                     )}
                   </span>

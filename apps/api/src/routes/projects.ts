@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { ProjectFormat } from '@studio/db'
 import { automationGates, contentLocales, durationOutOfRange, formatDefaults, formatDurationRange, isAutomationGate, isContentLocale, isProjectFormat, projectFormats } from '@studio/domain'
+import { normalizeShotRhythm, resolveShotRhythm, targetShotDurationPlan } from '@studio/pipeline'
 import { recordAudit } from '../lib/audit.js'
 import { cloneExampleProject, EXAMPLE_FIXTURES, installExampleProject } from '../lib/example-project.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -55,10 +56,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       where: { id: requestedStyleId, OR: [{ organizationId: null }, { organizationId: auth.organizationId }] },
     })
     if (!style) return reply.code(400).send({ error: 'styleId references a non-existent or inaccessible style' })
-    const contentLocale = request.body?.contentLocale
-    if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
+    const requestedLocale = request.body?.contentLocale
+    if (requestedLocale !== undefined && !isContentLocale(requestedLocale)) {
       return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
     }
+    // 空间默认语言只在建项这一刻读一次；之后改空间默认不动任何已有作品。
+    const organization = await app.db.organization.findUnique({ where: { id: auth.organizationId }, select: { defaultContentLocale: true } })
+    const contentLocale = requestedLocale ?? organization?.defaultContentLocale ?? 'zh'
     const format = request.body?.format ?? 'short_drama'
     if (!isProjectFormat(format)) {
       return reply.code(400).send({ error: `format must be one of ${projectFormats.join(', ')}` })
@@ -101,7 +105,24 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(project)
   })
 
-  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; qcMaxAttempts?: number | null; audioMode?: 'video_native' | 'voice_clone' | null; automationGate?: string | null } }>(
+  // 单镜时长的三项读数：项目档、绑定模型能力、产品上限，以及三取最小后的
+  // 有效上限和真正可选的档位。设置页在开跑前就摊开这三个数——等生成失败
+  // 再解释为什么 30 秒买不到，是最贵的一种说明书。
+  app.get<{ Params: { projectId: string } }>(
+    '/projects/:projectId/shot-duration',
+    { preHandler: requirePermission('read') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const project = await app.db.project.findFirst({
+        where: { id: request.params.projectId, organizationId: auth.organizationId },
+        select: { id: true },
+      })
+      if (!project) return reply.code(404).send({ error: 'Project not found' })
+      return targetShotDurationPlan(app.db, auth.organizationId, project.id)
+    },
+  )
+
+  app.patch<{ Params: { projectId: string }; Body: { name?: string; contentLocale?: string; format?: string; targetDurationMs?: number; maxShotDurationMs?: number | null; maxRetriesPerShot?: number | null; retryTechnical?: string | null; retryConsistency?: string | null; retryCreative?: string | null; audioMode?: 'video_native' | 'voice_clone' | null; automationGate?: string | null; shotRhythm?: { avgShotMs?: number; longTakeMinMs?: number; longTakeShareMin?: number } | null } }>(
     '/projects/:projectId',
     { preHandler: requirePermission('project:update') },
     async (request, reply) => {
@@ -112,36 +133,85 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       if (project.isExample) return reply.code(403).send({ error: 'example project is read-only — clone it to edit' })
       // The format is fixed at creation by design; silently ignoring it here made
       // third-party callers believe a rename also re-shaped the project.
-      if (request.body?.format !== undefined || request.body?.targetDurationMs !== undefined) {
-        return reply.code(400).send({ error: 'format and targetDurationMs are set at project creation and cannot be changed here' })
+      if (request.body?.format !== undefined) {
+        return reply.code(400).send({ error: 'format is set at project creation and cannot be changed here' })
       }
-      const { name, contentLocale, qcMaxAttempts, audioMode, automationGate } = request.body ?? {}
-      if (name === undefined && contentLocale === undefined && qcMaxAttempts === undefined && audioMode === undefined && automationGate === undefined) {
-        return reply.code(400).send({ error: 'name, contentLocale, qcMaxAttempts, audioMode or automationGate is required' })
+      // 内容语言在建项那一刻锁定：剧本、台词、配音、字幕都已按它生成，改名时
+      // 悄悄换语言会让同一集前后半段说两种话。要换语言就新建作品。
+      if (request.body?.contentLocale !== undefined) {
+        return reply.code(400).send({ error: 'contentLocale is locked at project creation and cannot be changed' })
+      }
+      const { name, targetDurationMs, maxShotDurationMs, maxRetriesPerShot, retryTechnical, retryConsistency, retryCreative, audioMode, automationGate, shotRhythm } = request.body ?? {}
+      if (name === undefined && targetDurationMs === undefined && maxShotDurationMs === undefined && maxRetriesPerShot === undefined && retryTechnical === undefined && retryConsistency === undefined && retryCreative === undefined && audioMode === undefined && automationGate === undefined && shotRhythm === undefined) {
+        return reply.code(400).send({ error: 'name, targetDurationMs, maxShotDurationMs, maxRetriesPerShot, retry policies, audioMode, automationGate or shotRhythm is required' })
+      }
+      // 目标总时长在这里可改，但只改变「以后新建的集」的缺省值：已经存在的集
+      // 各自锁着自己的目标时长，改项目档不会回头重写它们的剧本与分镜。
+      if (targetDurationMs !== undefined) {
+        const format = project.format.toLowerCase()
+        if (!isProjectFormat(format) || durationOutOfRange(format, targetDurationMs)) {
+          const range = isProjectFormat(format) ? formatDurationRange[format] : null
+          return reply.code(400).send({ error: range ? `targetDurationMs must be between ${range.minMs} and ${range.maxMs} for format ${format}` : 'targetDurationMs is invalid for this project format' })
+        }
       }
       if (name !== undefined && !name.trim()) return reply.code(400).send({ error: 'name is required' })
-      if (contentLocale !== undefined && !isContentLocale(contentLocale)) {
-        return reply.code(400).send({ error: `contentLocale must be one of ${contentLocales.join(', ')}` })
-      }
-      // 审计重抽上限：每次重抽都计一次生成费，范围钉死 1-3，null=回全局默认（2）。
       if (audioMode !== undefined && audioMode !== null && !['video_native', 'voice_clone'].includes(audioMode)) {
         return reply.code(400).send({ error: 'audioMode must be video_native or voice_clone' })
       }
-      if (qcMaxAttempts !== undefined && qcMaxAttempts !== null && ![1, 2, 3].includes(qcMaxAttempts)) {
-        return reply.code(400).send({ error: 'qcMaxAttempts must be 1, 2 or 3 (null restores the default)' })
+      // 单镜时长上限：只认 10/15/30 秒三档，null = 跟随绑定模型。
+      if (maxShotDurationMs !== undefined && maxShotDurationMs !== null && ![10_000, 15_000, 30_000].includes(maxShotDurationMs)) {
+        return reply.code(400).send({ error: 'maxShotDurationMs must be 10000, 15000 or 30000 (null follows the bound model)' })
+      }
+      // 每镜重抽上限：不含首次，0-3；null = 默认 1 次（总尝试 2 次）。
+      if (maxRetriesPerShot !== undefined && maxRetriesPerShot !== null && (!Number.isInteger(maxRetriesPerShot) || maxRetriesPerShot < 0 || maxRetriesPerShot > 3)) {
+        return reply.code(400).send({ error: 'maxRetriesPerShot must be an integer between 0 and 3 (null uses the default 1)' })
+      }
+      if (retryTechnical !== undefined && retryTechnical !== null && !['auto2', 'auto1', 'ask'].includes(retryTechnical)) {
+        return reply.code(400).send({ error: 'retryTechnical must be auto2, auto1 or ask (null uses auto2)' })
+      }
+      if (retryConsistency !== undefined && retryConsistency !== null && !['ask', 'auto1', 'auto2'].includes(retryConsistency)) {
+        return reply.code(400).send({ error: 'retryConsistency must be ask, auto1 or auto2 (null uses ask)' })
+      }
+      if (retryCreative !== undefined && retryCreative !== null && !['ask', 'auto1'].includes(retryCreative)) {
+        return reply.code(400).send({ error: 'retryCreative must be ask or auto1 (null uses ask)' })
       }
       // 制作档位：null 回到默认（beforeSpend），即引入档位之前的行为。
       if (automationGate !== undefined && automationGate !== null && !isAutomationGate(automationGate)) {
         return reply.code(400).send({ error: `automationGate must be one of ${automationGates.join(', ')} (null restores the default)` })
       }
+      // 节奏契约三条阈值：只收有边界的数，越界直接拒（设置页要给得出人话的错误，
+      // 静默回默认会让人以为改了）。null 整体回到起始默认。
+      let nextShotRhythm: string | null | undefined
+      if (shotRhythm === null) {
+        nextShotRhythm = null
+      } else if (shotRhythm !== undefined) {
+        if (typeof shotRhythm !== 'object') return reply.code(400).send({ error: 'shotRhythm must be an object or null' })
+        const { avgShotMs, longTakeMinMs, longTakeShareMin } = shotRhythm
+        if (avgShotMs !== undefined && (!Number.isInteger(avgShotMs) || avgShotMs < 1_000 || avgShotMs > 20_000)) {
+          return reply.code(400).send({ error: 'shotRhythm.avgShotMs must be an integer between 1000 and 20000 milliseconds' })
+        }
+        if (longTakeMinMs !== undefined && (!Number.isInteger(longTakeMinMs) || longTakeMinMs < 2_000 || longTakeMinMs > 30_000)) {
+          return reply.code(400).send({ error: 'shotRhythm.longTakeMinMs must be an integer between 2000 and 30000 milliseconds' })
+        }
+        if (longTakeShareMin !== undefined && (typeof longTakeShareMin !== 'number' || !Number.isFinite(longTakeShareMin) || longTakeShareMin < 0 || longTakeShareMin > 1)) {
+          return reply.code(400).send({ error: 'shotRhythm.longTakeShareMin must be a number between 0 and 1' })
+        }
+        // 部分更新：没提交的字段沿用当前值，避免设置页改一格把另两格打回默认。
+        nextShotRhythm = JSON.stringify(normalizeShotRhythm({ ...resolveShotRhythm(project.shotRhythm), ...shotRhythm }))
+      }
       const updated = await app.db.project.update({
         where: { id: project.id },
         data: {
           ...(name === undefined ? {} : { name: name.trim() }),
-          ...(contentLocale === undefined ? {} : { contentLocale }),
-          ...(qcMaxAttempts === undefined ? {} : { qcMaxAttempts }),
+          ...(targetDurationMs === undefined ? {} : { targetDurationMs }),
+          ...(maxShotDurationMs === undefined ? {} : { maxShotDurationMs }),
+          ...(maxRetriesPerShot === undefined ? {} : { maxRetriesPerShot }),
+          ...(retryTechnical === undefined ? {} : { retryTechnical }),
+          ...(retryConsistency === undefined ? {} : { retryConsistency }),
+          ...(retryCreative === undefined ? {} : { retryCreative }),
           ...(audioMode === undefined ? {} : { audioMode }),
           ...(automationGate === undefined ? {} : { automationGate }),
+          ...(nextShotRhythm === undefined ? {} : { shotRhythm: nextShotRhythm }),
         },
       })
       await recordAudit(app.db, {
@@ -150,7 +220,10 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         action: 'project.update',
         entityType: 'Project',
         entityId: project.id,
-        payload: { from: { name: project.name, contentLocale: project.contentLocale, qcMaxAttempts: project.qcMaxAttempts, automationGate: project.automationGate }, to: { name: updated.name, contentLocale: updated.contentLocale, qcMaxAttempts: updated.qcMaxAttempts, audioMode: updated.audioMode, automationGate: updated.automationGate } },
+        payload: {
+          from: { name: project.name, targetDurationMs: project.targetDurationMs, maxShotDurationMs: project.maxShotDurationMs, maxRetriesPerShot: project.maxRetriesPerShot, retryTechnical: project.retryTechnical, retryConsistency: project.retryConsistency, retryCreative: project.retryCreative, automationGate: project.automationGate, shotRhythm: project.shotRhythm },
+          to: { name: updated.name, targetDurationMs: updated.targetDurationMs, maxShotDurationMs: updated.maxShotDurationMs, maxRetriesPerShot: updated.maxRetriesPerShot, retryTechnical: updated.retryTechnical, retryConsistency: updated.retryConsistency, retryCreative: updated.retryCreative, audioMode: updated.audioMode, automationGate: updated.automationGate, shotRhythm: updated.shotRhythm },
+        },
       })
       return updated
     },
@@ -246,7 +319,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const slug = typeof request.body?.slug === 'string' ? request.body.slug : EXAMPLE_FIXTURES[0]!.slug
       const fixture = EXAMPLE_FIXTURES.find(item => item.slug === slug)
       if (!fixture) return reply.code(400).send({ error: `unknown example slug ${slug}` })
-      const result = await installExampleProject(app.db, auth.organizationId, fixture)
+      const result = await installExampleProject(app.db, app.storage, auth.organizationId, fixture)
       return reply.code(result.installed ? 201 : 200).send(result)
     },
   )

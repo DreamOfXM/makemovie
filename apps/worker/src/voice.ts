@@ -9,9 +9,10 @@ import {
   listVoiceboxProfiles,
 } from '@studio/providers'
 import type { RunTaskPayload } from '@studio/jobs'
+import { isVoiceOverSpeaker, normalizeSpeaker } from '@studio/domain'
 import { buildObjectKey, extensionFor, probeDuration } from '@studio/media'
 import { HashQualityChecker, QC_THRESHOLD } from './qc.js'
-import { recordAssetVersion } from './asset-version.js'
+import { recordAssetVersion } from '@studio/pipeline'
 import { taskLog, type LogAnchor } from './execution-log.js'
 import { nextArtifactVersion, parseRequest, type TaskRow } from './run-task.js'
 import { embeddedEngineStatus, embeddedGenerateSpeech, modelLabel } from './tts-engine.js'
@@ -28,8 +29,9 @@ import type { PipelineDeps } from './deps.js'
  *   3. 都没有 → skip，任务回落云端 TTS 候选（下载引导由 API/UI 层负责提示）
  *
  * 解析链：镜头 speaker → 同集角色素材（同名）→ Asset.voiceArtifactId →
- * 参考音频 + transcript（上传时存进 artifact.metadata）。
- * 任何一步不成立都返回 skip——「有就用、没有不挡路」。
+ * 参考音频 + transcript（上传时存进 artifact.metadata）。VO（画外音）不是角色名：
+ * 先按同名找，找不到就回退到本集唯一一条已绑定的角色声音——本片画外音就是
+ * 主角的第一人称旁白。任何一步不成立都返回 skip——「有就用、没有不挡路」。
  */
 
 export type VoiceOutcome =
@@ -42,6 +44,31 @@ export type VoiceOutcome =
 /** Voicebox 首次出声可能要下载 ~1GB 克隆引擎，轮询上限给足（默认 10 分钟）。 */
 const VOICEBOX_TIMEOUT_MS = 600_000
 
+export interface VoiceCandidate {
+  id: string
+  name: string
+  voiceArtifactId: string | null
+}
+
+/**
+ * 一个镜头的克隆配音落到哪个角色素材上。VO 不是角色名：同名声源不存在时，
+ * 只有「本集恰好一个角色绑了声音」才回退——多个就跳过（回落云端 TTS），绝不猜。
+ * 系统音 / 创作者同理没有角色声音，走云端。
+ */
+export function resolveSpeakerAsset(
+  speaker: string,
+  named: VoiceCandidate | null,
+  voicedCharacters: VoiceCandidate[],
+): { kind: 'asset'; asset: VoiceCandidate } | { kind: 'skip'; reason: string } {
+  if (named?.voiceArtifactId) return { kind: 'asset', asset: named }
+  if (isVoiceOverSpeaker(speaker)) {
+    if (voicedCharacters.length === 0) return { kind: 'skip', reason: 'voice-over (VO) has no character voice bound in this episode' }
+    if (voicedCharacters.length > 1) return { kind: 'skip', reason: 'voice-over (VO) matches multiple character voices; pick one in the shot speaker field' }
+    return { kind: 'asset', asset: voicedCharacters[0]! }
+  }
+  return { kind: 'skip', reason: `speaker "${speaker}" has no bound voice` }
+}
+
 export async function runCharacterVoice(
   task: TaskRow,
   payload: RunTaskPayload,
@@ -50,21 +77,28 @@ export async function runCharacterVoice(
 ): Promise<VoiceOutcome> {
   if (!task.storyboardId) return { kind: 'skip', reason: 'task has no storyboard' }
   const storyboard = await deps.db.storyboard.findUnique({ where: { id: task.storyboardId }, select: { speaker: true } })
-  const speaker = storyboard?.speaker?.trim()
+  const speaker = normalizeSpeaker(storyboard?.speaker)
   if (!speaker) return { kind: 'skip', reason: 'shot has no speaker' }
 
-  const asset = await deps.db.asset.findFirst({
+  const named = await deps.db.asset.findFirst({
     where: { episodeId: task.batch.episodeId, kind: 'character', name: speaker, voiceArtifactId: { not: null } },
     select: { id: true, name: true, voiceArtifactId: true },
   })
-  if (!asset?.voiceArtifactId) return { kind: 'skip', reason: `speaker "${speaker}" has no bound voice` }
+  const voiced = isVoiceOverSpeaker(speaker) && !named?.voiceArtifactId
+    ? await deps.db.asset.findMany({
+        where: { episodeId: task.batch.episodeId, kind: 'character', voiceArtifactId: { not: null } },
+        select: { id: true, name: true, voiceArtifactId: true },
+        take: 2,
+      })
+    : []
+  const resolved = resolveSpeakerAsset(speaker, named, voiced)
+  if (resolved.kind === 'skip') return resolved
+  const asset = resolved.asset
+  const voiceArtifactId = asset.voiceArtifactId
+  if (!voiceArtifactId) return { kind: 'skip', reason: `speaker "${speaker}" has no bound voice` }
 
-  if (!(await isVoiceboxRunning(deps.voiceboxBaseUrl))) {
-    return { kind: 'skip', reason: 'Voicebox is not running (voice falls back to cloud TTS)' }
-  }
-
-  const artifact = await deps.db.mediaArtifact.findUnique({ where: { id: asset.voiceArtifactId } })
-  if (!artifact) return { kind: 'next', error: `voice artifact ${asset.voiceArtifactId} not found` }
+  const artifact = await deps.db.mediaArtifact.findUnique({ where: { id: voiceArtifactId } })
+  if (!artifact) return { kind: 'next', error: `voice artifact ${voiceArtifactId} not found` }
   let transcript = ''
   try {
     const meta = JSON.parse(artifact.metadata ?? '{}') as { transcript?: unknown }
@@ -212,8 +246,8 @@ async function persistVoiceArtifact(
       },
     })
     if (verdict.decision === 'unjudged' || verdict.decision === 'rework') {
-      // 本机克隆零成本：重抽不需要预算权衡，直接再排一抽。
-      const maxAttempts = task.batch.episode.project.qcMaxAttempts ?? 3
+      // 本机克隆零成本：重抽不需要预算权衡，直接再排一抽（与主链同一口径）。
+      const maxAttempts = (task.batch.episode.project.maxRetriesPerShot ?? 1) + 1
       if (payload.attempt >= maxAttempts) {
         await taskLog(deps.db, anchor, 'error', 'task.fail', `${voiceMeta.model}: ${verdict.kind} not met after ${maxAttempts} attempts`)
         await deps.db.generationTask.update({

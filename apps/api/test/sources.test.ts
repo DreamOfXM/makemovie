@@ -268,7 +268,7 @@ describe('script versions', () => {
     expect(versions.map(version => version.contentLength)).toEqual([sourceContentV2.length, sourceContentV1.length])
     expect(versions.map(version => version.status)).toEqual(['DRAFT', 'APPROVED'])
     for (const version of versions) {
-      expect(Object.keys(version).sort()).toEqual(['archivedAt', 'checksum', 'contentLength', 'generationTaskId', 'id', 'status', 'version'])
+      expect(Object.keys(version).sort()).toEqual(['archivedAt', 'checksum', 'contentLength', 'generationTaskId', 'id', 'rhythm', 'status', 'version'])
     }
   })
 
@@ -286,6 +286,15 @@ describe('script versions', () => {
       content: sourceContentV1,
       generationTaskId: null,
       archivedAt: null,
+      // 正文没有分镜表：读数 null，门不适用；快照来自那次批准，快照里同样是 null。
+      rhythm: {
+        settings: { avgShotMs: 4_500, longTakeMinMs: 8_000, longTakeShareMin: 0.2 },
+        readings: null,
+        gate: { pass: true, failures: [] },
+        measuredAt: expect.any(String),
+        accepted: false,
+        source: 'snapshot',
+      },
     })
 
     expect((await env.app.inject({ method: 'GET', url: `${scriptUrl}/99`, headers: authHeaders(viewerToken) })).statusCode).toBe(404)
@@ -336,5 +345,103 @@ describe('script versions', () => {
     expect(events.some(event => event.action === 'script.derive' && event.entityType === 'ScriptVersion')).toBe(true)
     expect(events.some(event => event.action === 'script.approve' && event.entityType === 'ScriptVersion')).toBe(true)
     expect(events.some(event => event.action === 'script.edit' && event.entityType === 'ScriptVersion')).toBe(true)
+  })
+})
+
+describe('shot rhythm gate', () => {
+  // 3 颗 3 秒短镜：均长 3.0 秒、长镜 0、占比 0——按项目阈值两条都不过。
+  const rhythmScript = [
+    '场景 1',
+    '',
+    '| # | 时间 | 时长 | 场景 | 画面 | 台词/VO | 声音 | 生成方式 |',
+    '|---|---|---|---|---|---|---|---|',
+    '| 1 | 0:00–0:03 | 3s | 卧室 | （全景·平视）睁眼 | — | 雨 | 视频 |',
+    '| 2 | 0:03–0:06 | 3s | 卧室 | （近景·平视）门缝 | — | 雨 | 视频 |',
+    '| 3 | 0:06–0:09 | 3s | 走廊 | （中景·平视）脚步 | — | 脚步 | 视频 |',
+  ].join('\n')
+
+  it('validates the project-level thresholds and persists partial updates', async () => {
+    for (const shotRhythm of [
+      { avgShotMs: 999 },
+      { longTakeMinMs: 30_001 },
+      { longTakeShareMin: 1.5 },
+      { avgShotMs: '4500' },
+      'not-an-object',
+    ]) {
+      const res = await env.app.inject({ method: 'PATCH', url: `/api/projects/${projectId}`, headers: authHeaders(ownerToken), payload: { shotRhythm } })
+      expect(res.statusCode).toBe(400)
+    }
+
+    // 只写一项：其余沿用起始默认，而不是落成 0。
+    const partial = await env.app.inject({
+      method: 'PATCH', url: `/api/projects/${projectId}`, headers: authHeaders(ownerToken),
+      payload: { shotRhythm: { avgShotMs: 5_000 } },
+    })
+    expect(partial.statusCode).toBe(200)
+    expect(JSON.parse(partial.json().shotRhythm as string)).toEqual({ avgShotMs: 5_000, longTakeMinMs: 8_000, longTakeShareMin: 0.2 })
+
+    const full = await env.app.inject({
+      method: 'PATCH', url: `/api/projects/${projectId}`, headers: authHeaders(ownerToken),
+      payload: { shotRhythm: { avgShotMs: 5_000, longTakeMinMs: 8_000, longTakeShareMin: 0.3 } },
+    })
+    expect(full.statusCode).toBe(200)
+  })
+
+  it('flags a table script before approval and freezes the readings into the snapshot', async () => {
+    const derived = await env.app.inject({ method: 'POST', url: scriptUrl, headers: authHeaders(editorToken), payload: { sourceVersion: 2 } })
+    expect(derived.statusCode).toBe(201)
+    const version = derived.json().version.version as number
+
+    const saved = await env.app.inject({ method: 'PATCH', url: `${scriptUrl}/${version}`, headers: authHeaders(editorToken), payload: { content: rhythmScript } })
+    expect(saved.statusCode).toBe(200)
+    // 草稿按当前正文现算，写作者在按「通过」之前就能看见读数。
+    expect(saved.json().version.rhythm).toMatchObject({
+      source: 'live',
+      readings: { shotCount: 3, avgShotMs: 3_000, longTakeCount: 0, longTakeShare: 0, shortShotCount: 3 },
+      gate: { pass: false, failures: ['avgShot', 'longTakeShare'] },
+      accepted: false,
+    })
+
+    const blocked = await env.app.inject({ method: 'POST', url: `${scriptUrl}/${version}/approve`, headers: authHeaders(editorToken) })
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.json().error).toBe('script:rhythmGate')
+    expect(blocked.json().rhythm.readings.shotCount).toBe(3)
+    expect(blocked.json().rhythm.gate.failures).toEqual(['avgShot', 'longTakeShare'])
+    expect((await env.db.scriptVersion.findFirstOrThrow({ where: { episodeId, version } })).status).toBe('DRAFT')
+
+    const accepted = await env.app.inject({
+      method: 'POST', url: `${scriptUrl}/${version}/approve`, headers: authHeaders(editorToken), payload: { acceptRhythm: true },
+    })
+    expect(accepted.statusCode).toBe(200)
+    expect(accepted.json().version.rhythm).toMatchObject({ source: 'snapshot', accepted: true, gate: { pass: false } })
+
+    // 快照进库：阈值以后改了，这一版当年按什么尺子量的不能变。
+    const stored = await env.db.scriptVersion.findFirstOrThrow({ where: { episodeId, version } })
+    const snapshot = JSON.parse(stored.rhythm!) as { settings: { avgShotMs: number }; readings: { avgShotMs: number }; accepted: boolean; measuredAt: string }
+    expect(snapshot.settings.avgShotMs).toBe(5_000)
+    expect(snapshot.readings.avgShotMs).toBe(3_000)
+    expect(snapshot.accepted).toBe(true)
+    expect(snapshot.measuredAt).not.toBe('')
+  })
+
+  it('drops the snapshot when the text changes, and re-measures against the live thresholds', async () => {
+    const current = await env.db.scriptVersion.findFirstOrThrow({ where: { episodeId }, orderBy: { version: 'desc' } })
+    const edited = await env.app.inject({
+      method: 'PATCH', url: `${scriptUrl}/${current.version}`, headers: authHeaders(editorToken),
+      payload: { content: `${rhythmScript}\n\n修改：门外传来第二声脚步。` },
+    })
+    expect(edited.statusCode).toBe(200)
+    expect(edited.json().version.status).toBe('DRAFT')
+    expect(edited.json().version.rhythm.source).toBe('live')
+    expect((await env.db.scriptVersion.findUniqueOrThrow({ where: { id: current.id } })).rhythm).toBeNull()
+  })
+
+  it('restores the starting defaults when the settings are reset to null', async () => {
+    const reset = await env.app.inject({ method: 'PATCH', url: `/api/projects/${projectId}`, headers: authHeaders(ownerToken), payload: { shotRhythm: null } })
+    expect(reset.statusCode).toBe(200)
+    expect(reset.json().shotRhythm).toBeNull()
+    const listed = await env.app.inject({ method: 'GET', url: scriptUrl, headers: authHeaders(viewerToken) })
+    const newest = (listed.json().versions as { version: number; rhythm: { settings: { avgShotMs: number } } }[])[0]!
+    expect(newest.rhythm.settings.avgShotMs).toBe(4_500)
   })
 })

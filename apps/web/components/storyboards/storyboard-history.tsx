@@ -14,7 +14,7 @@ interface StoryboardHistoryProps {
   shots: Storyboard[]
   canWrite: boolean
   episodeAssets: Asset[]
-  onBindAssets(storyboardId: string, assets: { assetId: string; role: string }[]): Promise<void>
+  onBindAssets(storyboardId: string, assets: { assetId: string }[]): Promise<void>
   /** 与镜头卡同源:最新一次任务决定折叠行的状态点颜色。 */
   shotTasks?: Map<string, GenerationTask>
   onEdit(storyboard: Storyboard): void

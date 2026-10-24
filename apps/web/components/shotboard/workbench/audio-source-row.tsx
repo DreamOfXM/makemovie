@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { UploadIcon } from 'lucide-react'
+import { normalizeSoundBed } from '@studio/domain'
 import type { ShotAudioSource, ShotboardShot } from '@/lib/api'
 import { audioModeWord, shotAudioMode, shotAudioSourceInEffect, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
@@ -56,8 +57,9 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
     : null
   const ambience = shot.importedAmbience ?? null
   const ambienceMs = ambience?.durationMs ?? null
-  // 环境音在混音时被切到这一镜的画面长度（apad + atrim），不会像配音那样压到下一镜，
-  // 所以这两条话与上面那两条不同：短了是尾巴空，长了是末尾被切掉。
+  // 导入底不是「切到这一镜末尾」：混音层按 -stream_loop 把它补满这一镜的画面，再按
+  // 音频桥越过切点淡出（planAudioBridges）。所以这两条话与上面那两条不同口径——
+  // 短了不是尾巴空着，是循环点会被听见；长了不是切进下一镜，是多出的部分根本不播。
   const ambienceNote = ambienceMs && Math.abs(ambienceMs - pictureMs) > 200
     ? t(ambienceMs < pictureMs ? 'shotboard.audio.ambienceShorter' : 'shotboard.audio.ambienceLonger', {
       audio: formatDuration(ambienceMs),
@@ -65,10 +67,17 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
       gap: formatDuration(Math.abs(ambienceMs - pictureMs)),
     })
     : null
+  // 分镜表「声音」列点名的那条氛围底。平台不生成环境音，所以这一列唯一的出路是被人
+  // 看见、再照着导——列里的字只落库不上屏，等于剧本写下的雨声永远进不了成片。
+  // 作者写「无」就是不要底，不催导入（normalizeSoundBed 与逐镜连续段提示同一份判据）。
+  const scriptedBed = normalizeSoundBed(shot.ambience)
   // 这一档本来要放模型原声，但导进来的环境音占的就是那一格——原声已经不播了，
   // 界面必须说出来，否则「配音 + 原声」那枚药丸在骗人。
   const ambienceReplacesNative = Boolean(ambience) && (mode === 'native' || mode === 'voice_native')
   const customSubtitle = shot.subtitleText !== null
+  // 「沿用台词」只有在真有台词时才是选项：合成时字幕取的是 subtitleText ?? dialogue，
+  // 没台词的镜选了它等于选「不上字」，把空态包装成一档选择会骗人。
+  const canFollowDialogue = Boolean(shot.dialogue)
   const subtitleNote = mode !== 'imported' || customSubtitle
     ? null
     : shot.dialogue === ''
@@ -320,6 +329,12 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
             </div>
             <AudioWaveform artifact={ambience} pictureMs={pictureMs} />
 
+            {scriptedBed && (
+              <p className="text-faint-foreground mt-1.5 text-[11px] leading-relaxed">
+                {t('shotboard.audio.ambienceAsked', { bed: scriptedBed })}
+              </p>
+            )}
+
             {ambienceNote && (
               <p className="border-warning/40 bg-warning/10 text-warning-ink mt-2 rounded-md border px-2.5 py-1.5 text-[11px] leading-relaxed">
                 {ambienceNote}
@@ -332,16 +347,23 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
             )}
           </div>
         ) : (
-          <p className="text-faint-foreground mt-1 text-[11px] leading-relaxed">{t('shotboard.audio.ambienceEmpty', { mode: audioModeWord(t, mode) })}</p>
+          <p className="text-faint-foreground mt-1 text-[11px] leading-relaxed">
+            {scriptedBed
+              ? t('shotboard.audio.ambienceAskedEmpty', { bed: scriptedBed, mode: audioModeWord(t, mode) })
+              : t('shotboard.audio.ambienceEmpty', { mode: audioModeWord(t, mode) })}
+          </p>
         )}
       </div>
 
-      {(imported || shot.subtitleText !== null) && (
-        <div className="mt-2">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <p className="text-muted-foreground text-xs">{t('shotboard.audio.subtitle')}</p>
-            <HelpHint text={t('shotboard.audio.subtitleHint')} />
-            <div role="group" aria-label={t('shotboard.audio.subtitle')} className="ml-auto flex items-center gap-1">
+      {/* 字幕是这一镜的画面层，与有没有配音、有没有台词无关：计数、地点、日期这类
+          只有本机合成才画得出的字，全靠这一行落进成片。原先整行只在「导入过音频或已
+          写过字幕」时出现，等于把没有台词的镜锁在门外——写它的端点一直都在。 */}
+      <div className="mt-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <p className="text-muted-foreground text-xs">{t('shotboard.audio.subtitle')}</p>
+          <HelpHint text={t('shotboard.audio.subtitleHint')} />
+          <div role="group" aria-label={t('shotboard.audio.subtitle')} className="ml-auto flex items-center gap-1">
+            {canFollowDialogue && (
               <Button
                 variant={customSubtitle ? 'ghost' : 'secondary'}
                 size="sm"
@@ -357,13 +379,27 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
               >
                 {t('shotboard.audio.subtitleDialogue')}
               </Button>
+            )}
+            {customSubtitle ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                aria-pressed
+                className="h-7 text-xs font-medium text-foreground"
+                disabled={!editable || busy !== null}
+                onClick={() => {
+                  setDraft(shot.subtitleText ?? '')
+                  setEditing(true)
+                }}
+              >
+                {t('shotboard.audio.subtitleCustom')}
+              </Button>
+            ) : canFollowDialogue ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
-                    variant={customSubtitle ? 'secondary' : 'ghost'}
+                    variant="ghost"
                     size="sm"
-                    aria-pressed={customSubtitle}
-                    className={cn('h-7 text-xs', customSubtitle && 'text-foreground font-medium')}
                     disabled={!editable || busy !== null}
                     onClick={() => {
                       setDraft(shot.subtitleText ?? shot.dialogue)
@@ -374,42 +410,60 @@ export function AudioSourceRow({ shot, onChanged }: { shot: ShotboardShot; onCha
                   </Button>
                 </TooltipTrigger>
                 {/* 没改之前这一格实际吃的是台词，只有提示能说明白；原生 title 看不见 */}
-                {!customSubtitle && <TooltipContent>{t('shotboard.audio.subtitleFromDialogue')}</TooltipContent>}
+                <TooltipContent>{t('shotboard.audio.subtitleFromDialogue')}</TooltipContent>
               </Tooltip>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                disabled={!editable || busy !== null}
+                onClick={() => {
+                  setDraft('')
+                  setEditing(true)
+                }}
+              >
+                {t('shotboard.audio.subtitleAdd')}
+              </Button>
+            )}
+            {customSubtitle && !canFollowDialogue && (
+              <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={!editable || busy !== null} onClick={() => void saveSubtitle(null)}>
+                {t('shotboard.audio.subtitleClear')}
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {(editing || customSubtitle) && (
+          <div className="mt-1.5 space-y-1.5">
+            <textarea
+              value={draft}
+              rows={2}
+              disabled={!editable || busy !== null}
+              placeholder={t('shotboard.audio.subtitlePlaceholder')}
+              aria-label={t('shotboard.audio.subtitle')}
+              onChange={event => setDraft(event.target.value)}
+              className="border-input bg-background focus-visible:ring-ring w-full resize-y rounded-md border px-2 py-1.5 text-sm"
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                disabled={!editable || busy !== null || draft.trim() === (shot.subtitleText ?? '').trim()}
+                onClick={() => void saveSubtitle(draft)}
+              >
+                {t('shotboard.audio.subtitleSave')}
+              </Button>
+              {editing && !customSubtitle && (
+                <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={busy !== null} onClick={() => setEditing(false)}>
+                  {t('common.cancel')}
+                </Button>
+              )}
+              <span className="text-faint-foreground text-[11px]">{t('shotboard.audio.subtitleNeedsCompose')}</span>
             </div>
           </div>
-
-          {(editing || customSubtitle) && (
-            <div className="mt-1.5 space-y-1.5">
-              <textarea
-                value={draft}
-                rows={2}
-                disabled={!editable || busy !== null}
-                placeholder={t('shotboard.audio.subtitlePlaceholder')}
-                aria-label={t('shotboard.audio.subtitle')}
-                onChange={event => setDraft(event.target.value)}
-                className="border-input bg-background focus-visible:ring-ring w-full resize-y rounded-md border px-2 py-1.5 text-sm"
-              />
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  disabled={!editable || busy !== null || draft.trim() === (shot.subtitleText ?? '').trim()}
-                  onClick={() => void saveSubtitle(draft)}
-                >
-                  {t('shotboard.audio.subtitleSave')}
-                </Button>
-                {editing && !customSubtitle && (
-                  <Button variant="ghost" size="sm" className="h-7 text-xs" disabled={busy !== null} onClick={() => setEditing(false)}>
-                    {t('common.cancel')}
-                  </Button>
-                )}
-                <span className="text-faint-foreground text-[11px]">{t('shotboard.audio.subtitleNeedsCompose')}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       {shotOwesVoice(shot) && !track && <p className="text-warning-ink mt-2 text-[11px]">{t('shotboard.audio.waitingVoice')}</p>}
 
