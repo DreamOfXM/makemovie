@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
 import { apiError } from '../lib/api-error.js'
-import { isValidSequenceFps } from '@studio/domain'
+import { isValidSequenceFps, validateClipRange } from '@studio/domain'
 import { editFingerprint } from '@studio/media'
 import type { RationalFps } from '@studio/domain'
 import type { PrismaClient } from '@studio/db'
@@ -16,6 +16,9 @@ import type { PrismaClient } from '@studio/db'
  *   system-initial)——R09:闸门只看「是不是机器写的」,不看「填没填全」,因为部分填充的
  *   机器 head 正是回填实测时长后最需要刷新的那一类;已有人工剪辑绝不自动重置。
  * PUT /episodes/:id/edit —— CAS 保存(expectedEditRevision),创建不可变修订。
+ *   SD-101:除整数/空片段之外,还要拿素材实测帧数判上限——裁到素材尽头之外的区间
+ *   一旦落库,合成按裸帧号硬裁、已付费画面静默丢掉,所以这类区间不许进修订历史(400
+ *   episodeEdit:clipBeyondMedia + 逐条镜头号)。上限与读侧红框同一套解析。
  * POST /episodes/:id/edit/restore —— 以历史修订创建新 head(不篡改历史)。
  * POST /episodes/:id/edit/build-default —— 显式构建默认序列(供「开始剪辑」按钮
  *   /空态使用)。幂等:head 已是同指纹 system 序列时 no-op(rebuilt:false);
@@ -94,6 +97,7 @@ function parseClips(raw: unknown): ClipDocJson[] | { error: string } {
     if (typeof clip.sourceInFrame !== 'number' || typeof clip.sourceOutFrame !== 'number' || !Number.isInteger(clip.sourceInFrame) || !Number.isInteger(clip.sourceOutFrame)) {
       return { error: 'sourceInFrame and sourceOutFrame must be integers (editMedia frame indices)' }
     }
+    if (clip.sourceInFrame < 0 || clip.sourceOutFrame < 0) return { error: `clip ${clip.clipId}: frame indices must be >= 0` }
     if (clip.sourceOutFrame <= clip.sourceInFrame) return { error: `clip ${clip.clipId}: sourceOutFrame must be > sourceInFrame` }
     clips.push({ clipId: clip.clipId, storyboardId: clip.storyboardId, artifactId: clip.artifactId, sourceInFrame: clip.sourceInFrame, sourceOutFrame: clip.sourceOutFrame })
   }
@@ -409,6 +413,21 @@ export async function episodeEditRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(400).send({ error: `clip ${clip.clipId} references artifact ${clip.artifactId} that is not a video of this shot` })
         }
       }
+      // SD-101 写路径闸门:界面把「裁到素材之外」画成红色缺陷态,保存就必须拒绝——
+      // 越界区间一旦进了修订历史,合成端按裸帧号硬裁(compose.ts 的 trimOutFrame),
+      // 超出部分的已付费画面静默丢掉。上限来自 describeClipMaterials,与读侧红框、
+      // 合成端选片同一套解析,所以「界面报的素材长度」和「真正裁出来的画面」是同一个数;
+      // 实测时长未回填(maxFrame=null)的素材判不出上限,不拦。
+      const caps = await describeClipMaterials(app.db, auth.organizationId, clips, { fpsNum, fpsDen })
+      const capByClip = new Map(caps.map(item => [item.clipId, item]))
+      const beyond = clips
+        .filter(clip => {
+          const cap = capByClip.get(clip.clipId)?.maxFrame
+          return cap != null && validateClipRange({ sourceInFrame: clip.sourceInFrame, sourceOutFrame: clip.sourceOutFrame }, cap) === 'beyond_media'
+        })
+        .map(clip => `#${capByClip.get(clip.clipId)?.shotNumber ?? clip.clipId}`)
+      if (beyond.length > 0) return reply.code(400).send({ error: 'episodeEdit:clipBeyondMedia', reasons: beyond })
+
       const rawTracks = Array.isArray(request.body?.tracks) ? request.body.tracks : []
       const clipIds = new Set(clips.map(clip => clip.clipId))
       for (const item of rawTracks) {

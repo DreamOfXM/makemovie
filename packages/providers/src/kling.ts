@@ -18,6 +18,7 @@ const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000
 
 const DEFAULT_MODE = 'std'
 const DEFAULT_DURATION = '5'
+/** Only a text-to-video request has no frame to read the framing off; an i2v request must not be handed this one. */
 const DEFAULT_ASPECT_RATIO = '16:9'
 
 export interface KlingHttpRequest {
@@ -33,7 +34,7 @@ export interface KlingSubmitBody {
   negative_prompt?: string
   mode: string
   duration: string
-  aspect_ratio: string
+  aspect_ratio?: string
   cfg_scale?: number
   callback_url?: string
   image?: string
@@ -184,10 +185,24 @@ export function klingResourcePath(modality: ModelModality): string {
   return `${VIDEO_BASE}/${klingResource(modality)}`
 }
 
+/**
+ * Which framing Kling is asked for. A caller-named ratio wins for both resources.
+ * Otherwise only a text-to-video request — which has no image to read a framing off — gets
+ * the documented default; an image-to-video request leaves the key out so the canvas follows
+ * the approved first frame it was conditioned on.
+ */
+export function klingAspectRatio(resource: 'text2video' | 'image2video', parameters: Record<string, unknown>): string | undefined {
+  const named = readString(parameters, 'aspectRatio')
+  // SD-069：竖屏首帧被裁成横带，起因就是这里替 i2v 猜了一个 16:9 画布——已付费的那单不能再这么写。
+  if (named !== undefined) return named
+  return resource === T2V_RESOURCE ? DEFAULT_ASPECT_RATIO : undefined
+}
+
 export function buildKlingSubmitBody(capability: ModelCapability, request: ProviderRequest): KlingSubmitBody {
   const resource = klingResource(capability.modality)
   const { input, parameters } = request
   validateReferenceRequest(capability, input)
+  const aspectRatio = klingAspectRatio(resource, parameters)
   const body: KlingSubmitBody = {
     model_name: request.model,
     prompt: readString(input, 'prompt') ?? '',
@@ -197,7 +212,7 @@ export function buildKlingSubmitBody(capability: ModelCapability, request: Provi
     // the explicit default: a length this product writes is auditable, a vendor default it
     // cannot read back is not.
     duration: String(vendorDurationField('kling', parameters).duration ?? DEFAULT_DURATION),
-    aspect_ratio: readString(parameters, 'aspectRatio') ?? DEFAULT_ASPECT_RATIO,
+    ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
   }
 
   const negativePrompt = readString(parameters, 'negativePrompt')

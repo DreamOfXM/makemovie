@@ -208,6 +208,8 @@ async function persistVoiceArtifact(
       data: {
         organizationId: task.organizationId,
         taskId: task.id,
+        // 与主链同口径（SD-150）：镜头级产物把归属写在自己行上，不按任务反查。
+        storyboardId: task.storyboardId,
         stage: 'AUDIO',
         objectKey: stored.key,
         checksum: stored.checksum,

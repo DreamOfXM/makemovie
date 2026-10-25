@@ -282,7 +282,12 @@ export function UsagePanel({ episodeId = null, projectId = null, scopeFromUrl = 
                       <TableHead className="text-right">{t('usage.failed')}</TableHead>
                       <TableHead className="text-right">{t('usage.inputUnits')}</TableHead>
                       <TableHead className="text-right">{t('usage.outputUnits')}</TableHead>
-                      <TableHead>{t('usage.binding')}</TableHead>
+                      <TableHead>
+                        {t('usage.binding')}
+                        {/* SD-176：这一格印的是用户自己起的连接名，不是计费事实——
+                            名字挨着用量列就必须自证身份，否则「百炼免费额度」会被读成平台在报价格。 */}
+                        <HelpHint text={t('usage.bindingHint')} />
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

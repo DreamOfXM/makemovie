@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { useArtifactUrl } from '@/components/generations/artifact-media'
 import { AcceptTakeDialog } from './accept-take-dialog'
+import { QcReadings } from './qc-readings'
 
 interface VideoReviewLightboxProps {
   shot: ShotboardShot
@@ -152,6 +153,12 @@ export function VideoReviewLightbox({ shot, initialArtifactId, onClose, onChange
             <ChevronRightIcon className="size-5" />
           </button>
         )}
+      </div>
+
+      {/* SD-081：决策就在这一屏做（收下/再抽/钦定），读数的落点也必须在这一屏——
+          只给一个总分，等于让「四秒里哪一秒崩了」继续靠猜。 */}
+      <div className="mt-2 max-w-[min(96vw,1100px)] px-1">
+        <QcReadings readings={current?.qc ?? null} durationMs={artifact.durationMs ?? shot.durationMs} />
       </div>
 
       {/* 裁决条常驻：只有一版也可能停在那一版「等你裁决」（SD-120 实拍：放大后整块随单版

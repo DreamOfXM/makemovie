@@ -179,6 +179,8 @@ describe('episode assets', () => {
         downloadUrl: `/artifacts/${artifact.id}/content`,
         // 生成产物没有原始文件名可言：只有人工导入那一档才带名字。
         filename: null,
+        // 否决只落在有版本可换的产物上（首帧/视频片段/配音）；参考图这一格恒为 null。
+        veto: null,
       },
     })
     expect(assets[1].versions[1]).toMatchObject({ version: 1, description: '第一版参考图', status: 'APPROVED', artifact: null })

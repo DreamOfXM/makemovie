@@ -26,7 +26,15 @@ export interface ShotEvent {
   /** Best across its attempts — a task that re-pulled three times has three scored images. */
   bestScore: number | null
   attempts: number | null
+  /** 实测时长：worker 用 ffprobe 量后落库，只有它许当「这一版多长」报。 */
   durationMs: number | null
+  /** 分镜表计划时长；与实测不等就是被模型时长地板抬过（SD-082），两个数必须并排。 */
+  plannedMs: number | null
+  /** 产这一版的厂商，来自任务行。 */
+  provider: string | null
+  /** 用户起的连接名（SD-082），来自那次提交的台账；null = 没提交过或连接已删。
+   *  行上优先报它——「百炼免费额度」比「dashscope」更能回答「这一版花的是哪条链」。 */
+  connectionName: string | null
   model: string | null
   error: string | null
   /** 「批 N」: 1-based position of this task's batch in the episode's run order. */
@@ -106,6 +114,9 @@ export function buildShotEvents(
         bestScore: task.scores.length > 0 ? Math.max(...task.scores) : null,
         attempts: task.attempts,
         durationMs: artifact?.durationMs ?? null,
+        plannedMs: shot.durationMs,
+        provider: task.provider,
+        connectionName: task.connectionName,
         model: task.model,
         error: readableError(task.error),
         batchSeq: seqOf.get(batch.id) ?? null,
@@ -131,7 +142,10 @@ export function buildShotEvents(
       score: null,
       bestScore: null,
       attempts: null,
-      durationMs: shot.durationMs,
+      durationMs: null,
+      plannedMs: shot.durationMs,
+      provider: null,
+      connectionName: null,
       model: null,
       error: null,
       batchSeq: null,

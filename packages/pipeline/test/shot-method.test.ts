@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { needsGeneratedMedia, shotProduction } from '../src/shot-method.js'
+import { METHOD_WORDS, needsGeneratedMedia, parseMethod, shotProduction } from '../src/shot-method.js'
 
 /**
  * 分镜表「生成方式」列的人话分类。字卡/屏幕录制/合成/UI 由人在剪辑里做，
@@ -36,5 +36,34 @@ describe('分镜生成方式', () => {
     expect(needsGeneratedMedia('UI')).toBe(false)
     expect(needsGeneratedMedia('合成')).toBe(false)
     expect(needsGeneratedMedia('屏幕录制')).toBe(false)
+  })
+})
+
+/**
+ * 人写这一栏的入口（SD-109）。此前只有模型写、人不能改：档位一旦错判，
+ * 唯一的修法是把整份分镜重跑一遍（付费）。界面下拉与分类器必须共用一张字表，
+ * 否则「选了字卡、分类器仍按视频排进计费队列」这种事故只在生产环境才暴露。
+ */
+describe('生成方式的人写入口', () => {
+  it('五档字表逐档被自己的分类器认回同一档', () => {
+    for (const [production, word] of Object.entries(METHOD_WORDS)) {
+      expect(parseMethod(word)).toEqual({ ok: true, value: word })
+      expect(shotProduction(word)).toBe(production)
+    }
+  })
+
+  it('空栏等于交回模型口径，不算非法值', () => {
+    expect(parseMethod(null)).toEqual({ ok: true, value: null })
+    expect(parseMethod('')).toEqual({ ok: true, value: null })
+    expect(parseMethod('  字卡  ')).toEqual({ ok: true, value: '字卡' })
+  })
+
+  it('挡住自由文本：写进分类器认不出的档位，等于把这一镜悄悄排进计费队列', () => {
+    expect(parseMethod('画面').ok).toBe(false)
+    // 分类器为旧数据保留的英文同义写法，不作为人写的档位——界面只给五档人话。
+    expect(parseMethod('UI').ok).toBe(false)
+    expect(parseMethod('字卡/视频').ok).toBe(false)
+    expect(parseMethod(42).ok).toBe(false)
+    expect(parseMethod({ method: '字卡' }).ok).toBe(false)
   })
 })

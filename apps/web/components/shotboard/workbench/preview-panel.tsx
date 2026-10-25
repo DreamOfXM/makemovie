@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient, ShotCandidateOrigin } from '@/lib/api'
 import { toast } from 'sonner'
-import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon } from 'lucide-react'
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, ClapperboardIcon, ImageIcon, LoaderCircleIcon, Maximize2Icon, MicIcon, RotateCcwIcon, RotateCwIcon } from 'lucide-react'
 import type { GenerationArtifact, ShotboardShot, ShotVideoCandidate } from '@/lib/api'
-import { isUnknownSubmission, shotDemandText, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
+import { isUnknownSubmission, shotDemandText, shotOwesVoice, shotVoiceTrack, cloudVoiceEntersMaster, hasPlayableVideo, previewSurface, waivedTakeRerunTarget, type PreviewProduct } from '@/lib/shot-verdict'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
 import { useSession } from '@/lib/session'
@@ -20,10 +20,11 @@ import { ArtifactMedia } from '@/components/generations/artifact-media'
 import { AcceptTakeDialog } from './accept-take-dialog'
 import { AudioSourceRow } from './audio-source-row'
 import { LocalVideoRow } from './local-video-row'
+import { VetoTakeDialog } from './veto-take-dialog'
 import { VideoReviewLightbox } from './video-review-lightbox'
 
 /** 延长/定向编辑端点的采用策略；candidate_only 是默认——操作成功只是产出候选，
- *  「生成成功」不冒充「已替换入片」，入片永远走显式选版（UX-P04）。 */
+ *  「生成成功」不冒充「已替换上片」，上片永远走显式选版（UX-P04；选版动作本身叫钦定，SD-083）。 */
 export type ArtifactApplyPolicy = 'candidate_only' | 'apply_if_empty' | 'apply_if_unchanged'
 
 /** 延长端点支持 expectedShotRevision（镜头 CAS）；edit-video 端点不支持——
@@ -84,12 +85,21 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
   const [note, setNote] = useState('')
   // 放大态：null=关；version=null 落在已钦定/最新版，数字=点开的那一版。
   const [review, setReview] = useState<{ artifactId: string | null } | null>(null)
+  /** SD-122：大预览本身是一枚按钮，失败条里的重试钮只能挂到它之外（按钮套按钮非法，
+   *  React 报 hydration 错误并把整棵工作台退回客户端渲染）。 */
+  const [canvasRetry, setCanvasRetry] = useState<{ retry: () => void } | null>(null)
+  const reportCanvasFailure = useCallback((retry: (() => void) | null) => setCanvasRetry(retry ? { retry } : null), [])
   // 无首帧直接生成视频的风险确认——花钱动作走 AlertDialog，不静默放行也不硬禁。
   const [videoGate, setVideoGate] = useState(false)
   const [resubmitGate, setResubmitGate] = useState(false)
   // 「收下这版」的落点（SD-120）：停在「等你裁决」上的那一版必须能在这里被裁决掉，
   // 否则屏上那句「决定再抽一次还是收下」只有前半句有入口。
   const [accept, setAccept] = useState<{ taskId: string; label: string } | null>(null)
+  // SD-172：「这一版我不认」的那一刀——机器过了质检也会被「自动取最新」直接取走，
+  // 人手上必须有一条不需要再花一次钱就能把它请出生效链的路。
+  const [vetoTarget, setVetoTarget] = useState<{ artifactId: string; label: string } | null>(null)
+  const [undoingVeto, setUndoingVeto] = useState(false)
+  const [rerunningWaived, setRerunningWaived] = useState(false)
 
   const stageInflight = (stage: RegenStage) => (stage === 'FIRST_FRAME' ? shot.inflight.includes('FIRST_FRAME') : stage === 'VIDEO' ? shot.inflight.includes('VIDEO') : shot.inflight.includes('AUDIO'))
   // 延长/定向编辑是异步操作（202 立即返回），排队/运行段的反馈不走 requestingStage，
@@ -141,11 +151,23 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
    *  (shot.video) 就把重跑发成补缺，按钮写着覆盖重来、亮着成功，却一笔任务也不排
    *  （2026-10-22 镜头 #9 实测：唯一一版停在等你裁决，重跑点了没反应）。
    *  动词和请求由这同一个判据决定，两处不许再分叉。 */
-  const videoAttempted = Boolean(shot.video) || videoCands.length > 0
+  const videoAttempted = hasPlayableVideo(shot)
   const activeCandidate = (activeProduct === 'video' && activeArtifactId ? videoCands.find((candidate) => candidate.artifactId === activeArtifactId) : undefined) ?? videoCands.find((candidate) => candidate.artifactId === shot.video?.id) ?? videoCands[0] ?? null
+  /** SD-179｜收下过的那一版：它钉成了成功，普通「重跑」会撞回同一幂等键、界面读成
+   *  「已有一笔在途」，于是收下坏版本等于锁死这一镜。只有这一版有 rerun 这条出口。 */
+  const waivedTarget = waivedTakeRerunTarget(shot)
   /** 大预览跟随正看的产物；版本点击换大预览。首帧/配音的生效版=钦定优先（API 已同口径）。 */
   const playerArtifact = activeProduct === 'frame' ? (frameCands.find((c) => c.artifactId === activeArtifactId) ? candidateToArtifact(frameCands.find((c) => c.artifactId === activeArtifactId)!) : shot.firstFrame) : activeProduct === 'audio' ? (voiceCands.find((c) => c.artifactId === activeArtifactId) ? candidateToArtifact(voiceCands.find((c) => c.artifactId === activeArtifactId)!) : shot.voice) : activeCandidate ? candidateToArtifact(activeCandidate) : shot.video
-  const isPlayerVideo = activeProduct === 'video'
+  /** 正看那一档对应的生成档位（大预览的蒙版与区块 busy 共用）。 */
+  const wantedStage: RegenStage = activeProduct === 'frame' ? 'FIRST_FRAME' : activeProduct === 'audio' ? 'AUDIO' : 'VIDEO'
+  /**
+   * SD-103 的唯一裁决：大预览此刻真正显示的是哪一件。画布分支与头部那句「正看：X」
+   * 都只读它——旧版头部按 activeProduct 取值，而画布在没有成片时自行回落显示首帧，
+   * 于是同一块面板上「正看：视频片段」和一张静帧互相否定（实拍 s6 镜头 #6）。
+   */
+  const surface = previewSurface(shot, activeProduct, Boolean(playerArtifact), stageBusy(wantedStage))
+  /** 三档产物的名字与下方区块头同一词根，「正看」那句不许另起一名。 */
+  const previewProductWord = (product: PreviewProduct) => t(product === 'frame' ? 'storyboards.firstFrame' : product === 'audio' ? 'generations.stage.AUDIO' : 'storyboards.video')
 
   /** 三件产物共用一套钦定端点；清空即回自动取最新。 */
   async function chooseArtifact(kind: 'video' | 'frame' | 'voice', artifactId: string | null) {
@@ -165,6 +187,45 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
     }
   }
 
+  /**
+   * SD-172｜撤销否决：这一格是纯可逆动作（把人写下的那句话拿掉），不需要再确认一次；
+   * 拿掉之后后端重新按「自动取最新」定生效版，人不必再钦定一次。
+   */
+  async function undoArtifactVeto(artifactId: string) {
+    setUndoingVeto(true)
+    try {
+      await api(`/artifacts/${artifactId}/veto`, { method: 'POST', body: JSON.stringify({ undo: true }) })
+      toast.success(t('preview.veto.undoDone'))
+      onChanged()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setUndoingVeto(false)
+    }
+  }
+
+  /**
+   * SD-179｜收下过的那一版仍然要重来：走问询路由的 rerun，不走「只补缺」。
+   * 后者会撞回同一幂等键（界面读成「这一镜已有一笔提交在途或待核对」），
+   * 于是「收下坏版本」等于永久锁死这一镜。方向必填——付费重跑不带人的话，
+   * 抽回来的还是同一枚硬币。
+   */
+  async function rerunWaivedTake(taskId: string) {
+    setRerunningWaived(true)
+    try {
+      await api(`/generations/tasks/${taskId}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'rerun', reason: note.trim() }),
+      })
+      toast.success(t('preview.waivedRerun.done'))
+      onChanged()
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setRerunningWaived(false)
+    }
+  }
+
   /** 收下弹窗里点名收的是哪一版——号、产物、版本、来路、实测时长，全是屏上已有读数，
    *  不另造一套编号口径。 */
   const takeLabel = (product: string, candidate: ShotVideoCandidate) =>
@@ -172,13 +233,16 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
 
   const owesVoice = shotOwesVoice(shot)
   const voiceTrack = shotVoiceTrack(shot)
+  /** SD-189：生效声档是「导入音频」时，母带只认导入件——云端配音行不进母带，它的
+   *  钦定与「重跑「配音」」（一次真计费的云端调用）都是死入口，整段收口不呈现。 */
+  const voiceLive = cloudVoiceEntersMaster(shot)
   /** 手工镜头（字卡/界面/录屏/合成）不给模型动词：它没有可重跑、可延长、可定向改的
    *  模型片段，画面只有本机渲染与导入两条来路（SD-108）。 */
   const handmade = shot.production !== 'video'
 
   // US-020+022: 延长与定向编辑（UX-P04 接上真实入口）。延长/修改作用在正看的那一版
-  // （大预览跟随的版本），提交后不冒充成功入片——202 只是已受理，产物以候选身份原地
-  // 出现，入片仍走「选这版」。
+  // （大预览跟随的版本），提交后不冒充成功上片——202 只是已受理，产物以候选身份原地
+  // 出现，上片仍走「钦定这版」。
   const [operationForm, setOperationForm] = useState<'extend' | 'edit' | null>(null)
   const [extendDurationMs, setExtendDurationMs] = useState(5000)
   const [extendPolicy, setExtendPolicy] = useState<ArtifactApplyPolicy>('candidate_only')
@@ -246,35 +310,37 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
             type="button"
             className="group bg-muted/30 relative block h-40 w-full overflow-hidden rounded-lg border"
             onClick={() => {
-              if (activeProduct === 'video' && (shot.video || shot.videoCandidates.length > 0)) setReview({ artifactId: null })
+              if (activeProduct === 'video' && hasPlayableVideo(shot)) setReview({ artifactId: null })
             }}
           >
             {/* 生成中蒙版（2026-09-30 用户）：点生成/重跑时大预览立即切到该产物的生成中态，
               而非继续展示旧版本——旧版和新版混在同一个框里，用户分不清哪个在跑。 */}
-            {stageBusy(activeProduct === 'frame' ? 'FIRST_FRAME' : activeProduct === 'audio' ? 'AUDIO' : 'VIDEO') ? (
+            {stageBusy(wantedStage) ? (
               <span className="text-primary absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/80 backdrop-blur-sm">
                 <LoaderCircleIcon className="size-5 animate-spin" />
-                <span className="text-xs font-medium">{busyText(activeProduct === 'frame' ? 'FIRST_FRAME' : activeProduct === 'audio' ? 'AUDIO' : 'VIDEO') ?? t('generations.cellGenerating')}</span>
+                <span className="text-xs font-medium">{busyText(wantedStage) ?? t('generations.cellGenerating')}</span>
               </span>
-            ) : isPlayerVideo && playerArtifact ? (
-              <ArtifactMedia artifact={playerArtifact} label={`#${shot.number} ${shot.title} v${playerArtifact.version}`} className="h-full max-h-none w-full" />
-            ) : !isPlayerVideo && playerArtifact ? (
-              activeProduct === 'frame' ? (
-                <ArtifactMedia artifact={playerArtifact} label={`${t('storyboards.firstFrame')} v${playerArtifact.version}`} className="h-full max-h-none w-full cursor-zoom-in object-cover" />
+            ) : playerArtifact && surface.shown === activeProduct ? (
+              activeProduct === 'video' ? (
+                <ArtifactMedia retryless onLoadFailed={reportCanvasFailure} artifact={playerArtifact} label={`#${shot.number} ${shot.title} v${playerArtifact.version}`} className="h-full max-h-none w-full" />
+              ) : activeProduct === 'frame' ? (
+                <ArtifactMedia retryless onLoadFailed={reportCanvasFailure} artifact={playerArtifact} label={`${t('storyboards.firstFrame')} v${playerArtifact.version}`} className="h-full max-h-none w-full cursor-zoom-in object-cover" />
               ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6">
                   <p className="text-muted-foreground line-clamp-2 text-center text-xs">{shot.dialogue}</p>
-                  <ArtifactMedia artifact={playerArtifact} label={`${t('generations.stage.AUDIO')} v${playerArtifact.version}`} className="w-full max-w-xs" />
+                  <ArtifactMedia retryless onLoadFailed={reportCanvasFailure} artifact={playerArtifact} label={`${t('generations.stage.AUDIO')} v${playerArtifact.version}`} className="w-full max-w-xs" />
                 </div>
               )
-            ) : shot.firstFrame ? (
+            ) : surface.shown === 'frame' && shot.firstFrame ? (
               <>
-                {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。 */}
-                <ArtifactMedia artifact={shot.firstFrame} label={t('storyboards.firstFrame')} className="h-full max-h-none w-full object-cover" />
+                {/* 缺成片退回首帧时保留放大：审这一帧的构图本就要看细节。
+                  SD-103：这块画布显示的是首帧，头部那句「正看」就必须跟着说首帧——
+                  两处都由 previewSurface 裁决，谁也不许再按 activeProduct 单独取值。 */}
+                <ArtifactMedia retryless onLoadFailed={reportCanvasFailure} artifact={shot.firstFrame} label={t('storyboards.firstFrame')} className="h-full max-h-none w-full object-cover" />
                 {/* 这句话只说「成片还没有」，可它挂在所有回退分支上：正看切到配音而这一镜
                   还没配音时也会亮，于是镜下明明写着「视频片段 v1 · 4.0s」，上面却说还没抽成片
                   （2026-10-23 制作台实测 #14／#18）。成片真的没有才许说。 */}
-                {!shot.video && shot.videoCandidates.length === 0 && (
+                {!hasPlayableVideo(shot) && (
                   <span className="bg-background/75 text-muted-foreground absolute inset-x-0 bottom-0 truncate px-1.5 py-0.5 text-[10px] backdrop-blur-sm">{t('shotboard.ph.videoOnlyFrame')}</span>
                 )}
               </>
@@ -291,11 +357,18 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
           </button>
           {/* 这枚必须是大预览按钮的兄弟节点：button 套 button 是非法 HTML，React 会报
             hydration 错误并把整棵工作台退回客户端渲染（2026-10-22 镜头 #7 实拍）。 */}
-          {(shot.video || shot.videoCandidates.length > 0) && (
+          {hasPlayableVideo(shot) && (
             <button type="button" onClick={() => setReview({ artifactId: null })} className="bg-background/75 text-muted-foreground hover:text-foreground absolute top-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-[11px] font-medium backdrop-blur-sm">
               <Maximize2Icon className="size-3" />
               {t('workbench.zoom')}
             </button>
+          )}
+          {/* 读不出来时的重试同样落在按钮之外，样式与档位沿用失败条里那一枚（SD-122）。 */}
+          {canvasRetry && (
+            <Button type="button" variant="ghost" size="sm" className="text-destructive-ink absolute right-2 bottom-2 z-10 h-6 gap-1 bg-background/75 px-1.5 text-xs backdrop-blur-sm" onClick={() => canvasRetry.retry()}>
+              <RotateCwIcon className="size-3" />
+              {t('common.retry')}
+            </Button>
           )}
         </div>
 
@@ -306,9 +379,13 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
             <input type="text" value={note} onChange={(event) => setNote(event.target.value)} placeholder={t('workbench.notePlaceholder')} aria-label={t('workbench.noteLabel')} className="border-input bg-background placeholder:text-muted-foreground focus-visible:ring-ring w-full rounded-md border px-2.5 py-1.5 text-xs" />
             <div className="flex items-center justify-between">
               <p className="text-muted-foreground text-[11px] font-medium">
-                {t('workbench.viewing', {
-                  name: activeProduct === 'frame' ? t('storyboards.firstFrame') : activeProduct === 'audio' ? t('generations.stage.AUDIO') : t('storyboards.video'),
-                })}
+                {/* SD-103：这句的名字跟着画布真正显示的那一件走（previewSurface 裁决），
+                  不再跟着 activeProduct。回落显示首帧、且这一镜真的没有成片时，
+                  「还没抽成片」由同一分支的角标说；正看=配音而配音没产物时角标不亮
+                  （那说明成片在场），所以这句自己带上原因。 */}
+                {surface.fellBackFrom === 'audio'
+                  ? t('workbench.viewing.fallback', { name: previewProductWord(surface.shown), reason: t('workbench.viewing.noVoice') })
+                  : t('workbench.viewing', { name: previewProductWord(surface.shown) })}
               </p>
               <button type="button" onClick={() => setOpenSections((prev) => (prev.size === 3 ? new Set() : new Set(['frame', 'video', 'audio'])))} className="text-primary inline-flex items-center gap-0.5 text-[11px] font-medium">
                 <ChevronDownIcon className={cn('size-3 transition-transform', openSections.size === 3 ? '' : '-rotate-90')} />
@@ -425,7 +502,11 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                       <span className={cn('grid size-9 shrink-0 place-items-center', isActive ? 'text-primary' : 'text-muted-foreground')}>{section.key === 'frame' ? <ImageIcon className="size-4" /> : section.key === 'video' ? <ClapperboardIcon className="size-4" /> : <MicIcon className="size-4" />}</span>
                       <span className="min-w-0 flex-1">
                         <span className={cn('block text-xs font-semibold', isActive && 'text-primary')}>{section.label}</span>
-                        <span className="text-subtle-foreground block truncate text-[11px]">{section.hasOutput ? (section.candidates.find((c) => c.artifactId === section.pinnedId) ? `✓ ${section.pinnedLabel}` : t('workbench.autoPinned')) : section.errorText}</span>
+                        <span className="text-subtle-foreground block truncate text-[11px]">
+                          {section.key === 'frame' && shot.staleFirstFrameArtifactId && <span className="text-warning-ink">{`${t('workbench.staleFrame')} · `}</span>}
+                          {/* SD-189：导入档下这行不说「✓ 已钦定 / 自动取最新」——那句话冒充的是进母带的轨。 */}
+                          {section.key === 'audio' && !voiceLive ? t('workbench.voiceCloudBypass') : section.hasOutput ? (section.candidates.find((c) => c.artifactId === section.pinnedId) ? `✓ ${section.pinnedLabel}` : t('workbench.autoPinned')) : section.errorText}
+                        </span>
                       </span>
                       {count > 0 && (
                         <span className={cn('inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium', isActive ? 'text-primary' : 'text-muted-foreground')}>
@@ -444,7 +525,7 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                             {/* 零版本时也要给动词入口——否则配音/首帧的「生成」按钮被锁在
                               展开区里永远够不着（2026-09-30 用户：哪有生成声音的地方）。
                               手工镜头例外：它的入口是下面的渲染/导入行，不是模型动词。 */}
-                            {section.key === 'video' && handmade ? null : (
+                            {section.key === 'video' && handmade ? null : section.key === 'audio' && !voiceLive ? null : (
                               <Button variant="outline" size="sm" className="mt-1.5 h-7 text-[11px]" onClick={section.onRerun}>
                                 <RotateCcwIcon className="size-3" />
                                 {section.rerunLabel}
@@ -473,9 +554,9 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                                       {candidate.durationMs !== null && ` · ${formatDuration(candidate.durationMs)}`}
                                       {` · ${formatDateTime(candidate.createdAt, locale)}`}
                                     </span>
-                                    {candidate.artifactId === section.pinnedId ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span> : null}
+                                    {candidate.artifactId === section.pinnedId && voiceLive ? <span className="text-success-ink shrink-0 text-[11px]">✓ {section.pinnedLabel}</span> : null}
                                   </button>
-                                  {can('storyboard:write') && isPlaying && candidate.artifactId !== section.pinnedId && candidate.awaitingDecision !== true && (
+                                  {can('storyboard:write') && voiceLive && isPlaying && candidate.artifactId !== section.pinnedId && candidate.awaitingDecision !== true && (
                                     <Button variant="default" size="sm" className="h-6 shrink-0 px-2 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact('voice', candidate.artifactId)}>
                                       {section.pickLabel}
                                     </Button>
@@ -504,7 +585,9 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                                 aria-pressed={activeProduct === section.key && candidate.artifactId === activeArtifactId}
                                 className={cn('relative overflow-hidden rounded-md', activeProduct === section.key && candidate.artifactId === activeArtifactId ? 'outline-primary outline-2 outline-offset-[-2px]' : '', candidate.artifactId === section.pinnedId ? 'border-primary border-b-2' : '')}
                               >
-                                <ArtifactMedia artifact={candidateToArtifact(candidate)} label={`${section.label} v${candidate.version}`} interactive={false} className="aspect-video h-auto w-full" />
+                                {/* 这一格本身是按钮：失败条里不再嵌重试钮。点这一格会把该版送进大预览，
+                                  大预览重新取流，重试入口在那一格的兄弟节点上（SD-122）。 */}
+                                <ArtifactMedia retryless artifact={candidateToArtifact(candidate)} label={`${section.label} v${candidate.version}`} interactive={false} className="aspect-video h-auto w-full" />
                                 {(() => {
                                   // 被审计否决的尝试亮红并给原因——自动重抽花的是用户的钱，
                                   // 失败理由不许埋库（2026-09-29 用户：不合格是黑盒）。
@@ -515,6 +598,40 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                                   const parked = candidate.awaitingDecision === true
                                   const rejected = candidate.qc?.status === 'NEEDS_REVIEW'
                                   const reasons = (candidate.qc?.reasons ?? []).join('\n')
+                                  // 人判不可用（SD-172）：这条盖在机器结论之上——它讲的是人的决定，
+                                  // 与质检分数无关，所以先于红/黄两条判定。生效版已由后端换回上一版。
+                                  const vetoed = candidate.veto ?? null
+                                  if (vetoed) {
+                                    return (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className="bg-destructive text-destructive-foreground absolute inset-x-0 bottom-0 flex cursor-help items-center justify-between gap-1 px-1 py-0.5 text-[10px] font-medium">
+                                            <span>v{candidate.version}</span>
+                                            <span className="truncate">{t('preview.veto.tag')}</span>
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent className="max-w-72 whitespace-pre-line text-left text-[11px] leading-relaxed">
+                                          {`${t('preview.veto.at')}${vetoed.reason}`}
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    )
+                                  }
+                                  // 生效首帧还是按改动前的描述画的（SD-146）：琥珀＝等你，
+                                  // 与「等你裁决」同族不同词——这一等的是重跑那一帧。
+                                  const staleFrame = section.key === 'frame' && candidate.artifactId === shot.staleFirstFrameArtifactId
+                                  if (staleFrame) {
+                                    return (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className="bg-warning/90 text-warning-foreground absolute inset-x-0 bottom-0 flex cursor-help items-center justify-between gap-1 px-1 py-0.5 text-[10px] font-medium">
+                                            <span>v{candidate.version}</span>
+                                            <span className="truncate">{t('workbench.staleFrame')}</span>
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent className="max-w-72 whitespace-pre-line text-left text-[11px] leading-relaxed">{t('workbench.staleFrameHint')}</TooltipContent>
+                                      </Tooltip>
+                                    )
+                                  }
                                   if (parked) {
                                     return (
                                       <Tooltip>
@@ -576,9 +693,10 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                             )}
                           </div>
                         )}
-                        {/* 手工镜头的画面来路（SD-108）：字卡走本机渲染，其余三档收人给的片段。
-                          key 绑镜头 id——左右键换镜时这一行的文字框必须跟着换，不能留上一镜的字。 */}
-                        {section.key === 'video' && handmade && <LocalVideoRow key={shot.id} shot={shot} onChanged={onChanged} />}
+                        {/* 画面来路（SD-108 + SD-178）：字卡走本机渲染，其余档收人给的片段。
+                          模型产出的镜头也要给导入这一条——一镜被模型判死时，这是唯一不用改档
+                          就能让整集走通的出口。key 绑镜头 id：左右键换镜时文字框必须跟着换。 */}
+                        {section.key === 'video' && <LocalVideoRow key={shot.id} shot={shot} onChanged={onChanged} />}
                         {/* 延长/定向编辑操作状态：失败就地亮出（重试=菜单里再发起一次），
                           在途状态由候选格的虚线占位与按钮态承载。 */}
                         {section.key === 'video' && failedOperation && (
@@ -669,24 +787,47 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                         )}
                         <div className="mt-2.5 flex flex-wrap items-center gap-2">
                           {(() => {
-                            // 正看的那一版还没钦定时，「选这版」就是裁决动作本尊（S3：动词分产物——
-                            // 视频=入片、首帧=定视频起点）。配音的选这版在版本行内（要试听后选）。
+                            // 正看的那一版还没钦定时，「钦定这版」就是裁决动作本尊（SD-083：三件产物
+                            // 同一个选版动作、全站同一个词根；产物各是什么，由区块头与生效读数说）。
                             const active = activeProduct === section.key && activeArtifactId !== null ? section.candidates.find((candidate) => candidate.artifactId === activeArtifactId) : undefined
+                            if (!active) return null
                             // 停在「等你裁决」上的那一版还不成片，后端按非终态拒钦定：这一格给的
-                            // 动词换成「收下这版」，位置与形状都跟「选这版」同档（SD-120）。
-                            if (active?.awaitingDecision === true) {
+                            // 动词换成「收下这版」，位置与形状都跟「钦定这版」同档（SD-120）。
+                            if (active.awaitingDecision === true) {
                               return active.taskId && canTrigger ? (
                                 <Button variant="default" size="sm" className="h-7 text-[11px]" onClick={() => setAccept({ taskId: active.taskId!, label: takeLabel(section.label, active) })}>
                                   {t('generations.review.waive')}
                                 </Button>
                               ) : null
                             }
-                            const pickable = section.kind === 'image' && can('storyboard:write') && active && active.artifactId !== section.pinnedId
-                            return pickable ? (
-                              <Button variant="default" size="sm" className="h-7 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact(section.key === 'frame' ? 'frame' : 'video', active.artifactId)}>
-                                {section.pickLabel}
-                              </Button>
-                            ) : null
+                            const pickable = section.kind === 'image' && can('storyboard:write') && active.artifactId !== section.pinnedId
+                            // SD-172｜「机器过了 ≠ 人认了」：否决与钦定是对同一件产物说的两句相反的
+                            // 话，所以共用这一格、按那一版现在的状态换词——并排两枚常驻钮会让人先猜
+                            // 「哪一枚管我现在这个情况」。撤销不需要理由，它把人手上的东西还回去。
+                            return (
+                              <>
+                                {pickable ? (
+                                  <Button variant="default" size="sm" className="h-7 text-[11px]" disabled={choosing} onClick={() => void chooseArtifact(section.key === 'frame' ? 'frame' : 'video', active.artifactId)}>
+                                    {section.pickLabel}
+                                  </Button>
+                                ) : null}
+                                {can('storyboard:write') ? (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 text-[11px]"
+                                    disabled={undoingVeto}
+                                    onClick={() => {
+                                      if (active.veto) void undoArtifactVeto(active.artifactId)
+                                      else setVetoTarget({ artifactId: active.artifactId, label: takeLabel(section.label, active) })
+                                    }}
+                                  >
+                                    {undoingVeto ? <LoaderCircleIcon data-slot="icon" className="animate-spin" /> : null}
+                                    {active.veto ? t('preview.veto.undo') : t('preview.veto.action')}
+                                  </Button>
+                                ) : null}
+                              </>
+                            )
                           })()}
                           {section.key === 'video' && handmade ? null : section.key === 'video' && videoCands.length > 0 && can('episode:write') ? (
                             // 有视频时主动作是「调整这一镜」（UX §5.2）：重跑/延长/定向修改收进
@@ -712,17 +853,28 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
                                 <DropdownMenuItem disabled={!activeCandidate || operationBusy || submittingOperation !== null} onClick={() => setOperationForm((form) => (form === 'edit' ? null : 'edit'))}>
                                   {t('preview.directedEdit')}
                                 </DropdownMenuItem>
+                                {waivedTarget && canTrigger ? (
+                                  // 带方向才许按下：付费重跑不带人的话，抽回来的还是同一枚硬币。
+                                  <DropdownMenuItem
+                                    disabled={rerunningWaived || note.trim() === ''}
+                                    onClick={() => void rerunWaivedTake(waivedTarget.taskId)}
+                                  >
+                                    {rerunningWaived ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <RotateCcwIcon className="size-3.5" />}
+                                    {t('preview.waivedRerun.action', { version: waivedTarget.version })}
+                                  </DropdownMenuItem>
+                                ) : null}
                               </DropdownMenuContent>
                             </DropdownMenu>
-                          ) : section.candidates.length > 0 && (section.key !== 'audio' || owesVoice) ? (
+                          ) : section.candidates.length > 0 && (section.key !== 'audio' || (owesVoice && voiceLive)) ? (
                             // 零版本时动词入口在空态那一处（上方）；这里只服务已有版本的重跑，
                             // 否则同一个「生成「视频片段」」会在区块里出现两枚。
+                            // SD-189：导入档的配音重跑不在此列——那一版永远不上片，点了只多烧一次调用。
                             <Button variant="outline" size="sm" className="h-7 text-[11px]" disabled={section.busy} onClick={section.onRerun}>
                               <RotateCcwIcon className="size-3" />
                               {section.rerunLabel}
                             </Button>
                           ) : null}
-                          {section.key === 'video' && (shot.video || shot.videoCandidates.length > 0) && (
+                          {section.key === 'video' && hasPlayableVideo(shot) && (
                             <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => setReview({ artifactId: null })}>
                               <Maximize2Icon className="size-3" />
                               {t('workbench.zoom')}
@@ -748,7 +900,7 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
         {/* 没有触发生成权限的人也要能推进手工镜头：这两行不依赖模型，跟着镜头走。 */}
         {!canTrigger && (
           <>
-            {handmade && <LocalVideoRow key={shot.id} shot={shot} onChanged={onChanged} />}
+            <LocalVideoRow key={shot.id} shot={shot} onChanged={onChanged} />
             <AudioSourceRow shot={shot} onChanged={onChanged} />
           </>
         )}
@@ -803,6 +955,7 @@ export function PreviewPanel({ shot, requestingStage, onRegenerate, onChanged, o
 
       {review && <VideoReviewLightbox shot={shot} initialArtifactId={review.artifactId} onClose={() => setReview(null)} onChanged={onChanged} />}
       {accept && <AcceptTakeDialog taskId={accept.taskId} label={accept.label} onClose={() => setAccept(null)} onChanged={onChanged} />}
+      {vetoTarget && <VetoTakeDialog artifactId={vetoTarget.artifactId} label={vetoTarget.label} onClose={() => setVetoTarget(null)} onChanged={onChanged} />}
 
       {/* 无首帧的镜头不能直接生成视频——管线在绑定图生视频时对缺帧镜头一律拒绝
           （generations:videoMissingFrames），旧版「仍然生成」按钮点了只会收到 409

@@ -13,6 +13,7 @@ let localEpisodeId: string
 let videoShotId: string
 let titleCardShotId: string
 let uiShotId: string
+let cardShotId: string
 
 const authHeaders = (token: string) => env.authHeaders(token)
 const json = (token: string) => ({ ...authHeaders(token), 'content-type': 'application/json' })
@@ -52,7 +53,8 @@ beforeAll(async () => {
   expect(episode.statusCode).toBe(201)
   episodeId = episode.json().id as string
 
-  // 分镜创建接口还没有「生成方式」字段，落库后回填——被测的是计划/触发怎么读它。
+  // 这三档走库写：'UI' 是分镜模型留下的旧英文写法，人写入口（SD-109）只收五档人话，
+  // 所以这里只能按落库路径打标——被测的是计划/触发怎么读它。
   for (const [number, title, durationMs] of [[1, 'Video shot', 5000], [2, 'Title card', 3000], [3, 'UI screen', 4000]] as const) {
     const storyboard = await env.app.inject({
       method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: json(ownerToken),
@@ -159,5 +161,72 @@ describe('生成方式只排平台负责的镜头 (SD-035)', () => {
     expect(plan.localCount).toBe(0)
     expect(plan.newCount).toBe(1)
     expect(plan.items.map(item => [item.id, item.disposition])).toEqual([[titleCardShotId, 'new']])
+  })
+})
+
+/**
+ * 人能改这一栏（SD-109）。此前只有分镜模型写、界面只读：档位一旦标错，
+ * 唯一的修法是重跑整份分镜（付费 + 覆盖已审内容）。这里锁的是「改一档就换一条链」，
+ * 以及写入口只认五档人话——自由文本进了库就是分类器认不出、整镜落回视频档默默计费。
+ */
+describe('生成方式的人写入口 (SD-109)', () => {
+  const shotboardRow = async (id: string) => {
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/shotboard`, headers: authHeaders(ownerToken) })
+    expect(res.statusCode).toBe(200)
+    return ((res.json() as { shots: { id: string; method: string | null; production: string }[] }).shots).find(row => row.id === id)
+  }
+
+  it('建镜时就能定档，读回来的是原文而不是英文枚举', async () => {
+    const res = await env.app.inject({
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: json(ownerToken),
+      payload: { number: 4, title: '片尾字卡', durationMs: 2000, description: '黑底白字的收尾卡', method: '字卡' },
+    })
+    expect(res.statusCode).toBe(201)
+    const id = res.json().id as string
+    cardShotId = id
+    expect(await shotboardRow(id)).toMatchObject({ method: '字卡', production: 'title-card' })
+    // 计划侧当场少一个计费目标：写进去的档真的被读到。
+    const planRes = await getPlan('stage=VIDEO')
+    expect(planRes.statusCode).toBe(200)
+    const plan = (planRes.json() as { plan: Plan }).plan
+    expect(plan.items.find(item => item.id === id)?.disposition).toBe('local')
+    expect(plan.localCount).toBe(3)
+  })
+
+  it('改档把这一镜从计费队列里摘出来——全集都是手工镜时预审说没有可生成的目标', async () => {
+    const res = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${videoShotId}`, headers: json(ownerToken), payload: { method: '屏幕录制' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().method).toBe('屏幕录制')
+    expect(await shotboardRow(videoShotId)).toMatchObject({ method: '屏幕录制', production: 'screen-recording' })
+    const plan = await getPlan('stage=VIDEO')
+    expect(plan.statusCode).toBe(400)
+    expect(plan.json()).toMatchObject({ error: 'generations:nothingToGenerate' })
+  })
+
+  it('清空等于交回模型口径（空列按视频处理），非法档位一律 400', async () => {
+    const cleared = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${cardShotId}`, headers: json(ownerToken), payload: { method: '' },
+    })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json().method).toBeNull()
+    expect(await shotboardRow(cardShotId)).toMatchObject({ production: 'video' })
+
+    const bad = await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${cardShotId}`, headers: json(ownerToken), payload: { method: '画面' },
+    })
+    expect(bad.statusCode).toBe(400)
+    expect(bad.json().error).toBe('method must be one of: 视频, 字卡, 屏幕录制, 合成, 界面')
+    const badCreate = await env.app.inject({
+      method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: json(ownerToken),
+      payload: { number: 5, title: 'X', durationMs: 1000, description: 'X', method: 42 },
+    })
+    expect(badCreate.statusCode).toBe(400)
+    // 旧的英文同义写法仍能读（分镜模型写过 UI），但不许由人再写进去。
+    expect((await env.app.inject({
+      method: 'PATCH', url: `/api/storyboards/${uiShotId}`, headers: json(ownerToken), payload: { method: 'UI' },
+    })).statusCode).toBe(400)
+    expect(await shotboardRow(uiShotId)).toMatchObject({ method: 'UI', production: 'ui' })
   })
 })

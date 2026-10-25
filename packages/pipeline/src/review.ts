@@ -1,3 +1,4 @@
+import type { PrismaClient } from '@studio/db'
 import type { RunTaskCandidate } from '@studio/jobs'
 
 /**
@@ -78,6 +79,31 @@ interface RetrySettings {
 export function retryCapOf(project: Pick<RetrySettings, 'maxRetriesPerShot'>): number {
   const value = project.maxRetriesPerShot
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 3 ? value : 1
+}
+
+/**
+ * 每集重抽额度的唯一算法：镜数 × 每镜上限，用量只数镜头绑定的媒体任务。
+ * 素材（ASSET）、剧本、分镜不按镜计——它们没有「镜数」可乘，只有每任务上限。
+ * 判定发生在 worker，展示发生在 API/console——两处必须算出同一个数，
+ * 否则「本集重抽额度」会在界面和台账之间各说各话。
+ */
+export const budgetedRetryStages = ['FIRST_FRAME', 'VIDEO', 'AUDIO'] as const
+
+export async function episodeRetryBudget(
+  db: PrismaClient,
+  episodeId: string,
+  project: Pick<RetrySettings, 'maxRetriesPerShot'>,
+): Promise<{ used: number; limit: number }> {
+  const cap = retryCapOf(project)
+  const [shots, tasks] = await Promise.all([
+    db.storyboard.count({ where: { episodeId, supersededAt: null } }),
+    db.generationTask.findMany({
+      where: { storyboardId: { not: null }, stage: { in: [...budgetedRetryStages] }, batch: { episodeId } },
+      select: { attempts: true },
+    }),
+  ])
+  const used = tasks.reduce((sum, task) => sum + Math.max(task.attempts - 1, 0), 0)
+  return { used, limit: shots * cap }
 }
 
 export function resolveRetryPolicy(project: RetrySettings, retryClass: RetryClass): RetryPolicy {

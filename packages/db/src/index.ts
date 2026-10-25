@@ -1,5 +1,5 @@
-import type { CapabilitySlot, PrismaClient, TaskStatus, WorkflowStatus } from '@prisma/client'
-import { compareSlotFallbacks, servesSlot } from '@studio/domain'
+import type { CapabilitySlot, MediaArtifact, PrismaClient, TaskStatus, WorkflowStatus } from '@prisma/client'
+import { compareSlotFallbacks, isArtifactVetoed, servesSlot } from '@studio/domain'
 import type { CapabilitySlot as DomainCapabilitySlot } from '@studio/domain'
 
 export { PrismaClient } from '@prisma/client'
@@ -248,4 +248,53 @@ export async function resolveSlotCandidates(
     })
   }
   return candidates.sort(compareSlotFallbacks)
+}
+
+/** 一镜的三类产物（首帧/成片/配音）——否决只作用于这三档。 */
+export type ShotMediaStage = 'VIDEO' | 'FIRST_FRAME' | 'AUDIO'
+
+/** 取版时一次最多看几条：一条任务最多留几版，20 条覆盖得住任何重抽次数，
+ *  同时把最坏情况的读取钉成一个常数。 */
+const TAKE_SCAN_LIMIT = 20
+
+/**
+ * SD-172｜这一镜的「生效版」到底取哪一件。
+ *
+ * 口径只有两条，且界面给人看的版必须与母带取走的版同源：
+ * 1. 人钦定过（selectedVideoArtifactId 一类指针）就用那一版——除非它被人工否决；
+ * 2. 没钦定时取「最新一条成功的」，但被否决的版本跳过。
+ *
+ * 这一条判定以前在 apps/worker/src/compose.ts 里各写一份（latestVideoArtifact /
+ * latestVoiceArtifact 与配音指针三处），API 侧读生效版又是一份；四处口径一旦分叉，
+ * 就会出现「界面上这条已被人否掉、母带照旧把它排进时间轴」。所以现在只留这一份，
+ * 合成、界面读数与任何新的读版方都走它。只读，不写。
+ */
+export async function resolveShotTake(
+  db: PrismaClient,
+  options: {
+    organizationId: string
+    storyboardId: string
+    stage: ShotMediaStage
+    /** 人钦定的那一版；null/undefined = 没钦定，走「自动取最新（跳过被否的）」。 */
+    pinnedArtifactId?: string | null
+  },
+): Promise<MediaArtifact | null> {
+  if (options.pinnedArtifactId) {
+    const pinned = await db.mediaArtifact.findFirst({
+      where: { id: options.pinnedArtifactId, organizationId: options.organizationId, stage: options.stage },
+    })
+    // 钦定的那一版被否了就不再算钦定：指针由否决入口清掉，这里兜住旧数据与
+    // 绕过界面直接写指针的情况，落回「自动取最新」。
+    if (pinned && !isArtifactVetoed(pinned.metadata)) return pinned
+  }
+  const rows = await db.mediaArtifact.findMany({
+    where: {
+      stage: options.stage,
+      organizationId: options.organizationId,
+      task: { status: 'SUCCEEDED', stage: options.stage, storyboardId: options.storyboardId },
+    },
+    orderBy: [{ task: { createdAt: 'desc' } }, { version: 'desc' }],
+    take: TAKE_SCAN_LIMIT,
+  })
+  return rows.find(artifact => !isArtifactVetoed(artifact.metadata)) ?? null
 }

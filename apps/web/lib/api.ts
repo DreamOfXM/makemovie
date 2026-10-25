@@ -1,4 +1,4 @@
-import type { AudioSource, AutomationGate, ContentLocale, FailureKind, GenerationStage, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
+import type { AudioSource, AutomationGate, ComposeBlockKind, ContentLocale, FailureKind, GenerationStage, ProjectFormat, Role, WorkflowStatus } from '@studio/domain'
 
 function resolveApiBase(): string {
   const configured = process.env.NEXT_PUBLIC_API_URL
@@ -41,6 +41,20 @@ export class ApiError extends Error {
   }
 }
 
+function apiErrorFrom(status: number, data: Record<string, unknown> | null): ApiError {
+  const message = (data?.error as string) || (data?.message as string) || `HTTP ${status}`
+  return new ApiError(message, status, data)
+}
+
+/**
+ * 下载类接口自己 fetch 时的失败出口：先把错误体里的码读出来再抛。
+ * 只抛 `HTTP 404` 等于把状态码当文案打在用户脸上——分不出是缺字幕、没权限还是包不存在。
+ */
+export async function throwApiError(response: Response): Promise<never> {
+  const data = (await response.json().catch(() => null)) as Record<string, unknown> | null
+  throw apiErrorFrom(response.status, data)
+}
+
 export async function request<T>(path: string, options: RequestInit & { token?: string | null } = {}): Promise<T> {
   const { token, ...init } = options
   const headers: Record<string, string> = {
@@ -53,10 +67,7 @@ export async function request<T>(path: string, options: RequestInit & { token?: 
   const response = await fetch(`${apiBase}${path}`, { ...init, headers })
   if (response.status === 204) return undefined as T
   const data = (await response.json().catch(() => null)) as Record<string, unknown> | null
-  if (!response.ok) {
-    const message = (data?.error as string) || (data?.message as string) || `HTTP ${response.status}`
-    throw new ApiError(message, response.status, data)
-  }
+  if (!response.ok) throw apiErrorFrom(response.status, data)
   return data as T
 }
 
@@ -113,8 +124,10 @@ export interface Capability {
   entitlementVerifiedAt: string | null
   credentialVerifiedAt: string | null
   lastProbedAt: string | null
-  /** 厂商声明的能力参数（时长档位等）；手工添加的行可能为 null。 */
+  /** 厂商声明的能力参数（时长档位等）；手工添加且目录不认识的行为 null。 */
   spec: unknown
+  /** 这份声明是谁给的：平台目录继承、操作者手工填写，还是根本没有——最后一种按厂商默认计费。 */
+  specSource: 'catalog' | 'manual' | 'unknown' | string
   durationEvidence: DurationEvidence | null
 }
 
@@ -351,6 +364,8 @@ export interface Storyboard {
   sceneNumber: number | null
   /** 这一镜的画面要不要模型产出；流程页的生成动作只排 video 镜头。 */
   production: 'video' | 'ui' | 'title-card' | 'composition' | 'screen-recording'
+  /** 分镜表「生成方式」列原文；人在界面上改档写的就是这一列（null=模型产出）。 */
+  method?: string | null
   status: DbWorkflowStatus
   /** Which of this shot's succeeded clips the human pinned; null means the selection gate is still open. */
   selectedVideoArtifactId?: string | null
@@ -363,6 +378,8 @@ export interface Storyboard {
   assets?: StoryboardAssetLink[]
   firstFrame?: GenerationArtifact | null
   video?: GenerationArtifact | null
+  /** 机器判退、等你裁决的那一版成片：生效位空着，但这一镜确实有一条花钱买来、能播的片（SD-168）。 */
+  videoParked?: GenerationArtifact | null
   voice?: GenerationArtifact | null
   /** 最近一次首帧/视频生成的失败原因;null 表示没有失败记录。 */
   firstFrameError?: string | null
@@ -634,6 +651,14 @@ export interface GenerationQc {
   status: string
 }
 
+/** SD-172｜人对某一件产物版本的人工否决：后端把它存在 metadata 的一格里，读回来就是
+ *  「谁在什么时候判它不能用、为什么」。null = 这一版没被人否过。 */
+export interface ArtifactVeto {
+  at: string
+  by?: string
+  reason: string
+}
+
 export interface GenerationArtifact {
   id: string
   mimeType: string
@@ -646,6 +671,8 @@ export interface GenerationArtifact {
   downloadUrl: string
   /** 人工导入音频的原始文件名；生成产物为 null。 */
   filename?: string | null
+  /** 人工否决（SD-172）：有它就不许再上片，生效版由后端换回上一版可用的。 */
+  veto?: ArtifactVeto | null
 }
 
 /** 候选来源（UX-P04）：生成任务 / 延长操作 / 定向修改操作 / 本机渲染 / 人给的一段片，
@@ -665,10 +692,37 @@ export interface ShotVideoCandidate {
   durationMs: number | null
   createdAt: string
   selected: boolean
-  qc: { kind: string; status: string; score: number | null; reasons?: string[] } | null
+  /** SD-081：除总分外，worker 写在 QualityCheck.report 里的三组读数。未解析出的项没有这个键
+   *  ——「没量到」与「量到 0」是两件事，界面必须靠键的有无区分。 */
+  qc: {
+    kind: string
+    status: string
+    score: number | null
+    reasons?: string[]
+    frameScores?: { position: number; score: number }[]
+    structureDrift?: {
+      measured: boolean
+      earlyLateDistance: number | null
+      firstMidDistance: number | null
+      maxStepDistance: number | null
+      sampleSeconds: number[]
+    } | null
+    auditRepetition?: {
+      matchedArtifactId: string | null
+      pictureDistance: number | null
+      status: 'no-baseline' | 'distinct' | 'repeated' | 'unknown'
+    } | null
+  } | null
   /** 这一版停在「等你裁决」上：任务失败但问询还没人答，被问的就是这件产物。
    *  能看能播，但不能直接入片——先收下它（才成为可钦定的成功版本）或重抽。 */
   awaitingDecision?: boolean
+  /** 人工否决（SD-172）：这一版被人判过不可用，理由在这里，它不会再上片。 */
+  veto?: ArtifactVeto | null
+  /** 机器判退、人收下这一版的事实（SD-179）：收下解锁了合成，但这一版仍是「不想要的」，
+   *  版本行据此给出「重跑」入口——走问询路由的 rerun，不再撞回同一幂等键。 */
+  waived?: boolean
+  /** 当时收下它填的理由（没填为 null）：重跑弹窗把这句话说回给人看，动作才连得上履历。 */
+  waiveReason?: string | null
 }
 
 /** 延长/定向编辑操作的状态行：制作台轮询 shotboard，「延长中/修改中/待确认/失败」由它驱动。 */
@@ -704,6 +758,8 @@ export interface ShotboardShot {
   sceneNumber: number | null
   /** 这一镜怎么产出：video=平台生成，其余=按分镜表的生成方式由人完成。 */
   production: 'video' | 'ui' | 'title-card' | 'composition' | 'screen-recording'
+  /** 「生成方式」列的原文（人可改）；null=旧数据没写这一列，归类按视频。 */
+  method: string | null
   status: string
   assets: { id: string; kind: string; name: string; status: string; role: string; hasVersions: boolean; reference: boolean }[]
   firstFrame: GenerationArtifact | null
@@ -737,6 +793,9 @@ export interface ShotboardShot {
   attention: string[]
   /** 分镜文本的逐镜体检结论（代码，人话在 i18n）。刻意不进 attention：它说「写得不够清楚」，挡路的仍是人。 */
   storyboardGaps: string[]
+  /** 生效首帧是按改动前的描述画的（SD-146）：这里给那一帧的 id，界面才能标在它身上。
+   *  对得上、或帧没有生成快照可判 → null。 */
+  staleFirstFrameArtifactId: string | null
   /** 这件事从什么时候开始是你的：来自产物落地/失败/人推进状态的真时间戳，无从取就为 null。 */
   waitingSince: string | null
 }
@@ -773,6 +832,9 @@ export interface GenerationTask {
   status: GenerationTaskStatus
   attempts: number
   provider: string | null
+  /** SD-082：用户起的连接名（如「百炼免费额度」）。任务行只存厂商，连接身份来自
+   * 提交台账；还没提交过或连接已删时为 null，界面退回报厂商。 */
+  connectionName: string | null
   model: string | null
   error: string | null
   createdAt: string
@@ -840,6 +902,18 @@ export interface GenerationPlanItem {
   label: string
   /** local = 分镜表写明由人做（字卡/屏幕录制/合成/UI），本次不排平台任务、不计费。 */
   disposition: 'new' | 'retry' | 'skipped' | 'local'
+  /** 真触发时这一条的第一候选，「连接名 · provider/model」；本轮不派或无法确定时为 null。 */
+  model: string | null
+  /** 1 = 本轮派出；2 = 等所在场景的主帧，本轮不派（只有 IMAGE 的待生成镜会出现 2）。 */
+  wave: 1 | 2
+}
+
+/** 一条本轮没派出去、在等场景主帧的条目。 */
+export interface GenerationPlanDeferred {
+  shotNumber: number
+  label: string
+  waitsForShotNumber: number
+  waitsForLabel: string
 }
 
 /** 一镜的分镜文本体检结论，与镜头卡同一套代码。 */
@@ -888,7 +962,13 @@ export interface GenerationPlan {
   /** `provider/model`, in the order the worker would try them. */
   models: string[]
   items: GenerationPlanItem[]
+  /** 新任务数：含本轮等待场景主帧、没派出的条目；真正入队的数看 dispatchCount。 */
   newCount: number
+  /** 本轮真正入队的条目数：new/retry 且不等场景主帧。 */
+  dispatchCount: number
+  /** 本轮没派、在等场景主帧的镜头。 */
+  deferred: GenerationPlanDeferred[]
+  deferredCount: number
   retryCount: number
   skippedCount: number
   /** 本机制作、不花额度的镜头数。 */
@@ -916,6 +996,8 @@ export interface EpisodeComposition {
   subtitle: GenerationArtifact | null
   /** The music bed actually mixed into this master, null when it went out without one. */
   score: GenerationArtifact | null
+  /** SD-177：合成停在「已阻塞」时的因；kind 认得的人才知道去哪修，detail 只进 Tooltip。 */
+  block: { kind: ComposeBlockKind; detail: string } | null
 }
 
 export interface GenerationsResponse {

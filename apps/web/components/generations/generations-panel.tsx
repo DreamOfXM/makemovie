@@ -30,7 +30,8 @@ import {
   type ShotDurationDecision,
   type Storyboard,
 } from '@/lib/api'
-import { translateEnum, useI18n } from '@/lib/i18n'
+import { translateEnum, useI18n, type TranslateFn } from '@/lib/i18n'
+import { COMPOSE_BLOCK_KEY, taskFailureCopy } from '@/lib/failure-cause'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Hint } from '@/components/ui/hint'
 import { useSession } from '@/lib/session'
@@ -61,7 +62,16 @@ import { PlanDialog } from '@/components/generations/plan-dialog'
 
 const POLL_INTERVAL_MS = 3000
 
-const EMPTY: GenerationsResponse = { batches: [], composition: null }
+/** 本集重抽额度的活算值：后端与 worker 同一套算法，界面只读不猜。 */
+interface EpisodeRetryBudget {
+  used: number
+  limit: number
+}
+
+/** SD-170：额度是这一集当前的数，随列表下发；快照里那份只是那次裁决的用量。 */
+type GenerationsView = GenerationsResponse & { retryBudget?: EpisodeRetryBudget | null }
+
+const EMPTY: GenerationsView = { batches: [], composition: null }
 
 /** The three stages that belong to one shot rather than to the whole episode. */
 type ShotStage = 'IMAGE' | 'VIDEO' | 'AUDIO'
@@ -135,12 +145,12 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
   const loadGenerations = useCallback(
     () =>
       episodeId
-        ? api<GenerationsResponse>(`/episodes/${episodeId}/generations`)
-        : Promise.resolve<GenerationsResponse>(EMPTY),
+        ? api<GenerationsView>(`/episodes/${episodeId}/generations`)
+        : Promise.resolve<GenerationsView>(EMPTY),
     // organizationId is not in the path but scopes the session token behind `api`.
     [api, episodeId, organizationId, reloadToken],
   )
-  const generations = useAsync<GenerationsResponse>(loadGenerations, EMPTY)
+  const generations = useAsync<GenerationsView>(loadGenerations, EMPTY)
   const { reload } = generations
 
   const batches = useMemo(
@@ -514,6 +524,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                         cancellingId={cancellingId}
                         defaultOpen
                         qcThreshold={generations.data.limits?.qcThreshold}
+                        retryBudget={generations.data.retryBudget}
                         onCancel={cancelTask}
                         onRetry={() => void retryFailed(batch.stage)}
                         retrying={retryingStage === batch.stage}
@@ -577,6 +588,7 @@ export function GenerationsPanel({ episodeId, reloadToken = 0, storyboards, styl
                               cancellingId={cancellingId}
                               defaultOpen={false}
                               qcThreshold={generations.data.limits?.qcThreshold}
+                              retryBudget={generations.data.retryBudget}
                               onCancel={cancelTask}
                               onRetry={() => void retryFailed(batch.stage)}
                               retrying={retryingStage === batch.stage}
@@ -734,21 +746,30 @@ function StageMenuButton({
  * 错误全文可读:默认两行截断,点击展开/收起。错误是用户排障的唯一线索,
  * 折叠进悬停提示等于没有。
  */
-function ErrorCell({ error }: { error: string | null }) {
+function ErrorCell({ error, tone = 'destructive', className }: { error: string | null; tone?: 'destructive' | 'muted'; className?: string }) {
   const { t } = useI18n()
   const [expanded, setExpanded] = useState(false)
   if (!error) return <span className="text-muted-foreground text-xs">—</span>
+  // SD-167：收起态说人话，「点击展开全文」展开的才是原文。这一列挨着任务状态，
+  // 印 `visual-audit: threshold not met…` 等于让每个人自己翻译内部报文——
+  // 把额度耗尽读成「没过线」再去改提示词，就是这么来的（2026-09-26 验收 B1）。
+  const human = taskFailureCopy(t, error)
+  const ink = tone === 'destructive' ? 'text-destructive hover:text-destructive/80' : 'text-muted-foreground hover:text-foreground'
   return (
     <Hint text={expanded ? t('generations.collapseError') : t('generations.expandError')}>
       <button
         type="button"
-        className="text-destructive hover:text-destructive/80 block max-w-72 cursor-pointer text-left text-xs"
+        className={cn('block cursor-pointer text-left text-xs', ink, tone === 'destructive' && 'max-w-72', className)}
         onClick={() => setExpanded(value => !value)}
       >
-        <span className={expanded ? 'block break-all whitespace-pre-wrap' : 'line-clamp-2 break-all'}>
-          {error}
+        <span className={expanded ? 'block break-all whitespace-pre-wrap font-mono text-[11px] opacity-80' : 'line-clamp-2 break-all'}>
+          {expanded ? error : human}
         </span>
-        {!expanded && <span className="text-destructive/60 ml-1 underline underline-offset-2">{t('generations.expand')}</span>}
+        {!expanded && (
+          <span className={cn('ml-1 underline underline-offset-2', tone === 'destructive' ? 'text-destructive/60' : 'text-subtle-foreground')}>
+            {t('generations.expand')}
+          </span>
+        )}
       </button>
     </Hint>
   )
@@ -756,14 +777,59 @@ function ErrorCell({ error }: { error: string | null }) {
 
 /**
  * 为什么重抽:成功任务的 responseSnapshot 里留着被否候选的名单和参考图降级原因。
- * 文本来自供应商与质检,原文展示不翻译——那是排障时要贴进工单的证据。
+ * 候选报文来自供应商与质检,原文展示不翻译——那是排障时要贴进工单的证据;
+ * 参考图那条走 SD-048 同一层人话映射(SD-104):worker 把稳定机器码
+ * `[channel:code]` 打在 reason 头部,这里认码说人话,原文只进 Tooltip。
  */
-function RetryTrace({ trace }: { trace: NonNullable<GenerationTask['retryTrace']> }) {
+type ReferenceTraceEntry = NonNullable<GenerationTask['retryTrace']>['reference'][number]
+
+const REFERENCE_STAMP = /^\[(first_frame|asset_sheet):([a-z_]+)\]/
+
+/** `${channel}:${code}` → 人话键。两条通道分开命名:钦定首帧是 i2v 的起点,
+ *  素材定妆照是角色服装板——同屏共用「参考图」一词就会自相矛盾(SD-104)。 */
+const REFERENCE_TRACE_KEY: Record<string, string> = {
+  'first_frame:conditioned': 'generations.refTrace.frameUsed',
+  'first_frame:artifact_missing': 'generations.refTrace.frameArtifactMissing',
+  'first_frame:gate_rejected': 'generations.refTrace.frameGateRejected',
+  'first_frame:unexpected_error': 'generations.refTrace.frameReadFailed',
+  'asset_sheet:conditioned': 'generations.refTrace.sheetsUsed',
+  'asset_sheet:model_rejects_reference_images': 'generations.refTrace.sheetsModelRejects',
+  'asset_sheet:artifact_missing': 'generations.refTrace.sheetsArtifactMissing',
+  'asset_sheet:gate_rejected': 'generations.refTrace.sheetsGateRejected',
+  'asset_sheet:unexpected_error': 'generations.refTrace.sheetsReadFailed',
+}
+
+/** SD-104 之前落库的旧行:reason 还是 worker 英文原文。认得出的几条按同一枚
+ *  码映射,认不出的不许原样上屏——退回通用句,原文进 Tooltip(站点律)。 */
+const LEGACY_REFERENCE_REASONS: [RegExp, string][] = [
+  [/does not take reference images/i, 'asset_sheet:model_rejects_reference_images'],
+  [/asset sheet is no longer stored/i, 'asset_sheet:artifact_missing'],
+  [/first frame is no longer stored/i, 'first_frame:artifact_missing'],
+]
+
+export function referenceTraceCopy(t: TranslateFn, entry: ReferenceTraceEntry): { text: string; raw: string | null } {
+  const raw = entry.reason ?? null
+  const stamped = raw ? REFERENCE_STAMP.exec(raw) : null
+  const key = stamped
+    ? REFERENCE_TRACE_KEY[`${stamped[1]}:${stamped[2]}`]
+    : raw
+      ? REFERENCE_TRACE_KEY[(LEGACY_REFERENCE_REASONS.find(([pattern]) => pattern.test(raw)) ?? [])[1] ?? '']
+      : undefined
+  if (key) {
+    // 旧行没有通道信息,但结论那句已经自带主语,不再拼 worker 原文。
+    return { text: t(key, { model: entry.model }), raw }
+  }
+  if (entry.conditioned) return { text: t('generations.referenceUsed', { model: entry.model }), raw }
+  return { text: t('generations.refTrace.unmapped', { model: entry.model }), raw }
+}
+
+function RetryTrace({ trace, attempts }: { trace: NonNullable<GenerationTask['retryTrace']>; attempts: number }) {
   const { t } = useI18n()
   return (
     <div className="space-y-1.5 text-xs">
       <p className="text-muted-foreground font-medium">
-        {t('generations.retryTraceTitle')}
+        {/* SD-104(c):一次就过的任务没有「此前各次」,标题按 attempts 分支。 */}
+        {attempts > 1 ? t('generations.retryTraceTitle') : t('generations.retryTraceTitleSingle')}
       </p>
       {trace.candidateErrors.length > 0 && (
         <ul className="text-destructive-ink list-disc space-y-0.5 pl-4">
@@ -776,13 +842,16 @@ function RetryTrace({ trace }: { trace: NonNullable<GenerationTask['retryTrace']
       )}
       {trace.reference.length > 0 && (
         <ul className="text-muted-foreground space-y-0.5">
-          {trace.reference.map(entry => (
-            <li key={`${entry.model}:${entry.conditioned}`}>
-              {entry.conditioned
-                ? t('generations.referenceUsed', { model: entry.model })
-                : t('generations.referenceSkipped', { model: entry.model, reason: entry.reason ?? '—' })}
-            </li>
-          ))}
+          {trace.reference.map((entry, index) => {
+            const copy = referenceTraceCopy(t, entry)
+            return (
+              <li key={`${entry.model}:${entry.conditioned}:${index}`}>
+                {copy.raw
+                  ? <Hint text={copy.raw}><span>{copy.text}</span></Hint>
+                  : <span>{copy.text}</span>}
+              </li>
+            )
+          })}
         </ul>
       )}
     </div>
@@ -807,12 +876,17 @@ const reviewDimensions: Record<string, string> = {
 /**
  * 停在问询上的任务:自动重抽已经走完它能走的路(策略/上限/额度),现在该人回答。
  * 这里只放两个出口——重抽一次、或带理由豁免;两个都是描边,与全站"重复行不得用实心"一致。
+ *
+ * SD-170：「本集重抽额度」印的是后端随列表下发的活算值；reviewSnapshot 里那份
+ * budgetUsed 是**该次裁决那一刻**的本集用量，只能带时点措辞展示，不能当现值——
+ * 两张不同日子冻下的快照并排就是「读数倒退」。
  */
-function ReviewAskCard({ task, review, storyboards, qcThreshold, onReviewed }: {
+export function ReviewAskCard({ task, review, storyboards, qcThreshold, retryBudget, onReviewed }: {
   task: GenerationTask
   review: GenerationReview
   storyboards: Storyboard[]
   qcThreshold?: number
+  retryBudget?: EpisodeRetryBudget | null
   onReviewed(): void
 }) {
   const { t } = useI18n()
@@ -865,7 +939,9 @@ function ReviewAskCard({ task, review, storyboards, qcThreshold, onReviewed }: {
           {task.storyboardId ? `#${storyboardNumber(task.storyboardId, storyboards)} · ` : ''}
           {t('generations.review.meta', { attempt: review.attempt, used: review.retriesUsed, cap: review.cap })}
           {review.budgetLimit !== null
-            ? ` · ${t('generations.review.budget', { used: review.budgetUsed, limit: review.budgetLimit })}`
+            ? retryBudget
+              ? ` · ${t('generations.review.budget', { used: retryBudget.used, limit: retryBudget.limit })}`
+              : ` · ${t('generations.review.budgetAtReview', { used: review.budgetUsed, limit: review.budgetLimit })}`
             : ''}
           {review.score !== null
             ? ` · ${t('generations.review.score', { score: Math.round(review.score * 100) })}${
@@ -892,8 +968,11 @@ function ReviewAskCard({ task, review, storyboards, qcThreshold, onReviewed }: {
       ) : review.reasons.length > 0 ? (
         <ul className="max-h-28 space-y-1 overflow-y-auto text-xs leading-relaxed">
           {review.reasons.map((reason, index) => (
-            <li key={index} className="text-muted-foreground break-all">
-              {reason}
+            // SD-199：候选链的原文是厂商报文（`AllocationQuota.FreeTierOnly`、`request_id=`、
+            // 帮助文档链接），常驻在这张卡上等于让每个用户自己翻译内部文本——而这一行恰好是
+            // 「为什么停下来了」唯一显眼的落点。收起态给人话因，展开才兜原文。
+            <li key={index}>
+              <ErrorCell error={reason} tone="muted" />
             </li>
           ))}
         </ul>
@@ -969,6 +1048,8 @@ interface BatchCardProps {
   defaultOpen: boolean
   /** 质检线由后端随批次下发；缺省=还不知道，那就不涂红绿。 */
   qcThreshold?: number
+  /** 本集重抽额度的活算值；缺省=这一版后端没下发，问询卡退回「该次裁决时」措辞。 */
+  retryBudget?: EpisodeRetryBudget | null
   onCancel(task: GenerationTask): Promise<void>
   /** Re-queue just this batch's FAILED tasks (idempotent trigger path). */
   onRetry(): void
@@ -982,7 +1063,7 @@ interface BatchCardProps {
   stopping: boolean
 }
 
-function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold, onCancel, onRetry, retrying, onReviewed, onStop, stopping }: BatchCardProps) {
+function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold, retryBudget, onCancel, onRetry, retrying, onReviewed, onStop, stopping }: BatchCardProps) {
   const { t, locale } = useI18n()
   const { api } = useSession()
   const [open, setOpen] = useState(defaultOpen)
@@ -1073,6 +1154,7 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold,
           review={task.review}
           storyboards={storyboards}
           qcThreshold={qcThreshold}
+          retryBudget={retryBudget}
           onReviewed={onReviewed}
         />
       ))}
@@ -1205,7 +1287,7 @@ function BatchCard({ batch, storyboards, cancellingId, defaultOpen, qcThreshold,
               {task.retryTrace && traceOpen[task.id] && (
                 <TableRow className="bg-muted/20 hover:bg-transparent">
                   <TableCell colSpan={8} className="py-2">
-                    <RetryTrace trace={task.retryTrace} />
+                    <RetryTrace trace={task.retryTrace} attempts={task.attempts} />
                   </TableCell>
                 </TableRow>
               )}
@@ -1323,6 +1405,16 @@ function EpisodeTracksCard({
         ) : null}
       </CardHeader>
       <CardContent>
+        {composition?.block && (
+          <div className="border-destructive/20 bg-destructive/5 mb-4 flex items-start gap-2 rounded-md border px-3 py-2">
+            <XCircleIcon className="text-destructive mt-0.5 size-4 shrink-0" />
+            <Hint text={composition.block.detail}>
+              <p className="text-destructive-ink text-xs">
+                {t(COMPOSE_BLOCK_KEY[composition.block.kind])}
+              </p>
+            </Hint>
+          </div>
+        )}
         {!composition && !score ? (
           <p className="text-muted-foreground text-sm">{t('generations.compositionNone')}</p>
         ) : (
@@ -1350,6 +1442,13 @@ function EpisodeTracksCard({
             <TrackRow label={t('generations.composition')}>
               {master ? (
                 <MasterVideo artifact={master} subtitleArtifact={subtitle} />
+              ) : composition?.status === 'BLOCKED' || composition?.status === 'FAILED' ? (
+                // 已经试过并停在终态：再说「等视频任务完成」是把刚发生过的那一轮抹掉，
+                // 用户会照着等下去。有原因就指回原因行，没原因（原因落库之前的旧数据）
+                // 就直说没留下原因，不编一句。
+                <TrackAbsent>
+                  {composition.block ? t('generations.compositionBlockedNoMaster') : t('generations.compositionNoReasonRecorded')}
+                </TrackAbsent>
               ) : (
                 <TrackAbsent>{t('generations.compositionNone')}</TrackAbsent>
               )}

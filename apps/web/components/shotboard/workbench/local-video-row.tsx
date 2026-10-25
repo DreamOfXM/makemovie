@@ -72,7 +72,15 @@ export function LocalVideoRow({ shot, onChanged }: { shot: ShotboardShot; onChan
     <div className="border-border/60 mt-2 rounded-md border px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5">
         <p className="text-muted-foreground text-xs">{t('localVideo.title')}</p>
-        <HelpHint text={isCard ? t('localVideo.cardHint') : t('localVideo.importHint', { kind: productionWord(t, shot.production) })} />
+        <HelpHint
+          text={
+            isCard
+              ? t('localVideo.cardHint')
+              : shot.production === 'video'
+                ? t('localVideo.importModelHint')
+                : t('localVideo.importHint', { kind: productionWord(t, shot.production) })
+          }
+        />
       </div>
 
       {isCard ? (

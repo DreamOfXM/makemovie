@@ -1,4 +1,7 @@
-const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
+// SD-085：实拍镜（描述里没有点名读数）走禁字档。旧版在这里钉的是「短文字一律清晰
+// 可读」那条——那等于平台在提示词里要求画面出现可读字符，2026-10-21 镜头 #4 的数字钟
+// 就是这么长出来的。三档的判档本身由 packages/pipeline/test/screen-text-rule.test.ts 钉。
+const NO_TEXT_RULE_ZH = '画面文字规则（最高优先级）：画面中不出现任何文字或可读字符；画面保持简洁，不添加描述之外的道具与装饰。'
 const MOTION_RULE_ZH = '运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定、不推不拉。'
 
 import { execFile, execFileSync } from 'node:child_process'
@@ -11,7 +14,7 @@ import { promisify } from 'node:util'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Prisma, type CapabilitySlot } from '@studio/db'
 import { MOCK_SCRIPT_TEXT, MOCK_SCRIPT_TEXT_EN, MOCK_STORYBOARD_JSON, MOCK_STORYBOARD_JSON_EN, MOCK_VLM_VERDICT, MockProviderAdapter } from '@studio/providers'
-import { advancePipeline, compositionCutChanged, createComposition, generationSeed, planComposition, readCompositionReview, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
+import { advancePipeline, ASSET_LAYOUT_BLOCKS_BY_KIND, assetLayoutLock, buildGenerationPlan, compositionCutChanged, createComposition, firstFrameTextDrift, generationSeed, planComposition, readCompositionReview, triggerStage, usableFirstFrames, VISUAL_STYLE_DIRECTIVE } from '@studio/pipeline'
 import { AUDIO_BRIDGE_PRE_MS, AUDIO_BRIDGE_TAIL_MS, probeDuration, synthesizeMockMedia, toReferenceImage } from '@studio/media'
 import { encryptSecret } from '@studio/security'
 import type { RunTaskCandidate } from '@studio/jobs'
@@ -72,6 +75,8 @@ describe('run-task', () => {
   it('materialises a mock artifact, approves it and bills usage', async () => {
     const prompt = 'a rainy night market'
     const seed = await env.seed({ prompt })
+    const shot = seed.storyboardIds[0]!
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { storyboardId: shot } })
     await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
 
     const task = await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })
@@ -108,6 +113,11 @@ describe('run-task', () => {
     const usage = await env.db.usageLedger.findMany({ where: { taskId: task.id } })
     expect(usage).toHaveLength(1)
     expect(usage[0]).toMatchObject({ organizationId: seed.organizationId, provider: 'mock', model: 'mock-t2v', modality: 't2v', inputUnits: prompt.length, outputUnits: bytes.byteLength })
+    // 一行账绑一次提交（SD-039/SD-135）：attemptId 是它的自然键，重投与重审都落回同一行。
+    const attempt = await env.db.submissionAttempt.findFirstOrThrow({ where: { taskId: task.id } })
+    expect(usage[0]!.attemptId).toBe(attempt.id)
+    // 镜头归属写在产物行上（SD-150），不再只靠任务反查。
+    expect(artifact.storyboardId).toBe(shot)
 
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
@@ -140,7 +150,8 @@ describe('run-task', () => {
     expect(checks).toHaveLength(1)
     expect(checks[0]).toMatchObject({ status: 'NEEDS_REVIEW', kind: 'fake-qc', score: 0.1 })
     expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(1)
-    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+    // 出了片就入账（SD-039/SD-135）：质检判回不改变厂商已经收到这一单的钱。
+    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(1)
   })
 
   it('auto-retries once when creative failures are set to auto1, then asks', async () => {
@@ -328,7 +339,8 @@ describe('model-driven visual audit', () => {
 
     // An audit fault must not spend money regenerating content nobody rejected.
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
-    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+    // 但审计坏了本身不是「没花钱」：那一片字节在厂商那边已经出过了（SD-135）。
+    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(1)
   })
 
   it('treats an unverified auditor as no auditor', async () => {
@@ -379,7 +391,8 @@ describe('model-driven visual audit', () => {
     expect(checks).toHaveLength(1)
     expect(checks[0]).toMatchObject({ status: 'NEEDS_REVIEW', kind: 'visual-audit', score: 0.2 })
     expect(review.artifactId).toBe(checks[0]!.artifactId)
-    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(0)
+    // 被审核判回的那一片照样进了账（SD-039）：判回是「人没收」，不是「没花」。
+    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(1)
   })
 
   // SD-098: an auditor that only ever sees the first frame scores a scripted fade-out as
@@ -931,7 +944,77 @@ describe('asset-sheet references', () => {
     expect(logs.map(log => log.event)).toEqual(['task.start', 'candidate.start', 'candidate.params', 'qc.verdict', 'candidate.success', 'task.success'])
     expect(logs[0]!.message).toContain('mock-image-edit')
     const response = JSON.parse(succeeded.responseSnapshot!) as { reference?: { conditioned: boolean }[] }
-    expect(response.reference).toEqual([{ model: 'mock-image-edit', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-image-edit', channel: 'asset_sheet', conditioned: true, reason: '[asset_sheet:conditioned]' }])
+  })
+
+  it('SD-067：首镜没有场景主帧，定妆照的「图N」就跟着附件序号从 图1 起', async () => {
+    // 提示词里「图N＝某人」是模型判断哪张附件约束谁的唯一依据，序号按「图1＝场景主帧
+    // 恒在」写死时，场首镜（本镜就是首镜，没有主帧可挂）的第 1 张附件被写成 图2：
+    // 文字与附件整体错位一位，且提示词里根本没有「图1＝」这一条（SD-067 实测）。
+    const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '关师傅', description: '纸扎铺老师傅' } })
+    await approveScript(seed)
+    await bindImageSlot(seed, 'mock-image-edit', { acceptsReferenceImages: true, maxReferenceImages: 3 })
+    const [shot] = seed.storyboardIds as [string]
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: '关师傅 stands at the counter' } })
+    const character = await env.db.asset.findFirstOrThrow({ where: { episodeId: seed.episodeId, kind: 'character' } })
+    const characterSheet = await env.attachSucceededMedia(seed, { stage: 'ASSET', modality: 'image' })
+    await approveAssetSheet(seed, characterSheet, character.id)
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: character.id, role: 'character' } })
+    // 场景定妆照一并定稿：参考图顺序是角色→场景，两张附件该拿到 图1、图2 两个号。
+    const scene = await env.db.asset.create({ data: { episodeId: seed.episodeId, kind: 'scene', name: '纸扎铺', description: '老城纸扎铺内景', status: 'APPROVED' } })
+    const sceneSheet = await env.attachSucceededMedia(seed, { stage: 'ASSET', modality: 'image' })
+    await env.db.assetVersion.create({ data: { assetId: scene.id, version: 1, description: 'v', status: 'APPROVED', artifactId: sceneSheet.artifactId } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: scene.id, role: 'scene' } })
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE')
+    expect(result.ok).toBe(true)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: (result as { batchId: string }).batchId } })
+    const snapshot = JSON.parse(task.requestSnapshot!) as { referenceArtifacts: { artifactId: string }[]; input: { prompt: string } }
+    expect(snapshot.referenceArtifacts.map(reference => reference.artifactId)).toEqual([characterSheet.artifactId, sceneSheet.artifactId])
+
+    const labelled = [...snapshot.input.prompt.matchAll(/图(\d+)＝([^\n｜]*)/g)].map(match => Number(match[1]))
+    expect(labelled).toEqual([1, 2])
+    expect(snapshot.input.prompt).toContain('图1＝角色外观参考｜character·关师傅')
+    expect(snapshot.input.prompt).toContain('图2＝设定图｜scene·纸扎铺')
+    // 文字里不许出现附件没有的序号——错位一位正是这样漏出来的。
+    expect(snapshot.input.prompt).not.toContain('图3＝')
+  })
+
+  it('SD-041：调整要求只改内容与质感，版式锁排在它之后，本图仍是一张角色板', async () => {
+    // 2026-10-21 实测：给角色板补一句调整要求，五区块的板被打回一张裸半身照——
+    // 自由文字排在版式规格之后，尾部权重压过了规格。锁句必须最后说，且明确划界。
+    const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: '陈默', description: '沉默的搬尸工' } })
+    await approveScript(seed)
+    await bindImageSlot(seed)
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'ASSET', { promptNote: '只要半身照，背景换成巷口' })
+    expect(result.ok).toBe(true)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: (result as { batchId: string }).batchId } })
+    const prompt = (JSON.parse(task.requestSnapshot!) as { input: { prompt: string } }).input.prompt
+
+    const noteAt = prompt.indexOf('调整要求（只改画面内容与质感）：只要半身照，背景换成巷口')
+    expect(noteAt).toBeGreaterThan(-1)
+    expect(prompt.indexOf('版式锁定')).toBeGreaterThan(noteAt)
+    // 锁是最后一段:它之后再没有风格尾巴或自由文字能压回去。
+    expect(prompt.endsWith(assetLayoutLock('character')!)).toBe(true)
+    for (const block of ASSET_LAYOUT_BLOCKS_BY_KIND.character!) expect(prompt).toContain(block)
+  })
+
+  it('SD-041：逐镜首帧没有版式可锁，调整要求保持原措辞、不注入素材板锁句', async () => {
+    const seed = await env.seed({ storyboards: 1 })
+    await approveScript(seed)
+    await bindImageSlot(seed)
+    const [shot] = seed.storyboardIds as [string]
+    const scene = await env.db.asset.create({ data: { episodeId: seed.episodeId, kind: 'scene', name: '青石巷', description: '夜色下的青石板路', status: 'APPROVED' } })
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: scene.id, role: 'scene' } })
+
+    const result = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'IMAGE', { storyboardIds: [shot], regenerate: true, promptNote: '镜头再低一点' })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    const task = await env.db.generationTask.findFirstOrThrow({ where: { batchId: (result as { batchId: string }).batchId } })
+    const prompt = (JSON.parse(task.requestSnapshot!) as { input: { prompt: string } }).input.prompt
+    expect(prompt).toContain('调整要求：镜头再低一点')
+    expect(prompt).not.toContain('调整要求（只改画面内容与质感）')
+    expect(prompt).not.toContain('版式锁定')
   })
 
   it('orders image candidates by the task: sheets take plain t2i first, referenced frames take the edit model first', async () => {
@@ -1009,7 +1092,7 @@ describe('asset-sheet references', () => {
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(succeeded.status).toBe('SUCCEEDED')
     const response = JSON.parse(succeeded.responseSnapshot!) as { reference?: { model: string; conditioned: boolean }[] }
-    expect(response.reference).toEqual([{ model: 'mock-image-edit', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-image-edit', channel: 'asset_sheet', conditioned: true, reason: '[asset_sheet:conditioned]' }])
   })
 })
 
@@ -2172,6 +2255,45 @@ describe('auto-advance', () => {
     expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: { in: ['ASSET', 'FIRST_FRAME'] } } })).toBe(0)
     expect(await env.takeWaitingRunTasks()).toHaveLength(0)
   })
+
+  it('单镜重跑完成时不接力：修复任务不能把下一阶段整批排上队', async () => {
+    // 与「auto 档」那条同一套起手、同一档位，唯一差别是任务的来路：它不是整阶段触发，
+    // 而是人点名一镜的重跑。重跑只买那一镜，ASSET 整批一步也不许排——档位管的是
+    // 「花钱的阶段要不要自动走」，这里管的是「这一步是不是整阶段的一步」。
+    const seed = await env.seed({ model: 'mock-storyboard', modality: 'text', stage: 'STORYBOARD', storyboards: 0 })
+    await env.db.scriptVersion.create({ data: { episodeId: seed.episodeId, version: 1, content: 'the approved script', checksum: 'relay-repair-script', status: 'APPROVED' } })
+    await bindImageGen(seed)
+    await env.db.project.updateMany({ where: { organizationId: seed.organizationId }, data: { automationGate: 'auto' } })
+    await env.db.generationTask.update({ where: { id: seed.taskId }, data: { relayEligible: false } })
+
+    await runTask(env.runPayload(seed), env.deps({ qcMode: 'pass', pollIntervalMs: 10 }))
+
+    expect((await env.db.generationTask.findUniqueOrThrow({ where: { id: seed.taskId } })).status).toBe('SUCCEEDED')
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'ASSET' } })).toBe(0)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+    expect(await env.db.auditEvent.count({ where: { organizationId: seed.organizationId, action: 'pipeline.autoAdvance' } })).toBe(0)
+    // 停下来是设计，不是故障：日志里要能读到为什么没接力。
+    expect(await env.db.generationLog.count({ where: { taskId: seed.taskId, event: 'pipeline.relaySkipped' } })).toBe(1)
+  })
+
+  it('接力资格由触发方式决定：点名一镜为假，整阶段为真', async () => {
+    const seed = await env.seed({ storyboards: 2 })
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    const [shot] = seed.storyboardIds as [string, string]
+
+    const repair = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO', { storyboardIds: [shot], regenerate: true })
+    expect(repair.ok).toBe(true)
+    const repairTasks = await env.db.generationTask.findMany({ where: { batchId: (repair as { batchId: string }).batchId } })
+    expect(repairTasks.length).toBeGreaterThan(0)
+    expect(repairTasks.every(task => task.relayEligible === false)).toBe(true)
+
+    const whole = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    expect(whole.ok).toBe(true)
+    const wholeTasks = await env.db.generationTask.findMany({ where: { batchId: (whole as { batchId: string }).batchId } })
+    expect(wholeTasks).toHaveLength(2)
+    expect(wholeTasks.every(task => task.relayEligible)).toBe(true)
+  })
 })
 
 describe('usable first frames', () => {
@@ -2248,6 +2370,144 @@ describe('usable first frames', () => {
   })
 })
 
+/** 把「这一帧按哪段文字画的」钉进那一帧所属任务的快照——真实链路里这就是出帧时存的提示词。 */
+async function drawnFrom(taskId: string, prompt: string): Promise<void> {
+  await env.db.generationTask.update({ where: { id: taskId }, data: { requestSnapshot: JSON.stringify({ input: { prompt } }) } })
+}
+
+/** 与读端点、触发端同一口径算一遍：先解析生效首帧，再判它跟不跟得上当前描述。 */
+async function driftedShots(seed: Seed, ids: string[]): Promise<Set<string>> {
+  const frames = await usableFirstFrames(env.db, seed.organizationId, seed.episodeId, ids)
+  const storyboards = await env.db.storyboard.findMany({ where: { id: { in: ids } } })
+  return firstFrameTextDrift(
+    env.db,
+    frames,
+    new Map(storyboards.map(storyboard => [storyboard.id, { description: storyboard.description, selectedFrameArtifactId: storyboard.selectedFrameArtifactId }])),
+  )
+}
+
+describe('first frame follows the edited description', () => {
+  it('accuses only the shots whose text moved out from under their frame', async () => {
+    const seed = await env.seed({ storyboards: 4 })
+    const [untouched, rewritten, respaced, pinned] = seed.storyboardIds as [string, string, string, string]
+    const ids = [untouched, rewritten, respaced, pinned]
+    const frames = await Promise.all(ids.map(id => env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: id })))
+    for (const [index, frame] of frames.entries()) {
+      await drawnFrom(frame.taskId, `Shot ${index + 1}: a rainy night market`)
+    }
+    expect(await driftedShots(seed, ids)).toEqual(new Set())
+
+    // 改一个字 = 画面意图变了：下一笔 i2v 会把这张按旧文字画的画面当基准买回来。
+    await env.db.storyboard.update({ where: { id: rewritten }, data: { description: 'a rainy night market, 关师傅撑伞站在门口' } })
+    // 只动空白不是改画面意图，判据折叠空白后才不逼人重抽一张本来对的图。
+    await env.db.storyboard.update({ where: { id: respaced }, data: { description: '  a rainy   night market  ' } })
+    // 钦定是人明示「就要这张画面」，此时文字对不上是他选的，不算过期。
+    await env.db.storyboard.update({ where: { id: pinned }, data: { description: '空荡的街口', selectedFrameArtifactId: frames[3]!.artifactId } })
+
+    expect(await driftedShots(seed, ids)).toEqual(new Set([rewritten]))
+  })
+
+  it('leaves a frame it cannot read alone, and says nothing when there is no frame', async () => {
+    // 人工导入的帧、旧数据都没有可解析的提示词。证据缺失时既不拦人，也不谎报过期。
+    const seed = await env.seed({ storyboards: 2 })
+    const [noSnapshot, noFrame] = seed.storyboardIds as [string, string]
+    await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: noSnapshot })
+    await env.db.storyboard.update({ where: { id: noSnapshot }, data: { description: '完全换了一段画面意图' } })
+
+    expect(await driftedShots(seed, [noSnapshot, noFrame])).toEqual(new Set())
+  })
+
+  it('refuses a conditioned VIDEO when the frame it would copy predates the description', async () => {
+    const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v')
+    const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot })
+    await drawnFrom(frame.taskId, 'Shot 1: a rainy night market')
+
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: '清晨的菜市场，只有摊主一个人在收摊' } })
+    const batchesBefore = await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'VIDEO' } })
+    const refused = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    expect(refused.ok).toBe(false)
+    if (refused.ok) throw new Error('expected the VIDEO stage to be refused on a stale first frame')
+    expect(refused.error).toBe('generations:staleFirstFrame')
+    expect(refused.reasons).toEqual(['#1'])
+    // 拦住就是不排队：一笔任务都不许排出去，否则这条门等于只写了篇说明。
+    expect(await env.db.generationBatch.count({ where: { episodeId: seed.episodeId, stage: 'VIDEO' } })).toBe(batchesBefore)
+    expect(await env.takeWaitingRunTasks()).toHaveLength(0)
+
+    // 出路一：重跑「首帧」后新帧的快照写的就是当前描述，门自己让开。
+    const redrawn = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot, version: 2 })
+    await drawnFrom(redrawn.taskId, 'Shot 1: 清晨的菜市场，只有摊主一个人在收摊')
+    await stampFrame(redrawn.artifactId, FRAME_LATEST)
+    await stampFrame(frame.artifactId, FRAME_AGED)
+    const rerun = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    expect(rerun.ok).toBe(true)
+  })
+
+  it('exempts the shot once the human pins that frame, and never fires without a conditioning model', async () => {
+    const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v')
+    const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot })
+    await drawnFrom(frame.taskId, 'Shot 1: a rainy night market')
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: '清晨的菜市场，只有摊主一个人在收摊' } })
+
+    // 钦定＝人明示就要这张画面，此时不再判过期。
+    await env.db.storyboard.update({ where: { id: shot }, data: { selectedFrameArtifactId: frame.artifactId } })
+    const pinned = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    expect(pinned.ok).toBe(true)
+
+    // 没绑图生视频时帧根本不进厂商请求，这条门不该拦——纯文生视频没有「旧画面」可言。
+    await env.db.capabilityBinding.deleteMany({ where: { organizationId: seed.organizationId, slot: 'VIDEO_I2V' } })
+    await env.db.storyboard.update({ where: { id: shot }, data: { selectedFrameArtifactId: null, description: '又换了一段画面意图' } })
+    const unconditioned = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO', { storyboardIds: [shot], regenerate: true })
+    expect(unconditioned.ok).toBe(true)
+  })
+
+  it('says the same thing in the pre-spend plan as the trigger does', async () => {
+    // 预审门报「能跑」而点下去 409，确认框就成了一句假话——两处必须同码同镜头。
+    const seed = await env.seed()
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+    await bindVideoSlot(seed, 'VIDEO_I2V', 'mock-i2v')
+    const frame = await env.attachSucceededMedia(seed, { stage: 'FIRST_FRAME', modality: 'image', storyboardId: shot })
+    await drawnFrom(frame.taskId, 'Shot 1: a rainy night market')
+    await env.db.storyboard.update({ where: { id: shot }, data: { description: '清晨的菜市场，只有摊主一个人在收摊' } })
+
+    const plan = await buildGenerationPlan(env.db, seed.organizationId, seed.episodeId, 'VIDEO')
+    const trigger = await triggerStage({ db: env.db, enqueueJob: env.deps().enqueueJob }, seed.organizationId, null, seed.episodeId, 'VIDEO')
+    expect(plan.ok).toBe(false)
+    expect(trigger.ok).toBe(false)
+    if (plan.ok || trigger.ok) throw new Error('expected both the plan and the trigger to refuse')
+    expect([plan.error, trigger.error]).toEqual(['generations:staleFirstFrame', 'generations:staleFirstFrame'])
+    expect([plan.reasons, trigger.reasons]).toEqual([['#1'], ['#1']])
+  })
+
+  it('SD-123: names an unbound live-action shot in the pre-spend plan, and drops it once an asset is bound', async () => {
+    const seed = await env.seed({ storyboards: 1, asset: { kind: 'character', name: 'Lin Wan', description: 'a reporter in a soaked coat' } })
+    const [shot] = seed.storyboardIds as [string]
+    await approveScript(seed)
+    await bindVideoSlot(seed, 'VIDEO_T2V', 'mock-t2v')
+
+    const codesOf = async (): Promise<string[]> => {
+      const plan = await buildGenerationPlan(env.db, seed.organizationId, seed.episodeId, 'VIDEO')
+      if (!plan.ok) throw new Error(`plan refused: ${plan.error}`)
+      return plan.plan.storyboardGaps.find(gap => gap.shotNumber === 1)?.codes ?? []
+    }
+
+    // 零绑定＝定妆照与道具参考都进不了请求，画面里的人与道具全靠模型自己编。
+    expect(await codesOf()).toContain('no_asset_binding')
+
+    await env.db.storyboardAsset.create({ data: { storyboardId: shot, assetId: seed.assetId!, role: 'character' } })
+    expect(await codesOf()).not.toContain('no_asset_binding')
+  })
+})
+
 describe('sfx (the silent half of AUDIO)', () => {
   it('plans one sfx task per dialogue-free shot, billed against the sfx slot', async () => {
     const seed = await env.seed({ storyboards: 2 })
@@ -2317,7 +2577,7 @@ describe('first-frame conditioning', () => {
     // that any candidate in the slot may run.
     const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${NO_TEXT_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
     })
@@ -2400,7 +2660,7 @@ describe('first-frame conditioning', () => {
     // its place — growing either end has to be decided twice.
     const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${NO_TEXT_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
       referenceArtifacts: [{ type: 'first_frame', artifactId: frame.artifactId }],
       promptGuards: [{ guard: 'style-anchor', action: 'repair', note: expect.any(String) }],
@@ -2426,7 +2686,7 @@ describe('first-frame conditioning', () => {
     const response = JSON.parse(succeeded.responseSnapshot!) as { providerTaskId: string; artifactUrl: string; reference?: unknown[] }
     // The log names the model that took the frame, not the frame's bytes — the artifact id is
     // already on the request side of the row and this column is for what the worker did.
-    expect(response.reference).toEqual([{ model: 'mock-i2v', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-i2v', channel: 'first_frame', conditioned: true, reason: '[first_frame:conditioned]' }])
     // The URL is the mock's receipt for what it was handed, stored verbatim by the worker.
     expect(response.artifactUrl).toBe(`mock://artifacts/${response.providerTaskId}/i2v?refs=first_frame`)
     // The auditor judges the clip against the very image the model was conditioned with —
@@ -2539,7 +2799,7 @@ describe('first-frame conditioning', () => {
       expect(conditioned.status).toBe('SUCCEEDED')
       expect(conditioned.model).toBe('mock-i2v')
       const response = JSON.parse(conditioned.responseSnapshot!) as { providerTaskId: string; artifactUrl: string; reference?: unknown[] }
-      expect(response.reference).toEqual([{ model: 'mock-i2v', conditioned: true }])
+      expect(response.reference).toEqual([{ model: 'mock-i2v', channel: 'first_frame', conditioned: true, reason: '[first_frame:conditioned]' }])
       expect(response.artifactUrl).toBe(`mock://artifacts/${response.providerTaskId}/i2v?refs=first_frame`)
     }
   })
@@ -2626,7 +2886,7 @@ describe('first-frame conditioning', () => {
 
     const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: shot }, select: { durationMs: true } })
     expect(JSON.parse(task.requestSnapshot!)).toEqual({
-      input: { prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
+      input: { prompt: `Shot 1: a rainy night market\n\n${NO_TEXT_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` },
       // Same canonical length whether or not a conditioning model is bound: the shot asked
       // for its own duration, and the vendor field is decided by whichever candidate runs.
       parameters: { seed: generationSeed(task.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
@@ -2672,14 +2932,16 @@ describe('first-frame conditioning', () => {
     // The shot fell back to text and the row says why, in the numbers the gate that decided it
     // actually saw — the bytes it read and the ceiling from the bound model's own row.
     expect(response.reference).toHaveLength(1)
-    expect(response.reference![0]).toMatchObject({ model: 'mock-i2v', conditioned: false })
+    expect(response.reference![0]).toMatchObject({ model: 'mock-i2v', channel: 'first_frame', conditioned: false, code: 'gate_rejected' })
 
     const stored = await env.db.mediaArtifact.findUniqueOrThrow({ where: { id: frame.artifactId } })
     const bytes = await env.storage.read(stored.objectKey)
     const refusal = await toReferenceImage({ bytes, mimeType: stored.mimeType, workdir: await mkdtemp(path.join(os.tmpdir(), 'studio-reference-')), limits: { maxBytes: ceiling } })
     expect(refusal.ok).toBe(false)
     if (refusal.ok) throw new Error('expected the frame to be refused')
-    expect(response.reference![0]!.reason).toBe(refusal.reason)
+    // SD-104: the machine code stamps the head of the reason; the gate's own numbers ride
+    // behind it as structured detail for the tooltip, so the web layer never prints raw prose.
+    expect(response.reference![0]!.reason).toBe(`[first_frame:gate_rejected] ${refusal.reason}`)
     expect(refusal.reason).toContain(`${bytes.byteLength} bytes`)
     expect(refusal.reason).toContain(`${ceiling} bytes`)
   })
@@ -2713,7 +2975,7 @@ describe('first-frame conditioning', () => {
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(succeeded.model).toBe('mock-i2v')
     const response = JSON.parse(succeeded.responseSnapshot!) as { providerTaskId: string; artifactUrl: string; reference?: unknown[] }
-    expect(response.reference).toEqual([{ model: 'mock-i2v', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-i2v', channel: 'first_frame', conditioned: true, reason: '[first_frame:conditioned]' }])
     expect(response.artifactUrl).toBe(`mock://artifacts/${response.providerTaskId}/i2v?refs=first_frame`)
     // A frame flattened to an opaque JPEG still conditions the shot; one sent as it was
     // stored would be refused for its alpha plane and the shot would fall back to text.
@@ -2743,7 +3005,7 @@ describe('first-frame conditioning', () => {
     // Absent, not empty: a `media` key a text-to-video adapter forwarded as-is is what
     // several vendors answer 200 to, and the shot then costs full price with no conditioning.
     // The prompt is the guarded one the snapshot carries — the worker forwards input verbatim.
-    expect(submitted.mock.calls[0]![1].input).toEqual({ prompt: `Shot 1: a rainy night market\n\n${TEXT_LANGUAGE_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` })
+    expect(submitted.mock.calls[0]![1].input).toEqual({ prompt: `Shot 1: a rainy night market\n\n${NO_TEXT_RULE_ZH}\n\n${MOTION_RULE_ZH}\n\n${VISUAL_STYLE_DIRECTIVE}` })
 
     const succeeded = await env.db.generationTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(succeeded.status).toBe('SUCCEEDED')
@@ -3591,7 +3853,10 @@ describe('edit track hardening (V03+): negative offsets, source ranges, missing 
       },
     })
     await composeEpisode(env.composePayload(composition.id, seed), env.deps())
-    expect((await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })).status).toBe('BLOCKED')
+    const blocked = await env.db.composition.findUniqueOrThrow({ where: { id: composition.id } })
+    expect(blocked.status).toBe('BLOCKED')
+    // 声音轨找不到源，就得说是哪一条（SD-177）：界面按这一档告诉用户去哪修。
+    expect(blocked.errorSnapshot).toContain('source artifact artifact-that-does-not-exist not found')
   })
 })
 
@@ -3710,7 +3975,7 @@ describe('spliced shot execution (S2c)', () => {
     // 身份只认号：第 1 段是批准首帧，第 2、3 段各是上一段刚抽出来的末帧。
     expect(new Set(response.takes.map(take => take.firstFrameArtifactId)).size).toBe(3)
     // 首帧只解析一次：候选入口读过一遍，段循环不该再读一遍、更不该记第二笔。
-    expect(response.reference).toEqual([{ model: 'mock-i2v', conditioned: true }])
+    expect(response.reference).toEqual([{ model: 'mock-i2v', channel: 'first_frame', conditioned: true, reason: '[first_frame:conditioned]' }])
     // 结论是各段合成的，不是对母带字节重新审过一遍：报告里必须写着 aggregated 并带上最差那段的读数。
     expect(response.qc).toMatchObject({ aggregated: true })
 
@@ -3718,11 +3983,16 @@ describe('spliced shot execution (S2c)', () => {
     const attempts = await env.db.submissionAttempt.findMany({ where: { taskId: task.id }, orderBy: { slot: 'asc' } })
     expect(attempts.map(attempt => attempt.slot)).toEqual([100, 200, 300])
     expect(attempts.map(attempt => attempt.status)).toEqual(['settled', 'settled', 'settled'])
-    // 一段过审记一笔：后面某段失败时，前面付过的钱不从账本里消失。
+    // 一段出了片记一笔：后面某段失败时，前面付过的钱不从账本里消失。
     expect(await env.db.usageLedger.count({ where: { taskId: task.id } })).toBe(3)
+    // 每一格提交都有自己的账行，且行上的 attemptId 就是那一格的号——重投才落得回同一行。
+    expect(await env.db.usageLedger.findMany({ where: { taskId: task.id }, select: { attemptId: true } }))
+      .toEqual(expect.arrayContaining(attempts.map(attempt => expect.objectContaining({ attemptId: attempt.id }))))
 
     const master = await env.db.mediaArtifact.findFirstOrThrow({ where: { taskId: task.id } })
     expect(master.stage).toBe('VIDEO')
+    // 拼接母带就是这一镜的成片，归属写在行上（SD-150）。
+    expect(master.storyboardId).toBe(shot)
     // 母带时长是量出来的：三段各 ~1 秒，不是计划里的 12 秒。
     expect(master.durationMs).not.toBeNull()
     expect(master.durationMs!).toBeLessThan(12_000)
@@ -3946,9 +4216,12 @@ describe('spliced shot consumption (S2d)', () => {
     expect(entry.spliceMs).toBeNull()
     expect(manifest.resolved!.takeSignature).toMatch(/^[0-9a-f]{64}$/)
 
+    await env.db.composition.update({ where: { id: compositionId }, data: { errorSnapshot: 'storyboard sbx01 has no succeeded video artifact' } })
     await composeEpisode(env.composePayload(compositionId, seed), env.deps())
     const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
     expect(composition.status).toBe('COMPLETED')
+    // 成功这一轮把上一轮的阻塞原因抹掉（SD-177）：留着就是界面上「已完成 + 一句为什么没出片」。
+    expect(composition.errorSnapshot).toBeNull()
     // 单段镜头没有段集可言：换掉它的版本走的是选版轴，不是段轴。
     expect(await compositionCutChanged(env.db, seed.episodeId, composition.manifest)).toBe(false)
   })
@@ -3968,6 +4241,8 @@ describe('spliced shot consumption (S2d)', () => {
     const composition = await env.db.composition.findUniqueOrThrow({ where: { id: compositionId } })
     expect(composition.status).toBe('BLOCKED')
     expect(composition.artifactId).toBeNull()
+    // 原因落在行上（SD-177）：只写 stderr 的记录，界面上就只剩一个没有解释的「已阻塞」。
+    expect(composition.errorSnapshot).toContain("no longer matches the master's own segments")
   })
 })
 

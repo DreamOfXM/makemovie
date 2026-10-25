@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState, type SyntheticEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { AlertTriangleIcon, DownloadIcon, RotateCwIcon } from 'lucide-react'
 import { artifactHref, type GenerationArtifact } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
@@ -68,8 +68,10 @@ export function useArtifactUrl(downloadUrl: string | null): ArtifactLoad {
  * The in-place failure block. It sits where the artifact would have sat, so the row
  * keeps its meaning, and it carries its own retry — a load failure is not a reason
  * to send the user back to the panel header to find a refresh button.
+ * `retryless` 供「宿主本身就是可点按钮」的格子用：按钮里不许再放按钮（非法 HTML，
+ * React 会 hydration 报错并把整棵工作台退回客户端渲染），重试由宿主作兄弟节点给。
  */
-export function ArtifactLoadError({ onRetry, className }: { onRetry: () => void; className?: string }) {
+export function ArtifactLoadError({ onRetry, className, retryless }: { onRetry: () => void; className?: string; retryless?: boolean }) {
   const { t } = useI18n()
   return (
     <div
@@ -81,16 +83,18 @@ export function ArtifactLoadError({ onRetry, className }: { onRetry: () => void;
     >
       <AlertTriangleIcon className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">{t('generations.loadFailed')}</span>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="text-destructive-ink ml-auto h-6 shrink-0 gap-1 px-1.5 text-xs"
-        onClick={onRetry}
-      >
-        <RotateCwIcon />
-        {t('common.retry')}
-      </Button>
+      {retryless ? null : (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-destructive-ink ml-auto h-6 shrink-0 gap-1 px-1.5 text-xs"
+          onClick={onRetry}
+        >
+          <RotateCwIcon />
+          {t('common.retry')}
+        </Button>
+      )}
     </div>
   )
 }
@@ -111,13 +115,17 @@ interface ArtifactMediaProps {
    * duration must not render a dash while a file is actually playing.
    */
   onDurationMs?: (ms: number) => void
+  /** 宿主本身就是可点按钮时置真：本格不再渲染任何可交互内容（按钮套按钮非法）。 */
+  retryless?: boolean
+  /** 失败态上报给 retryless 宿主，由它在按钮之外给出重试入口；恢复上报 null。 */
+  onLoadFailed?: (retry: (() => void) | null) => void
 }
 
 /**
  * One renderer for every artifact the console can show: picture, clip, voice, or a
  * download link for anything a browser will not play inline (the cue sheet).
  */
-export function ArtifactMedia({ artifact, label, className, interactive = true, zoomNav, onDurationMs }: ArtifactMediaProps) {
+export function ArtifactMedia({ artifact, label, className, interactive = true, zoomNav, onDurationMs, retryless, onLoadFailed }: ArtifactMediaProps) {
   const { t } = useI18n()
   const { url: href, failed, reload } = useArtifactUrl(artifact.downloadUrl)
   const [zoomed, setZoomed] = useState(false)
@@ -136,16 +144,24 @@ export function ArtifactMedia({ artifact, label, className, interactive = true, 
     if (Number.isFinite(seconds) && seconds > 0) onDurationMs?.(Math.round(seconds * 1000))
   }
 
-  if (failed || rejected) {
-    return (
-      <ArtifactLoadError
-        className={className}
-        onRetry={() => {
-          setRejected(false)
-          reload()
-        }}
-      />
-    )
+  const retry = useCallback(() => {
+    setRejected(false)
+    reload()
+  }, [reload])
+  const isFailed = failed || rejected
+  const reportFailed = useRef(onLoadFailed)
+  useEffect(() => {
+    reportFailed.current = onLoadFailed
+  })
+  // retryless 的宿主在按钮之外渲染重试入口，所以失败与恢复都要报上去；卸载时收回。
+  useEffect(() => {
+    if (!retryless) return
+    reportFailed.current?.(isFailed ? retry : null)
+    return () => reportFailed.current?.(null)
+  }, [isFailed, retryless, retry])
+
+  if (isFailed) {
+    return <ArtifactLoadError className={className} retryless={retryless} onRetry={retry} />
   }
   if (!href) return <Skeleton className={cn('h-24 w-40 shrink-0', className)} />
   if (artifact.mimeType.startsWith('image/')) {
@@ -198,6 +214,15 @@ export function ArtifactMedia({ artifact, label, className, interactive = true, 
         aria-label={alt}
         className={cn('h-10 max-w-56', className)}
       />
+    )
+  }
+  // 不可点宿主里的不可内嵌产物只报事实，不给链接：a 与 button 同样是按钮里的非法可交互内容。
+  if (retryless) {
+    return (
+      <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
+        <DownloadIcon className="size-3.5" />
+        {label ?? t('generations.download')}
+      </span>
     )
   }
   return (

@@ -2,10 +2,10 @@ import { saveNleAudio } from './nle-media.js'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { resolveVideoArtifactShot, type AudioSource, type MediaArtifact, type PrismaClient } from '@studio/db'
-import { masterNeedsVoice, recordedAudioMode } from '@studio/domain'
+import { resolveShotTake, resolveVideoArtifactShot, type AudioSource, type MediaArtifact, type PrismaClient } from '@studio/db'
+import { isArtifactVetoed, masterNeedsVoice, recordedAudioMode } from '@studio/domain'
 import type { ComposeEpisodePayload } from '@studio/jobs'
-import { buildObjectKey, buildSrt, resolveAudioRange, conformToEditMedia, planMasterCutsForClips, probeDuration, type MasterCutPlan, type ShotAudioMode, type SubtitleEntry } from '@studio/media'
+import { buildObjectKey, buildSrt, resolveAudioRange, conformToEditMedia, planMasterCutsForClips, probeDuration, probePictureDuration, probeVideoFrames, type MasterCutPlan, type ShotAudioMode, type SubtitleEntry } from '@studio/media'
 import { manifestStoryboardIds, splicedMasterTakes, type CompositionTake } from '@studio/pipeline'
 import type { PipelineDeps } from './deps.js'
 
@@ -79,6 +79,60 @@ interface EditTrackElement {
   /** 轨道源范围(序列帧,可选)——有则只取源片这一段,不再整份入混音。 */
   sourceInFrame?: number
   sourceOutFrame?: number
+}
+
+/**
+ * SD-182 的落点：把「这一镜请求了多少帧」与「这一镜真的交回多少帧」对齐。
+ *
+ * `trim=end_frame=N` 不含终，交回的是 min(N, 源片帧数) − start 帧：源片比请求少一帧时
+ * ffmpeg 不报错、只交回它交得出的那些帧，于是母带比编辑文档短「帧差 × 镜头数」，而字幕
+ * 是按文档排的——越往后漂得越多。交付帧数多了（快照过期、素材换版）同样是两张尺。
+ *
+ * 少 1~2 帧是「毫秒→帧」舍入的必然产物（编辑文档就是这么算出来的），用末帧定格补到请求
+ * 的格子：40ms 的定格读不出来，母带长度却回到文档，字幕与画面同一把尺。缺口再大就是素材
+ * 真的没有那些画面，冻结几秒比短几帧更糟，当场阻断让人重裁。多出来的裁到请求——剪辑意图
+ * 是真相。两条都以 -frames:v 加 -t 双重封顶收尾（渲染不许跑飞，SD-119）。
+ */
+const FRAME_ALIGN_TOLERANCE = 2
+
+export async function alignClipFrames(
+  file: string,
+  wantedFrames: number,
+  fps: number,
+  out: string,
+  shotLabel: string,
+): Promise<{ file: string; got: number | null; wanted: number }> {
+  const got = await probeVideoFrames(file)
+  // 探针读不出帧数就没资格裁决（一条已渲染好的素材不该因元数据缺失而失败），原样交回。
+  if (got === null || got === wantedFrames) return { file, got, wanted: wantedFrames }
+  if (got < wantedFrames && wantedFrames - got > FRAME_ALIGN_TOLERANCE) {
+    throw new Error(`storyboard ${shotLabel}: the frozen edit asks for ${wantedFrames} frames but the clip holds ${got} (${wantedFrames - got} short) — the cut points at frames the media does not have; re-cut this shot instead of freezing ${((wantedFrames - got) / fps).toFixed(2)}s of still picture`)
+  }
+  const seconds = (wantedFrames / fps).toFixed(6)
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const execFileAsync = promisify(execFile)
+  const shortBy = wantedFrames - got
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y', '-v', 'error',
+      '-i', file,
+      '-vf', shortBy > 0 ? `tpad=stop_mode=clone:stop=${shortBy},setpts=PTS-STARTPTS` : 'setpts=PTS-STARTPTS',
+      ...(shortBy > 0 ? ['-af', 'apad'] : []),
+      '-frames:v', String(wantedFrames),
+      '-t', seconds,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '192k',
+      out,
+    ], { timeout: 120_000 })
+  } catch {
+    throw new Error(`storyboard ${shotLabel}: failed to align the clip to the ${wantedFrames} frames the edit asks for (delivered ${got} at ${fps.toFixed(3)}fps)`)
+  }
+  const aligned = await probeVideoFrames(out)
+  if (aligned !== null && aligned !== wantedFrames) {
+    throw new Error(`storyboard ${shotLabel}: the clip still delivers ${aligned} frames after alignment instead of the ${wantedFrames} the edit asks for`)
+  }
+  return { file: out, got, wanted: wantedFrames }
 }
 
 export async function composeEpisode(payload: ComposeEpisodePayload, deps: PipelineDeps): Promise<void> {
@@ -268,10 +322,18 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
           throw new Error(`failed to trim clip for storyboard ${storyboardId} [${startFrame},${endFrame}) (legacy seconds timebase)`)
         }
       }
+      // SD-182: 裁完必须数帧。编辑文档按帧号要 N 帧，`trim` 只能交回源片有的那些帧，
+      // 差一帧就少一帧——62 刀累计就是母带比文档短、字幕逐镜往后漂的那 2.5 秒。
+      // 无裁切请求（整片入镜）没有「该交多少帧」这根弦，交回什么算什么。
+      const wantedFrames = endFrame > startFrame ? endFrame - startFrame : 0
+      if (wantedFrames > 0) {
+        clip = (await alignClipFrames(clip, wantedFrames, editFps ?? 25, path.join(workdir, `aligned-${index}.mp4`), storyboardId)).file
+      }
       clips.push(clip)
       // Cue timings follow the measured clip, never the planned durationMs — a
       // provider that misses its target must not slide every later subtitle.
-      const durationMs = await probeDuration(clip)
+      // 量的必须是画面帧数换算的时长：容器时长带音轨尾巴，字幕会按那点尾巴逐镜往后排。
+      const durationMs = await probePictureDuration(clip)
       // V03:字幕文本用排队定格值——排队后改字幕不进本次合成。
       const subtitle = entry.subtitle
       // V03:人声/环境音制品 id 均为排队定格,渲染只解析字节。
@@ -540,15 +602,20 @@ export async function composeEpisode(payload: ComposeEpisodePayload, deps: Pipel
     // S5：母带实测时长落 Composition 行。交付面板的节奏读数原本只能拿逐镜跨度求和
     // 或拿分镜表的标称值顶，两者都不是「这条文件有多长」；探到多少写多少，探不到留
     // null（0 = 探针没给出数），不拿计划值补一个假实测。
-    const masterDurationMs = await probeDuration(processed.file)
+    // SD-182: 这把尺量画面（帧数 × 帧率），不量容器——容器多出的那点音轨尾巴会让
+    // 「母带长度」与编辑文档、与字幕表三个数各说各话。
+    const masterDurationMs = await probePictureDuration(processed.file)
     await deps.db.composition.update({
       where: { id: composition.id },
-      data: { status: 'COMPLETED', durationMs: masterDurationMs > 0 ? masterDurationMs : null, manifest: JSON.stringify(compositionManifest), artifactId: artifact.id, subtitleArtifactId, scoreArtifactId: music?.id ?? null, editRevisionId, inputFingerprint },
+      data: { status: 'COMPLETED', errorSnapshot: null, durationMs: masterDurationMs > 0 ? masterDurationMs : null, manifest: JSON.stringify(compositionManifest), artifactId: artifact.id, subtitleArtifactId, scoreArtifactId: music?.id ?? null, editRevisionId, inputFingerprint },
     })
   } catch (error) {
     // BLOCKED (not FAILED) keeps the composition retriggerable once the missing clip lands.
-    process.stderr.write(`compose ${composition.id} blocked: ${error instanceof Error ? error.message : String(error)}\n`)
-    await deps.db.composition.update({ where: { id: composition.id }, data: { status: 'BLOCKED' } })
+    // 原因写进行里（SD-177）：这一轮为什么没出片必须能从记录本身读出来，界面才给得出
+    // 「已阻塞在哪」，而不是只留一个没有解释的状态。stderr 继续留一份给运维。
+    const reason = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`compose ${composition.id} blocked: ${reason}\n`)
+    await deps.db.composition.update({ where: { id: composition.id }, data: { status: 'BLOCKED', errorSnapshot: reason } })
   } finally {
     await rm(workdir, { recursive: true, force: true })
   }
@@ -625,9 +692,11 @@ async function resolveLiveEntries(
     } else if (shot?.selectedVideoArtifactId) {
       const owned = (await resolveVideoArtifactShot(deps.db, shot.selectedVideoArtifactId, organizationId))?.storyboardId === shot.id
       const pinned = owned
-        ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVideoArtifactId, stage: 'VIDEO', organizationId }, select: { id: true } })
+        ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVideoArtifactId, stage: 'VIDEO', organizationId } })
         : null
-      if (pinned) {
+      // SD-172：钦定之后又被人工否决的那一版不再入片（否决入口同时会清掉指针，
+      // 这里兜住旧数据）。落回「自动取最新」，那一档同样跳过被否的版本。
+      if (pinned && !isArtifactVetoed(pinned.metadata)) {
         videoArtifactId = pinned.id
         videoSource = 'manual'
       } else if (shot.lockedVideoSelection) {
@@ -655,9 +724,9 @@ async function resolveLiveEntries(
         voiceArtifactId = imported?.id ?? null
       } else {
         const chosen = shot?.selectedVoiceArtifactId
-          ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVoiceArtifactId, stage: 'AUDIO', task: { status: 'SUCCEEDED', storyboardId: plan.storyboardId } }, select: { id: true } })
+          ? await deps.db.mediaArtifact.findFirst({ where: { id: shot.selectedVoiceArtifactId, stage: 'AUDIO', task: { status: 'SUCCEEDED', storyboardId: plan.storyboardId } } })
           : null
-        const latest = chosen ?? (await latestVoiceArtifact(deps.db, plan.storyboardId, organizationId)) ?? imported
+        const latest = (chosen && !isArtifactVetoed(chosen.metadata) ? chosen : null) ?? (await latestVoiceArtifact(deps.db, plan.storyboardId, organizationId)) ?? imported
         voiceArtifactId = latest?.id ?? null
       }
     }
@@ -728,17 +797,13 @@ async function resolveShotAmbience(
 }
 
 async function latestVideoArtifact(db: PrismaClient, storyboardId: string, organizationId: string) {
-  return db.mediaArtifact.findFirst({
-    where: { stage: 'VIDEO', organizationId, task: { status: 'SUCCEEDED', stage: 'VIDEO', storyboardId } },
-    orderBy: [{ task: { createdAt: 'desc' } }, { version: 'desc' }],
-  })
+  // SD-172：取版与界面读数共用同一份解析器。人工否决过的那一版不再冒充「最新成功版」
+  // 排进母带——过去这条链只按 createdAt/version 取最新，人说了「不要」没人听得见。
+  return resolveShotTake(db, { organizationId, storyboardId, stage: 'VIDEO' })
 }
 
 async function latestVoiceArtifact(db: PrismaClient, storyboardId: string, organizationId: string) {
-  return db.mediaArtifact.findFirst({
-    where: { stage: 'AUDIO', organizationId, task: { status: 'SUCCEEDED', stage: 'AUDIO', storyboardId } },
-    orderBy: [{ task: { createdAt: 'desc' } }, { version: 'desc' }],
-  })
+  return resolveShotTake(db, { organizationId, storyboardId, stage: 'AUDIO' })
 }
 
 async function latestMusicArtifact(db: PrismaClient, episodeId: string, organizationId: string) {

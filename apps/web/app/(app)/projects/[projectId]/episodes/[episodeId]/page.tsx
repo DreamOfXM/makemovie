@@ -17,9 +17,11 @@ import {
   toWorkflowStatus,
   type AssetsResponse,
   type Episode,
+  type GenerationPlan,
   type GenerationTask,
   type GenerationsResponse,
   type Project,
+  type ShotDurationDecision,
   type Storyboard,
 } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -38,6 +40,7 @@ import { ErrorState } from '@/components/error-state'
 import { GuardedButton, usePermission } from '@/components/permission'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { GenerationsPanel } from '@/components/generations/generations-panel'
+import { PlanDialog } from '@/components/generations/plan-dialog'
 import { AutomationNotice } from '@/components/AutomationTierSelector'
 import { SourcesPanel } from '@/components/sources/sources-panel'
 import { AssetsPanel } from '@/components/assets/assets-panel'
@@ -254,6 +257,34 @@ function EpisodeWorkspace() {
     () => allStoryboards.filter(storyboard => !isLiveStoryboard(storyboard)),
     [allStoryboards],
   )
+  // SD-022：整批分镜签收。「全部通过 / 退回待审」是同一颗状态跟随钮——批准走
+  // bulk 端点直接写活体行（与素材/剧本审批同一先例），逐镜标记仍是镜头状态弹窗的路。
+  const pendingShotApproval = useMemo(
+    () => storyboards.filter(storyboard => toWorkflowStatus(storyboard.status) !== 'approved').length,
+    [storyboards],
+  )
+  const allShotsApproved = storyboards.length > 0 && pendingShotApproval === 0
+  const [bulkShotStatusBusy, setBulkShotStatusBusy] = useState(false)
+  async function flipStoryboardApproval() {
+    const to = allShotsApproved ? 'draft' : 'approved'
+    setBulkShotStatusBusy(true)
+    try {
+      const { updated } = await api<{ updated: number }>(`/episodes/${episodeId}/storyboard-status`, {
+        method: 'POST',
+        body: JSON.stringify({ to }),
+      })
+      toast.success(to === 'approved' ? t('storyboards.approvedAllToast', { count: updated }) : t('storyboards.reopenedAllToast', { count: updated }))
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      // 审批回调强制 reload（SD-020/022）：不重读数据，界面就会停在旧答案上，
+      // 而下一步的门禁正指着这份答案。
+      storyboardsMedia.reload()
+      episodes.reload()
+      bumpBoard()
+      setBulkShotStatusBusy(false)
+    }
+  }
   const breakdownGenerating = useMemo(() => {
     const latest = [...storyboardBatches.data.batches]
       .filter(batch => batch.stage === 'STORYBOARD')
@@ -336,30 +367,52 @@ function EpisodeWorkspace() {
   // 三个阶段同源同入口——首帧/视频/配音都在右栏重做;缺产物走「生成」(只补缺),
   // 有产物走「重跑」(覆盖);调整要求随请求入快照。
   const [regeneratingShot, setRegeneratingShot] = useState<string | null>(null)
-  async function regenerateShotMedia(
+  /** 逐镜入口的预审（SD-136/#164）：这一击会派哪个模型、买多长，摊开再点确认。
+   *  过去只有批量按钮过门，逐镜入口第一击就扣费，确认框承诺的参数也无从核对。 */
+  const [pendingShotPlan, setPendingShotPlan] = useState<{
+    storyboardId: string
+    stage: 'IMAGE' | 'FIRST_FRAME' | 'VIDEO' | 'AUDIO'
+    planStage: 'IMAGE' | 'VIDEO' | 'AUDIO'
+    note?: string
+    regenerate: boolean
+    plan: GenerationPlan
+  } | null>(null)
+
+  /** 真正花钱的那一下。预审确认与「计划里没有可跑的」两条路都汇到这里，
+   *  确认过的参数（时长缺口、超长镜决议、调整要求）不会被第二次拼接改掉。 */
+  async function postShotGeneration(
     storyboardId: string,
     stage: 'IMAGE' | 'FIRST_FRAME' | 'VIDEO' | 'AUDIO',
-    note?: string,
-    regenerate = false,
+    options: { note?: string; regenerate: boolean; acceptDurationGap?: boolean; durationDecisions?: ShotDurationDecision[] },
   ) {
     const apiStage = stage === 'FIRST_FRAME' ? 'IMAGE' : stage
     setRegeneratingShot(`${storyboardId}:${stage}`)
     try {
       // created:false 表示后端命中了同一幂等键上已有的那一笔（在途/已阻塞/停在问询），
       // 既没新任务也没新花费。报成功会掩盖死按钮，这里如实分开（2026-10-22 #20 实测）。
-      const result = await api<{ created?: boolean }>(`/episodes/${episodeId}/generations`, {
+      // requeued>0 是第三种后果：旧任务按当前绑定重排、正在排队烧钱，说「未新建任务」等于
+      // 当着一次付费调用说「什么都没发生」。
+      const stageWords = translateEnum(t, 'generations.stage', apiStage)
+      const result = await api<{ created?: boolean; requeued?: number }>(`/episodes/${episodeId}/generations`, {
         method: 'POST',
         body: JSON.stringify({
           stage: apiStage,
           storyboardIds: [storyboardId],
-          ...(regenerate ? { regenerate: true } : {}),
-          promptNote: note?.trim() || undefined,
+          ...(options.regenerate ? { regenerate: true } : {}),
+          ...(options.acceptDurationGap ? { acceptDurationGap: true } : {}),
+          ...(options.durationDecisions && options.durationDecisions.length > 0 ? { durationDecisions: options.durationDecisions } : {}),
+          promptNote: options.note?.trim() || undefined,
         }),
       })
-      if (result?.created === false) {
-        toast.info(t('generations.shotNotCreated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
+      if (result?.created === false && result.requeued) {
+        toast.info(t('generations.shotRequeued', { stage: stageWords, count: result.requeued }))
+      } else if (result?.created === false) {
+        toast.info(t('generations.shotNotCreated', { stage: stageWords }))
       } else {
-        toast.success(t('generations.shotRegenerated', { stage: translateEnum(t, 'generations.stage', apiStage) }))
+        // SD-102:回执与按钮同一分档——缺产物点的是「生成」,这一镜此前没有任何东西
+        // 被「重新」;只有带 regenerate 的重跑才许说「重新生成」。按钮侧早已按产物分支,
+        // 回执不能留一句首生场景下必然为假的话。
+        toast.success(t(options.regenerate ? 'generations.shotRegenerated' : 'generations.shotGenerated', { stage: stageWords }))
       }
       setGenerationsToken(token => token + 1)
       storyboardsMedia.reload()
@@ -371,6 +424,41 @@ function EpisodeWorkspace() {
     } finally {
       setRegeneratingShot(null)
     }
+  }
+
+  // 逐镜重生成:操作发生在制作台右栏(用户看产物的地方),结果回写同一屏。
+  // 三个阶段同源同入口——首帧/视频/配音都在右栏重做;缺产物走「生成」(只补缺),
+  // 有产物走「重跑」(覆盖);调整要求随请求入快照。
+  async function regenerateShotMedia(
+    storyboardId: string,
+    stage: 'IMAGE' | 'FIRST_FRAME' | 'VIDEO' | 'AUDIO',
+    note?: string,
+    regenerate = false,
+  ) {
+    const planStage = stage === 'FIRST_FRAME' ? 'IMAGE' : stage
+    setRegeneratingShot(`${storyboardId}:${stage}`)
+    try {
+      // 计划端点与触发端点同一套门禁：这里说不通的（缺帧、素材未定稿、超长镜没决议），
+      // 真触发会先被拦下来，所以确认框里报的数目与实际会发生的不会分叉。
+      const query = new URLSearchParams({ stage: planStage, regenerate: regenerate ? '1' : '0', storyboardIds: storyboardId })
+      const { plan } = await api<{ plan: GenerationPlan }>(`/episodes/${episodeId}/generation-plan?${query.toString()}`)
+      if (plan.newCount + plan.retryCount === 0) {
+        toast.message(t('generations.planNothingToDo'))
+      } else {
+        setPendingShotPlan({ storyboardId, stage, planStage, note, regenerate, plan })
+      }
+    } catch (error) {
+      toast.error(apiErrorMessage(error, t))
+    } finally {
+      setRegeneratingShot(null)
+    }
+  }
+
+  async function confirmShotPlan(acceptDurationGap: boolean, durationDecisions: ShotDurationDecision[]) {
+    if (!pendingShotPlan) return
+    const { storyboardId, stage, note, regenerate } = pendingShotPlan
+    setPendingShotPlan(null)
+    await postShotGeneration(storyboardId, stage, { note, regenerate, acceptDurationGap, durationDecisions })
   }
   // 钦定入片版本:与镜头总览的选优门同一个端点,两处裁决必须同一个结果。
   async function pinShotVideo(storyboardId: string, artifactId: string) {
@@ -521,6 +609,23 @@ function EpisodeWorkspace() {
                   </div>
                 )}
                 <CardAction>
+                  {/* 整批签收（SD-022）：次操作=描边，状态跟随——没全批就写「全部通过」，
+                      全批了写「退回待审」；点了必 reload，按钮不留在旧答案上。 */}
+                  {storyboards.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      <GuardedButton
+                        action={allShotsApproved ? 'storyboard:write' : 'review:decide'}
+                        size="sm"
+                        variant="outline"
+                        disabled={bulkShotStatusBusy}
+                        onClick={() => void flipStoryboardApproval()}
+                      >
+                        {bulkShotStatusBusy ? <LoaderCircleIcon className="animate-spin" /> : null}
+                        {allShotsApproved ? t('storyboards.reopenAll') : t('storyboards.approveAll')}
+                      </GuardedButton>
+                      <HelpHint text={t('storyboards.approveAllHint')} />
+                    </div>
+                  )}
                   {/* 重新分镜的真按钮曾根本不存在（引导条在有分镜后永不显示该动作），
                       用户全站找不到入口（2026-09-29）。 */}
                   {storyboards.length > 0 && (
@@ -589,7 +694,9 @@ function EpisodeWorkspace() {
                           onBindAssets={bindStoryboardAssets}
                           onEdit={() => setStoryboardDialog({ mode: 'edit', storyboard })}
                           onChangeStatus={() => setStatusTarget(storyboard)}
-                          onRegenerateStage={can('generation:trigger') ? (id, stage) => void regenerateShotMedia(id, stage, undefined, true) : undefined}
+                          onRegenerateStage={
+                            can('generation:trigger') ? (id, stage, regenerate) => void regenerateShotMedia(id, stage, undefined, regenerate) : undefined
+                          }
                           regeneratingShotStage={regeneratingShot}
                           generatingShotStages={generatingShotStages}
                           shotTasks={shotTaskIndex}
@@ -653,6 +760,12 @@ function EpisodeWorkspace() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <PlanDialog
+        pending={pendingShotPlan && { stage: pendingShotPlan.planStage, regenerate: pendingShotPlan.regenerate, plan: pendingShotPlan.plan }}
+        onClose={() => setPendingShotPlan(null)}
+        onConfirm={(acceptDurationGap, durationDecisions) => void confirmShotPlan(acceptDurationGap, durationDecisions)}
+      />
 
       <StoryboardDialog
         state={storyboardDialog}

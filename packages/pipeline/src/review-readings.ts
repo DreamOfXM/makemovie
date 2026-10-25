@@ -198,3 +198,86 @@ export function reviewGapCodes(readings: CompositionReviewReadings): string[] {
     ...readings.sound.gaps.map(gap => `sound:${gap}`),
   ]
 }
+
+/**
+ * SD-184 邻镜重复读数：相邻镜头落版后画面几乎相同吗，连续几颗？
+ *
+ * 「选优」过去只逐镜判、不看邻镜重复度——台账实测 #44/#45/#46 与 #57/#58/#59
+ * 各三颗几乎相同的画面串成 13.00 s 无切点段（production-log.md SD-184 行）。
+ * 这一轴补的就是那个盲区：像素距离由 `@studio/media` 的帧指纹在 worker 侧实测
+ * （每条素材一次中段解码、32×32 灰度），这里只做台账数学，输入缺项一律报
+ * 「测不出」，不拿「没测」冒充「不重复」。
+ */
+
+/**
+ * 「几乎相同」的成对距离阈（32×32 灰度平均差，0..1），单点定义。出处（2026-10-25 对
+ * 台账本集素材实测）：同镜异抽 shot23 v1↔v2 距离 0.008；同批不同镜的最远一对也不低于
+ * 0.080（shot23↔shot24）；而 SD-184 的案犯 #44-46/#57-59 本就是同一画面反复入版，距离
+ * 在 0 一侧。0.03 落在实测「重复档 ≤0.008」与「异图档 ≥0.080」之间的空档里，两侧都留
+ * 出 2.5 倍以上余量。
+ */
+export const NEIGHBOR_DUPLICATE_DISTANCE = 0.03
+
+/**
+ * 报警的连续重复镜数，单点定义。3 = 台账实测案发现场：#44/#45/#46（及 #57/#58/#59）
+ * 正是 3 连重复造成 13.00 s 无切点段。2 连（一对）在本集没有实测塌陷案例——比如剧本
+ * 就要正反打同景——所以 2 只摆数不报警，判级必须有实测case（SD-081 的同族纪律）。
+ */
+export const NEIGHBOR_DUPLICATE_RUN = 3
+
+export interface NeighborDuplicateReading {
+  /** 至少测出过一个邻对距离才算 present；全缺时 status 是 unknown，不许渲染成「无重复」。 */
+  present: boolean
+  /** 第 i 与 i+1 镜之间的画面距离，按母带顺序；null = 这一对没测出来。 */
+  pairDistances: Array<number | null>
+  /** 命中重复阈的邻对数。 */
+  duplicatePairCount: number
+  /** 最长「连续以近重复相邻」的镜数；单镜算 1。null 距离视为链断（没证据不判重复）。 */
+  maxRunLength: number
+  /** 最长链的镜序（1 起，母带顺序）。 */
+  maxRunShotIndexes: number[]
+  status: 'clean' | 'warning' | 'unknown'
+}
+
+export function readNeighborDuplicates(
+  pairDistances: ReadonlyArray<number | null>,
+  settings?: { distanceThreshold?: number; warnRun?: number },
+): NeighborDuplicateReading {
+  const threshold = settings?.distanceThreshold ?? NEIGHBOR_DUPLICATE_DISTANCE
+  const warnRun = settings?.warnRun ?? NEIGHBOR_DUPLICATE_RUN
+  const present = pairDistances.some(distance => distance !== null)
+  const duplicate = pairDistances.map(distance => distance !== null && distance <= threshold)
+  let maxRunLength = 0
+  let maxRunEnd = -1
+  let run = 0
+  for (const [index, isDuplicate] of duplicate.entries()) {
+    if (isDuplicate) {
+      run += 1
+      if (run > maxRunLength) { maxRunLength = run; maxRunEnd = index }
+    } else {
+      run = 0
+    }
+  }
+  // run 以「对」计，镜数 = 对数 + 1。
+  const shotRun = pairDistances.length === 0 ? 0 : maxRunLength + 1
+  const maxRunShotIndexes = maxRunLength > 0
+    ? Array.from({ length: maxRunLength + 1 }, (_, offset) => maxRunEnd - maxRunLength + 2 + offset)
+    : []
+  return {
+    present,
+    pairDistances: [...pairDistances],
+    duplicatePairCount: duplicate.filter(Boolean).length,
+    maxRunLength: pairDistances.length === 0 ? 1 : Math.max(1, shotRun),
+    maxRunShotIndexes,
+    // 空表 = 根本没有邻对（首镜/单镜），重复无从成立——这是 clean，不是没测出来；
+    // 报警要实测链坐实；其余只要还有一对没测出来就报 unknown——「没测」永远不许
+    // 冒充「无重复」（SD-081 的区分度纪律，与 probeVideoFrames 的 null 降级同理）。
+    status: pairDistances.length === 0
+      ? 'clean'
+      : Math.max(1, shotRun) >= warnRun
+        ? 'warning'
+        : pairDistances.every(distance => distance !== null)
+          ? 'clean'
+          : 'unknown',
+  }
+}

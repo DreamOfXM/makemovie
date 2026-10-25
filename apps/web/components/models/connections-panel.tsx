@@ -2,7 +2,7 @@
 
 import { Fragment, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { capabilitySlots, modelModalities, modalityInputs } from '@studio/domain'
+import { capabilitySlots, modelModalities, modalityInputs, readDurationSpec } from '@studio/domain'
 import { apiErrorMessage } from '@/lib/api-error'
 import {
   CircleAlertIcon,
@@ -20,7 +20,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
 } from 'lucide-react'
-import { patchDurationEvidence, type Binding, type Capability, type Catalog, type Connection, type DurationEvidence, type ProbeResponse, type ProbeResult } from '@/lib/api'
+import { patchDurationEvidence, type Binding, type CatalogModel, type Capability, type Catalog, type Connection, type DurationEvidence, type ProbeResponse, type ProbeResult } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import type { AsyncState } from '@/lib/use-async'
@@ -259,6 +259,7 @@ export function ConnectionsPanel({ connections, catalogs, bindings, onManageDefa
       <AddModelDialog
         key={modelDialog?.id ?? 'no-model'}
         connection={modelDialog}
+        catalogs={catalogs}
         onOpenChange={open => !open && setModelDialog(null)}
         onAdded={name => {
           setModelDialog(null)
@@ -501,6 +502,10 @@ function ConnectionCard({
                 <TableHead>{t('common.model')}</TableHead>
                 <TableHead>{t('common.modality')}</TableHead>
                 <TableHead>{t('models.inputs')}</TableHead>
+                <TableHead className="whitespace-nowrap">
+                  {t('models.specColumn')}
+                  <HelpHint text={t('models.specColumnHint')} />
+                </TableHead>
                 <TableHead>{t('models.probe')}</TableHead>
                 <TableHead>{t('models.entitlement')}</TableHead>
                 <TableHead>{t('common.details')}</TableHead>
@@ -541,6 +546,7 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onEvidenceSave
   const { t } = useI18n()
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const evidence = capability.durationEvidence
+  const declaredLength = declaredLengthLabel(t, capability.spec)
   return (
     <TableRow>
       <TableCell>
@@ -575,6 +581,12 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onEvidenceSave
             <span className="text-muted-foreground">—</span>
           )}
         </div>
+      </TableCell>
+      <TableCell>
+        <Badge variant={capability.specSource === 'unknown' ? 'warning' : capability.specSource === 'manual' ? 'outline' : 'muted'}>
+          {specSourceLabel(t, capability.specSource)}
+        </Badge>
+        {declaredLength && <p className="text-muted-foreground mt-1 text-xs">{declaredLength}</p>}
       </TableCell>
       <TableCell>
         <div className="flex items-center gap-1.5">
@@ -662,6 +674,45 @@ function CapabilityRow({ capability, locale, verifying, onVerify, onEvidenceSave
       />
     </TableRow>
   )
+}
+
+/** 这份声明从哪来的——三种来源要能一眼分开，最后一种按厂商默认计费。 */
+function specSourceLabel(t: (key: string, values?: Record<string, string | number>) => string, source: string): string {
+  if (source === 'manual') return t('models.specSourceManual')
+  if (source === 'unknown') return t('models.specSourceUnknown')
+  return t('models.specSourceCatalog')
+}
+
+/** 把声明的时长翻成人话；界面上不出现 kind/range/steps 这些内部字段名。 */
+function declaredLengthLabel(t: (key: string, values?: Record<string, string | number>) => string, spec: unknown): string | null {
+  const duration = readDurationSpec(spec)
+  if (!duration) return null
+  if (duration.kind === 'range') return t('models.specSecondsRange', { min: duration.min, max: duration.max })
+  if (duration.kind === 'fixed') return t('models.specSecondsFixed', { seconds: duration.value })
+  return t('models.specSecondsList', { values: duration.values.join(' / ') })
+}
+
+/** The modalities billed per second, so the only ones whose lengths must be known. */
+const SECONDS_BILLED_MODALITIES = new Set(['t2v', 'i2v', 'r2v'])
+
+/** `720P, 1080P` and `720P 1080P` are the same list; the platform caps it at twelve tiers. */
+function splitTiers(value: string): string[] {
+  return [...new Set(value.split(/[,;\s]+/).map(item => item.trim()).filter(item => item !== ''))].slice(0, 12)
+}
+
+/**
+ * The catalog row a typed name means, matched exactly the way the API matches it:
+ * case-insensitively, preferring the row filed under the chosen modality. Only the
+ * vendor's own rows count — the org's overlay rows have no spec to inherit.
+ */
+function findOfficialModel(catalogs: Catalog[], provider: string | undefined, model: string, modality: string): CatalogModel | undefined {
+  if (!provider) return undefined
+  const wanted = model.trim().toLowerCase()
+  if (wanted === '') return undefined
+  const rows = (catalogs.find(entry => entry.provider === provider)?.models ?? []).filter(
+    entry => entry.source !== 'custom' && entry.model.trim().toLowerCase() === wanted,
+  )
+  return rows.find(entry => entry.modality === modality) ?? rows[0]
 }
 
 /**
@@ -1000,6 +1051,7 @@ function ConnectionDialog({ state, catalogs, onOpenChange, onDone }: ConnectionD
 
 interface AddModelDialogProps {
   connection: Connection | null
+  catalogs: Catalog[]
   onOpenChange(open: boolean): void
   onAdded(model: string): void
 }
@@ -1008,8 +1060,12 @@ interface AddModelDialogProps {
  * Names a model our catalog cannot: a gateway's own checkpoint, a fine-tune, a newer
  * release on the same connection. The row is born unverified — this dialog claims that a
  * model exists here, only a probe can show that it answers.
+ *
+ * A row the catalog does know is not hand-entered at all: its declaration is inherited,
+ * and the dialog says so instead of letting an empty spec through — an empty spec is what
+ * made a shot bill at whatever the vendor defaults to (SD-166).
  */
-function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogProps) {
+function AddModelDialog({ connection, catalogs, onOpenChange, onAdded }: AddModelDialogProps) {
   const { t } = useI18n()
   const { api } = useSession()
   const [model, setModel] = useState('')
@@ -1018,16 +1074,58 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
   const [acceptsFirstFrame, setAcceptsFirstFrame] = useState(false)
   const [acceptsReferenceImages, setAcceptsReferenceImages] = useState(false)
   const [maxReferenceImages, setMaxReferenceImages] = useState('1')
+  const [durationKind, setDurationKind] = useState<'range' | 'steps' | 'fixed'>('range')
+  const [durationMin, setDurationMin] = useState('')
+  const [durationMax, setDurationMax] = useState('')
+  const [durationSteps, setDurationSteps] = useState('')
+  const [durationFixed, setDurationFixed] = useState('')
+  const [resolutions, setResolutions] = useState('')
   const [error, setError] = useState('')
+  const [specError, setSpecError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const inputs = modalityInputs(modality)
+  const billedBySecond = SECONDS_BILLED_MODALITIES.has(modality)
+  const catalogRow = findOfficialModel(catalogs, connection?.provider, model, modality)
+  // A catalog row that states the lengths is the answer already; one that states nothing
+  // is not, and the operator still has to say. Mirrors the API's own predicate.
+  const inheritedDuration = catalogRow ? readDurationSpec(catalogRow.spec) : undefined
+  const mustDeclare = billedBySecond && connection?.provider !== 'mock' && inheritedDuration === undefined
+
+  function buildDuration(): Record<string, unknown> | undefined {
+    const positiveInt = (value: string) => {
+      const parsed = Number(value.trim())
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+    }
+    if (durationKind === 'range') {
+      const min = positiveInt(durationMin)
+      const max = positiveInt(durationMax)
+      return min !== undefined && max !== undefined && max >= min ? { kind: 'range', min, max } : undefined
+    }
+    if (durationKind === 'fixed') {
+      const value = positiveInt(durationFixed)
+      return value === undefined ? undefined : { kind: 'fixed', value }
+    }
+    const values = splitTiers(durationSteps).map(positiveInt)
+    return values.length > 0 && values.every(value => value !== undefined)
+      ? { kind: 'steps', values: values as number[] }
+      : undefined
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!connection) return
+    const duration = mustDeclare ? buildDuration() : undefined
+    if (mustDeclare && duration === undefined) {
+      // Refusing here is the honest option: a row that stored no length sends no length,
+      // and the clip then comes back at whatever the vendor feels like.
+      setSpecError(t('models.durationRequired'))
+      return
+    }
+    const tiers = splitTiers(resolutions)
     setBusy(true)
     setError('')
+    setSpecError('')
     try {
       const created = await api<Capability>(`/providers/connections/${connection.id}/models`, {
         method: 'POST',
@@ -1036,6 +1134,8 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
           displayName: displayName.trim() || undefined,
           modality,
           ...(inputs.takesInput ? { ...(inputs.firstFrame ? { acceptsFirstFrame } : {}), acceptsReferenceImages, ...(acceptsReferenceImages ? { maxReferenceImages: Number(maxReferenceImages) } : {}) } : {}),
+          ...(duration !== undefined ? { duration } : {}),
+          ...(mustDeclare && tiers.length > 0 ? { resolutions: tiers } : {}),
         }),
       })
       onAdded(created.model)
@@ -1089,6 +1189,57 @@ function AddModelDialog({ connection, onOpenChange, onAdded }: AddModelDialogPro
               </SelectContent>
             </Select>
           </Field>
+
+          {billedBySecond && connection?.provider !== 'mock' && (
+            mustDeclare ? (
+              <div className="space-y-3 rounded-lg border p-3">
+                <p className="text-sm font-medium">
+                  {t('models.declareSpecTitle')}
+                  <HelpHint text={t('models.declareSpecHint')} />
+                </p>
+                <Field label={t('models.durationKind')} htmlFor="modelDurationKind" required error={specError}>
+                  <Select value={durationKind} onValueChange={value => setDurationKind(value as 'range' | 'steps' | 'fixed')}>
+                    <SelectTrigger id="modelDurationKind" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="range">{t('models.durationKindRange')}</SelectItem>
+                      <SelectItem value="steps">{t('models.durationKindSteps')}</SelectItem>
+                      <SelectItem value="fixed">{t('models.durationKindFixed')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                {durationKind === 'range' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label={t('models.durationMin')} htmlFor="modelDurationMin" required>
+                      <Input id="modelDurationMin" type="number" min={1} step={1} value={durationMin} onChange={event => setDurationMin(event.target.value)} className="w-full" />
+                    </Field>
+                    <Field label={t('models.durationMax')} htmlFor="modelDurationMax" required>
+                      <Input id="modelDurationMax" type="number" min={1} step={1} value={durationMax} onChange={event => setDurationMax(event.target.value)} className="w-full" />
+                    </Field>
+                  </div>
+                )}
+                {durationKind === 'steps' && (
+                  <Field label={t('models.durationSteps')} htmlFor="modelDurationSteps" required>
+                    <Input id="modelDurationSteps" value={durationSteps} onChange={event => setDurationSteps(event.target.value)} placeholder={t('models.durationStepsPlaceholder')} className="w-full" />
+                  </Field>
+                )}
+                {durationKind === 'fixed' && (
+                  <Field label={t('models.durationFixed')} htmlFor="modelDurationFixed" required>
+                    <Input id="modelDurationFixed" type="number" min={1} step={1} value={durationFixed} onChange={event => setDurationFixed(event.target.value)} className="w-24" />
+                  </Field>
+                )}
+                <Field label={t('models.resolutions')} htmlFor="modelResolutions" hint={t('models.resolutionsHint')}>
+                  <Input id="modelResolutions" value={resolutions} onChange={event => setResolutions(event.target.value)} placeholder={t('models.resolutionsPlaceholder')} className="w-full" />
+                </Field>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-xs">
+                {t('models.inheritedSpec', { length: declaredLengthLabel(t, catalogRow?.spec) ?? '' })}
+                <HelpHint text={t('models.inheritedSpecHint')} />
+              </p>
+            )
+          )}
 
           {inputs.takesInput && (
             <div className="space-y-3 rounded-lg border p-3">

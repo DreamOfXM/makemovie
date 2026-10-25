@@ -94,6 +94,9 @@ model Composition {
   inputFingerprint   String?
   /// 母带实测时长（ffprobe）。null = 从未探测；合成完成时由 worker 写入。
   durationMs         Int?
+  /// SD-177：这一轮合成为什么没出片。阻塞原因必须落在行上、随记录上屏——
+  /// 只写 worker stderr 等于让「已阻塞」成为一个没有解释的状态。成功时清空。
+  errorSnapshot      String?
   episode            Episode        @relation(fields: [episodeId], references: [id], onDelete: Cascade)
 }
 
@@ -188,6 +191,10 @@ model GenerationTask {
   claimToken                                             String?
   /// V01 租约:领取时写入;过期未续的 RUNNING 任务可被重投消费者接管并按台账续查。
   leaseUntil                                             DateTime?
+  /// 完成这条任务后能不能接力下一阶段。点名镜头/素材的触发是修复动作，不是链路的一步：
+  /// 重跑一镜视频只买了那一镜，不该顺手把整集配音排上队。整阶段触发（含重抽）保持 true，
+  /// 由制作档位决定停不停。复活的旧任务按触发它的那次动作重写这一列。
+  relayEligible                                          Boolean         @default(true)
   createdAt                                              DateTime        @default(now())
   updatedAt                                              DateTime        @updatedAt
   storyboardId                                           String?
@@ -208,7 +215,9 @@ model MediaArtifact {
   organizationId      String
   taskId              String?
   stage               Stage?
-  /// 人工导入音频或本机渲染视频所属的镜头（模型生成产物的 artifact 不填，走 task 归属）。
+  /// 这一件属于哪个镜头：生成产物与人工导入/本机渲染都写（SD-150），归属解析因此
+  /// 不必依赖任务行还在不在。中间件（拼接段、末帧）留空——它不是镜头的对外产物。
+  /// 区分人工件与生成件看 taskId 是否为空，别看这一列。
   storyboardId        String?
   objectKey           String
   checksum            String
@@ -822,6 +831,9 @@ model UsageLedger {
   id             String       @id @default(cuid())
   organizationId String
   taskId         String?
+  /// 这一行对应哪一次提交（SubmissionAttempt.id）。记账绑受理而非绑质检结论，
+  /// 唯一键挂在提交台账上：重投与重审复用同一 attempt，不会记第二笔。
+  attemptId      String?      @unique
   provider       String
   model          String
   modality       String

@@ -15,7 +15,7 @@ import {
   TriangleAlertIcon,
   XCircleIcon,
 } from 'lucide-react'
-import { ApiError, API_BASE, getToken } from '@/lib/api'
+import { ApiError, API_BASE, getToken, throwApiError } from '@/lib/api'
 import { translateEnum, useI18n } from '@/lib/i18n'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -295,7 +295,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       const response = await fetch(`${API_BASE}/artifacts/${delivery.artifactId}/content`, {
         headers: { authorization: `Bearer ${getToken()}` },
       })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) await throwApiError(response)
       const blob = await response.blob()
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -341,7 +341,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       const response = await fetch(`${API_BASE}/deliveries/${delivery.id}/edit-list?format=${format}`, {
         headers: { authorization: `Bearer ${getToken()}` },
       })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) await throwApiError(response)
       const text = await response.text()
       const blob = new Blob([text], { type: format === 'edl' ? 'text/plain' : format === 'fcpxml' ? 'application/xml' : 'application/json' })
       const url = URL.createObjectURL(blob)
@@ -368,7 +368,7 @@ export function DeliveryPanel({ episodeId }: DeliveryPanelProps) {
       const response = await fetch(`${API_BASE}/deliveries/${delivery.id}/subtitle`, {
         headers: { authorization: `Bearer ${getToken()}` },
       })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) await throwApiError(response)
       const text = await response.text()
       const blob = new Blob([text], { type: 'application/x-subrip' })
       const url = URL.createObjectURL(blob)

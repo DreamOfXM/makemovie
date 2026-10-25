@@ -116,6 +116,29 @@ describe('kling submit body', () => {
     expect(body.image_tail).toBe('https://cdn/tail.png')
   })
 
+  // SD-069 的供给侧根因：i2v 的画幅契约就是那张钦定首帧。适配器替它写一个 aspect_ratio，
+  // 等于要求厂商把竖屏帧裁成横带再付一次费——交付闸门只能判退，钱已经花出去了。
+  it('lets the conditioned first frame own the framing when no ratio was named', () => {
+    const i2vBody = buildKlingSubmitBody(i2v, {
+      model: 'kling-v2-5-turbo',
+      input: { prompt: 'she turns around', media: [{ type: 'first_frame', url: 'https://cdn/portrait-1080x1920.png' }] },
+      parameters: {},
+    })
+    expect(i2vBody).not.toHaveProperty('aspect_ratio')
+
+    // 文生视频没有帧可读，仍按厂商文档的显式默认出画布。
+    expect(buildKlingSubmitBody(t2v, t2vRequest()).aspect_ratio).toBe('16:9')
+  })
+
+  it('still sends the caller-named ratio on i2v, portrait included', () => {
+    const body = buildKlingSubmitBody(i2v, {
+      model: 'kling-v2-5-turbo',
+      input: { prompt: 'she turns around', media: [{ type: 'first_frame', url: 'https://cdn/portrait.png' }] },
+      parameters: { aspectRatio: '9:16' },
+    })
+    expect(body.aspect_ratio).toBe('9:16')
+  })
+
   it('strips the data-url prefix and keeps bare base64', () => {
     const body = buildKlingSubmitBody(i2v, {
       model: 'kling-v2-5-turbo',
@@ -263,6 +286,13 @@ describe('kling adapter submit and poll', () => {
     expect(submitted).toEqual({ taskId: 'task-77' })
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/v1/videos/image2video`)
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(buildKlingSubmitBody(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/a.png') }, parameters: {} }))
+  })
+
+  // SD-069：请求体里带 aspect_ratio=16:9 的 i2v 单,买回的就是被裁成横带的竖屏首帧。
+  it('sends no canvas of its own on the wire for an i2v submission that carries only a frame', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0, data: { task_id: 'task-88' } }) })
+    await adapter().submit(i2v, { model: 'kling-v2-5-turbo', input: { prompt: 'x', media: firstFrame('https://cdn/portrait.png') }, parameters: {} })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty('aspect_ratio')
   })
 
   it('throws the provider error when the api rejects the request', async () => {

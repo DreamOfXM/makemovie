@@ -22,8 +22,18 @@ import { ContentRejectedError, recordGeneratedContent } from './content.js'
 import type { PipelineDeps } from './deps.js'
 import { taskLog, type LogAnchor } from './execution-log.js'
 import { errorMessage, pollToSettled, toCapability, type SettledResult } from './provider-call.js'
-import { HashQualityChecker, QC_THRESHOLD, type QcVerdict, type ShotIntent } from './qc.js'
+import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type QcVerdict, type ShotIntent } from './qc.js'
 import { buildReviewSnapshot, decideRetry } from './retry-policy.js'
+import {
+  applyIntraShotFlicker,
+  applyAuditRepetition,
+  measureAuditRepetition,
+  measureClipStructureDrift,
+  measureIntraShotFlicker,
+  measureShotNeighborDuplicates,
+  neighborDuplicateMessage,
+  type IntraShotFlickerReading,
+} from './visual-audit.js'
 import { runCharacterVoice } from './voice.js'
 
 export type TaskRow = Prisma.GenerationTaskGetPayload<{ include: { batch: { include: { episode: { include: { project: true } } } } } }>
@@ -68,6 +78,36 @@ export async function nextArtifactVersion(
       : { task: { batch: { episodeId: task.batch.episodeId } } }
   const last = await db.mediaArtifact.aggregate({ _max: { version: true }, where: { stage: task.stage, ...scope } })
   return (last._max.version ?? 0) + 1
+}
+
+/**
+ * 一次受理一行账（SD-039/SD-135）。厂商给出 providerTaskId 就意味着这一单已经下出去了，
+ * 之后质检判回、审核判不了、内容不合契约都不改变「钱已花」这个事实——旧写法把记账挂在
+ * SUCCEEDED 分支里，判回的那几片字节在盘上、账上零行。绑 attemptId 唯一键是它的机器闸门:
+ * 字节落盘只把体积补进同一行，崩溃重投与「重试买审核」都不会记第二笔。
+ */
+async function recordSubmissionUsage(
+  deps: PipelineDeps,
+  task: { id: string; organizationId: string },
+  candidate: RunTaskCandidate,
+  modality: string,
+  args: { attemptId: string; inputUnits: number; outputUnits: number },
+): Promise<void> {
+  await deps.db.usageLedger.upsert({
+    where: { attemptId: args.attemptId },
+    create: {
+      attemptId: args.attemptId,
+      organizationId: task.organizationId,
+      taskId: task.id,
+      provider: candidate.provider,
+      model: candidate.model,
+      modality,
+      inputUnits: args.inputUnits,
+      outputUnits: args.outputUnits,
+    },
+    // 受理时体积还不知道（0），别拿 0 盖掉已经落进去的真读数。
+    update: args.outputUnits > 0 ? { outputUnits: args.outputUnits } : {},
+  })
 }
 
 /** V01 租约兜底:领取者最长活过一轮轮询超时后仍算失联——再短会把慢消费者误判死。 */
@@ -399,7 +439,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
     } else if (voice.kind === 'succeeded') {
       const status = await syncBatchStatus(deps.db, task.batchId)
       await taskLog(deps.db, anchor, 'info', 'task.success', `completed via voicebox-clone (character voice)`)
-      if (status === 'COMPLETED') await autoAdvance(deps, task)
+      if (status === 'COMPLETED') await autoAdvance(deps, task, anchor)
       return
     } else {
       // rework（已重排）与 exhausted（已 FAILED）在 runCharacterVoice 内收尾。
@@ -464,7 +504,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
       const status = await syncBatchStatus(deps.db, task.batchId)
       if (resumeOutcome.status === 'succeeded') {
         await taskLog(deps.db, anchor, 'info', 'task.success', `completed via resumed provider task (${label(resumeCandidate)})`)
-        if (status === 'COMPLETED') await autoAdvance(deps, task)
+        if (status === 'COMPLETED') await autoAdvance(deps, task, anchor)
       }
       return
     }
@@ -515,7 +555,7 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
     const status = await syncBatchStatus(deps.db, task.batchId)
     if (outcome.status === 'succeeded') {
       await taskLog(deps.db, anchor, 'info', 'task.success', `completed via ${label(candidate)}`)
-      if (status === 'COMPLETED') await autoAdvance(deps, task)
+      if (status === 'COMPLETED') await autoAdvance(deps, task, anchor)
     }
     return
   }
@@ -577,7 +617,18 @@ export async function runTask(payload: RunTaskPayload, deps: PipelineDeps): Prom
 // effort: the task that just completed already succeeded and was already paid
 // for, so a failure to start the next stage is logged, not thrown back as a job
 // failure that would re-run this one.
-async function autoAdvance(deps: PipelineDeps, task: TaskRow): Promise<void> {
+async function autoAdvance(deps: PipelineDeps, task: TaskRow, anchor: LogAnchor): Promise<void> {
+  // 点名镜头/素材的触发是修复动作：这条任务完成只说明那一处补好了，不说明整个阶段跑完，
+  // 更不该替人把下一阶段整批排上队（重跑一镜视频曾接力到整集配音）。留下一条日志，
+  // 免得运营以为接力坏了——停在这里是设计，不是故障。
+  if (!task.relayEligible) {
+    try {
+      await taskLog(deps.db, anchor, 'info', 'pipeline.relaySkipped', 'repair trigger — next stage left to a human')
+    } catch (error) {
+      process.stderr.write(`auto-advance skip log after task ${task.id} failed: ${errorMessage(error)}\n`)
+    }
+    return
+  }
   try {
     const result = await advancePipeline({ db: deps.db, enqueueJob: deps.enqueueJob }, task.organizationId, null, task.batch.episode.id, { auto: true })
     // A refused stage (the VIDEO first-frame gate, for one) stops the relay silently
@@ -654,10 +705,10 @@ async function runCandidate(
   let reference: Extract<FrameOutcome, { conditioned: true }> | undefined
   if (frame) {
     if (!frame.conditioned) {
-      referenceLog.push({ model: candidate.model, conditioned: false, reason: frame.reason })
+      referenceLog.push({ model: candidate.model, channel: 'first_frame', conditioned: false, code: frame.code, reason: referenceStamp('first_frame', frame.code, frame.reason) })
       return { status: 'next', error: `${label(candidate)}: ${frame.reason}` }
     }
-    referenceLog.push({ model: candidate.model, conditioned: true })
+    referenceLog.push({ model: candidate.model, channel: 'first_frame', conditioned: true, reason: referenceStamp('first_frame', 'conditioned') })
     request.input.media = [{ type: 'first_frame', url: frame.publicUrl ?? frame.dataUrl }]
     await taskLog(deps.db, anchor, 'info', 'video.frameReference', `first frame handed to ${candidate.model} as ${frame.publicUrl ? 'the vendor-hosted public URL' : 'inline base64'}`, { via: frame.publicUrl ? 'public-url' : 'base64' })
     reference = frame
@@ -827,6 +878,10 @@ async function runCandidate(
     data: result.status === 'failed' ? { status: 'settled', resolution: 'failed' } : { status: 'result_ready', resultSnapshot: saveProviderResult(result) },
   }).catch(() => undefined)
   if (result.status === 'failed') return { status: 'next', error: `${label(candidate)}: ${result.error ?? 'provider reported failure'}` }
+  // 出了片就记账（SD-039/SD-135）：厂商计费的条件是「出了片」，不是「质检通过」。
+  // 字节还没落地先记一行 0 体积，是因为下载/落盘崩掉时这一单照样是花出去的；体积在
+  // stored 之后补进同一行。质检判回、审核判不了、内容不合契约都不再是「不记账」的理由。
+  await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId: attempt.id, inputUnits: promptChars, outputUnits: 0 })
 
   const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
   try {
@@ -850,10 +905,14 @@ async function runCandidate(
       extension: extensionFor(material.mimeType),
     })
     const stored = existingArtifact ? { key: existingArtifact.objectKey, checksum: existingArtifact.checksum, mimeType: existingArtifact.mimeType, sizeBytes: material.bytes.length } : await deps.storage.put(objectKey, material.bytes, material.mimeType)
+    await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId: attempt.id, inputUnits: promptChars, outputUnits: stored.sizeBytes })
     const artifact = existingArtifact ?? await deps.db.mediaArtifact.create({
       data: {
         organizationId: task.organizationId,
         taskId: task.id,
+        // 镜头归属直接写在产物行上（SD-150）：按镜头解析归属的那条路只认这一列，
+        // 空着就等于让每一个生成件都只能靠任务反查、任务一改状态就查无此人。
+        storyboardId: task.storyboardId,
         stage: task.stage,
         objectKey: stored.key,
         checksum: stored.checksum,
@@ -867,6 +926,29 @@ async function runCandidate(
     })
 
     await deps.db.submissionAttempt.update({ where: { id: attempt.id }, data: { artifactId: artifact.id } })
+
+    // SD-180：厂商的回执说成功不算成功。i2v 的首帧就是这一单的画幅契约——实测交付片
+    // 与送出去的那张帧对不上（朝向翻转或画幅比漂移超阈值），说明首帧被静默丢弃、买回
+    // 的是一段与本镜无关的素材。产物行照留（钱已花，必须留证），但绝不写 SUCCEEDED、
+    // 绝不送进审核再花一次调用，判成本候选失败让位下一候选。
+    if (reference) {
+      const drift = geometryDrift(await measureDelivered(material.bytes, material.mimeType, workdir), reference)
+      if (drift) {
+        await deps.db.qualityCheck.create({
+          data: {
+            status: 'NEEDS_REVIEW',
+            kind: 'fake-qc',
+            score: null,
+            report: JSON.stringify({ kind: 'fake-qc', mode: deps.qcMode, candidate, check: 'delivered-geometry', reasons: [drift] }),
+            artifactId: artifact.id,
+          },
+        })
+        await deps.db.submissionAttempt.update({ where: { id: attempt.id }, data: { status: 'settled', resolution: 'failed', errorSnapshot: drift } })
+        await taskLog(deps.db, anchor, 'error', 'video.geometryRejected', `${label(candidate)}: ${drift}`, { artifactId: artifact.id, conditionedOn: `${reference.width}x${reference.height}` })
+        return { status: 'next', error: `${label(candidate)}: the delivered clip does not match the frame it was conditioned on — ${drift}` }
+      }
+    }
+
     const checker = deps.checker ?? new HashQualityChecker(task.id, payload.attempt, deps.qcMode)
     const priorCheck = existingArtifact ? await deps.db.qualityCheck.findFirst({ where: { artifactId: artifact.id, status: 'APPROVED' }, orderBy: { id: 'desc' } }) : null
     const priorReport = priorCheck ? JSON.parse(priorCheck.report) : null
@@ -874,7 +956,33 @@ async function runCandidate(
       await taskLog(deps.db, anchor, 'info', 'task.reaudit', `artifact ${artifact.id} was already paid for and stored — re-running the audit on those bytes instead of generating again`, { artifactId: artifact.id })
     }
     const shotIntent = await readShotIntent(deps.db, task.storyboardId)
-    const verdict = priorCheck ? { kind: priorCheck.kind as import('./qc.js').QcKind, decision: 'pass' as const, score: priorCheck.score ?? 1, findings: priorReport.findings ?? [], frameScores: priorReport.frameScores ?? [] } : await checker.check({
+    // SD-183/SD-184: 成片字节落库后先做两条确定性读数——镜内闪变按台账同一口径
+    // (`gt(scene,0.2)`) 数硬跳，邻镜重复按中段缩略帧比像素。测量失败一律降级
+    // 「unknown」随 report 落库（没测≠干净），不改判定、不抛穿任务链。
+    const isClip = auditPlanFor(capability.modality) === 'frame'
+    let flickerReading: IntraShotFlickerReading | null = null
+    let neighborReading: Awaited<ReturnType<typeof measureShotNeighborDuplicates>> | null = null
+    let structureDriftReading: Awaited<ReturnType<typeof measureClipStructureDrift>> | null = null
+    let deliveredVideoFile: string | null = null
+    if (isClip) {
+      deliveredVideoFile = path.join(workdir, `delivered-video.${extensionFor(material.mimeType)}`)
+      await writeFile(deliveredVideoFile, material.bytes)
+      flickerReading = await measureIntraShotFlicker(deliveredVideoFile)
+      // SD-087/SD-088：漂移距离只随 report 落库、不参与判定——2026-10-25 实测这条轴量的是
+      // 位移不是结构增减（被接受的推镜镜读数高于两条坐实的缺陷片），拿它拦人就是误伤。
+      structureDriftReading = await measureClipStructureDrift({ videoFile: deliveredVideoFile, workdir })
+      if (task.storyboardId) {
+        neighborReading = await measureShotNeighborDuplicates({
+          db: deps.db,
+          storage: deps.storage,
+          workdir,
+          organizationId: task.organizationId,
+          storyboardId: task.storyboardId,
+          videoFile: deliveredVideoFile,
+        })
+      }
+    }
+    const auditVerdict = priorCheck ? { kind: priorCheck.kind as import('./qc.js').QcKind, decision: 'pass' as const, score: priorCheck.score ?? 1, findings: priorReport.findings ?? [], frameScores: priorReport.frameScores ?? [] } : await checker.check({
       taskId: task.id,
       organizationId: task.organizationId,
       projectId: task.batch.episode.project.id,
@@ -888,6 +996,25 @@ async function runCandidate(
       ...(shotIntent ? { shotIntent } : {}),
       ...(reference ? { referenceDataUrl: reference.dataUrl } : {}),
     })
+    const auditedVerdict = flickerReading ? applyIntraShotFlicker(auditVerdict, flickerReading) : auditVerdict
+    // SD-081：一份 pass 若是本集上一条视频结论的复印件（总分/逐帧分/发现三项逐字相同）而
+    // 两条片子确实不是同一画面，那就没有任何判断发生过——交回未判定，不给通过。
+    // 人工留版的重放（priorCheck）不进来：那条答案本来就是从上一条结论里读出来的。
+    let repetitionReading: Awaited<ReturnType<typeof measureAuditRepetition>> | null = null
+    let verdict = auditedVerdict
+    if (deliveredVideoFile && !priorCheck) {
+      repetitionReading = await measureAuditRepetition({
+        db: deps.db,
+        storage: deps.storage,
+        workdir,
+        organizationId: task.organizationId,
+        episodeId: task.batch.episodeId,
+        artifactId: artifact.id,
+        videoFile: deliveredVideoFile,
+        verdict: auditedVerdict,
+      })
+      verdict = applyAuditRepetition(auditedVerdict, repetitionReading)
+    }
     if (!priorCheck) await deps.db.qualityCheck.create({
       data: {
         status: verdict.decision === 'pass' ? 'APPROVED' : 'NEEDS_REVIEW',
@@ -899,7 +1026,13 @@ async function runCandidate(
           mode: deps.qcMode,
           candidate,
           reasons: verdict.decision === 'pass' ? [] : verdict.reasons,
-          ...(verdict.decision !== 'unjudged' ? { findings: verdict.findings ?? [], frameScores: verdict.frameScores ?? [] } : {}),
+          // 逐帧分与发现记的是「审核员答了什么」，与最终判决是否采信它无关：SD-081 的复印件
+          // 判成未判定时也要留下那份答案，否则下一条片子就没有可比对象，同一条缺陷链会断。
+          ...(auditedVerdict.decision !== 'unjudged' ? { findings: auditedVerdict.findings ?? [], frameScores: auditedVerdict.frameScores ?? [] } : {}),
+          ...(flickerReading ? { flicker: flickerReading } : {}),
+          ...(neighborReading ? { neighborDuplicate: neighborReading } : {}),
+          ...(structureDriftReading ? { structureDrift: structureDriftReading } : {}),
+          ...(repetitionReading ? { auditRepetition: repetitionReading } : {}),
         }),
         artifactId: artifact.id,
       },
@@ -912,6 +1045,28 @@ async function runCandidate(
           update: {},
         })
       }
+    }
+    // SD-184 的报警走 review board 既有的 finding 通道（warn 不改判：重抽治不了
+    // 「选版重复」，那是选优与分镜的事；读数把「13 s 无切点」这一族缺陷先摆出来）。
+    if (neighborReading) {
+      const neighborMessage = neighborDuplicateMessage(neighborReading)
+      if (neighborMessage) {
+        await deps.db.qualityFinding.upsert({
+          where: { compositionId_findingKey: { compositionId: `artifact:${artifact.id}`, findingKey: 'neighbor-duplicate' } },
+          create: { organizationId: task.organizationId, episodeId: task.batch.episodeId, compositionId: `artifact:${artifact.id}`, fingerprint: artifact.checksum, findingKey: 'neighbor-duplicate', dimension: 'continuity', severity: 'warning', message: neighborMessage, evidenceTimeSeconds: null, artifactId: artifact.id, storyboardId: task.storyboardId },
+          update: {},
+        })
+        await taskLog(deps.db, anchor, 'warn', 'video.neighborDuplicate', neighborMessage, { artifactId: artifact.id })
+      }
+    }
+    // SD-081 的复印件单独留一条事件：任务接下来就按「审核没判」停在等你决定，这一行是
+    // 唯一写明「它答的是上一条的原文、两条画面差多少」的地方。
+    if (repetitionReading?.status === 'repeated' && verdict.decision === 'unjudged') {
+      await taskLog(deps.db, anchor, 'warn', 'video.auditRepetition', verdict.reasons.join('; '), {
+        artifactId: artifact.id,
+        matchedArtifactId: repetitionReading.matchedArtifactId,
+        pictureDistance: repetitionReading.pictureDistance,
+      })
     }
     await deps.db.submissionAttempt.update({ where: { id: attempt.id }, data: { status: 'settled', resolution: verdict.decision === 'pass' ? 'succeeded' : verdict.decision } })
     const qcScore = verdict.decision === 'unjudged' ? null : verdict.score
@@ -964,18 +1119,6 @@ async function runCandidate(
     if (task.stage === 'SCRIPT' || task.stage === 'STORYBOARD') {
       await recordGeneratedContent(tx, task, new TextDecoder().decode(material.bytes))
     }
-
-    await tx.usageLedger.create({
-      data: {
-        organizationId: task.organizationId,
-        taskId: task.id,
-        provider: candidate.provider,
-        model: candidate.model,
-        modality: capability.modality,
-        inputUnits: promptChars,
-        outputUnits: stored.sizeBytes,
-      },
-    })
       await recordAssetVersion(tx as PipelineDeps['db'], task, artifact.id, promptOf(request))
     })
     if (!succeeded) {
@@ -1064,7 +1207,6 @@ async function runSegmentedStoryboard(
 ): Promise<CandidateOutcome> {
   const texts: string[] = []
   const artifactIds: string[] = []
-  const billed: Array<{ inputUnits: number; outputUnits: number }> = []
   const checker = deps.checker ?? new HashQualityChecker(task.id, payload.attempt, deps.qcMode)
   for (const [index, segmentRequest] of requests.entries()) {
     await taskLog(deps.db, anchor, 'info', 'storyboard.segment', `segment ${index + 1}/${requests.length}`, { segment: index + 1, count: requests.length })
@@ -1076,7 +1218,7 @@ async function runSegmentedStoryboard(
       const bytes = await deps.storage.read(artifact.objectKey)
       artifactIds.push(artifact.id)
       texts.push(new TextDecoder().decode(bytes))
-      billed.push({ inputUnits: prior.promptChars ?? promptOf(segmentRequest).length, outputUnits: bytes.length })
+      // 这一段的账在它被受理时已经记过（attemptId 唯一键），复用旧产物不再补第二笔。
       continue
     }
     let attemptId: string
@@ -1139,6 +1281,7 @@ async function runSegmentedStoryboard(
       data: result.status === 'failed' ? { status: 'settled', resolution: 'failed' } : { status: 'result_ready', resultSnapshot: saveProviderResult(result) },
     }).catch(() => undefined)
     if (result.status === 'failed') return { status: 'next', error: `${label(candidate)}: ${result.error ?? 'provider reported failure'}` }
+    await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId, inputUnits: promptOf(segmentRequest).length, outputUnits: 0 })
 
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-artifact-'))
     try {
@@ -1156,10 +1299,12 @@ async function runSegmentedStoryboard(
         extension: extensionFor(material.mimeType),
       })
       const stored = await deps.storage.put(objectKey, material.bytes, material.mimeType)
+      await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId, inputUnits: promptOf(segmentRequest).length, outputUnits: stored.sizeBytes })
       const artifact = await deps.db.mediaArtifact.create({
         data: {
           organizationId: task.organizationId,
           taskId: task.id,
+          storyboardId: task.storyboardId,
           stage: task.stage,
           objectKey: stored.key,
           checksum: stored.checksum,
@@ -1205,8 +1350,6 @@ async function runSegmentedStoryboard(
         return settleQcRework({ deps, task, payload, lease, anchor, candidate, verdict, artifactId: artifact.id, segment: index + 1 })
       }
       await deps.db.submissionAttempt.update({ where: { id: attemptId }, data: { status: 'settled', resolution: 'succeeded', artifactId: artifact.id } })
-      // 记账先攒着,整段任务成功才落 usage——与单次调用路径同口径:失败尝试不记账。
-      billed.push({ inputUnits: promptOf(segmentRequest).length, outputUnits: stored.sizeBytes })
       texts.push(new TextDecoder().decode(material.bytes))
     } catch (error) {
       return { status: 'blocked', error: `segment ${index + 1} result is durable; retry local persistence: ${errorMessage(error)}` }
@@ -1232,11 +1375,6 @@ async function runSegmentedStoryboard(
     }),
   }, async tx => {
   await recordGeneratedContent(tx, task, merged)
-  for (const entry of billed) {
-    await tx.usageLedger.create({
-      data: { organizationId: task.organizationId, taskId: task.id, provider: candidate.provider, model: candidate.model, modality: capability.modality, ...entry },
-    })
-  }
   })
   if (!written) {
     // 与单次调用同一条迟到结果纪律:被更新的 attempt/人工改判抢先完成后,本次
@@ -1459,7 +1597,7 @@ async function runSplicedVideo(
         }
       }
       if (takeFrame?.conditioned && !conditioningLogged) {
-        referenceLog.push({ model: candidate.model, conditioned: true })
+        referenceLog.push({ model: candidate.model, channel: 'first_frame', conditioned: true, reason: referenceStamp('first_frame', 'conditioned') })
         conditioningLogged = true
       }
       takeRequest.input.media = [
@@ -1599,6 +1737,8 @@ async function runSplicedVideo(
         data: result.status === 'failed' ? { status: 'settled', resolution: 'failed' } : { status: 'result_ready', resultSnapshot: saveProviderResult(result) },
       }).catch(() => undefined)
       if (result.status === 'failed') return { status: 'next', error: `${label(candidate)}: take ${take.order} — ${result.error ?? 'provider reported failure'}` }
+      // 段出了片就记账（SD-039/SD-135）：质检判回、审核判不了都不改变这一单已花出去。
+      await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId: attemptRowId, inputUnits: promptChars, outputUnits: 0 })
 
       const takeWorkdir = path.join(workdir, `take-${take.order}-work`)
       await mkdir(takeWorkdir, { recursive: true })
@@ -1615,6 +1755,7 @@ async function runSplicedVideo(
         version: 1,
         extension: extensionFor(material.mimeType),
       }), material.bytes, material.mimeType)
+      await recordSubmissionUsage(deps, task, candidate, capability.modality, { attemptId: attemptRowId, inputUnits: promptChars, outputUnits: stored.sizeBytes })
       const artifact = await deps.db.mediaArtifact.create({
         data: {
           organizationId: task.organizationId,
@@ -1631,8 +1772,27 @@ async function runSplicedVideo(
           metadata: JSON.stringify({ ...result, role: 'take-video', taskId: task.id, storyboardId, takeOrder: take.order, plannedMs: take.plannedMs }),
         },
       })
+      // SD-180 在拼接链上的同一条判据：段的条件帧是上一段的末帧，画幅对不上就是厂商
+      // 把这一段的条件丢了。判退必须发生在抽末帧之前——废片的末帧不能当下一段的条件帧，
+      // 否则一条坏片会污染整条链。
+      const takeDrift = takeFrame && takeFrame.conditioned ? geometryDrift(await probeMediaMeta(file), takeFrame) : null
+      if (takeDrift) {
+        await deps.db.qualityCheck.create({
+          data: {
+            status: 'NEEDS_REVIEW',
+            kind: 'fake-qc',
+            score: null,
+            report: JSON.stringify({ kind: 'fake-qc', mode: deps.qcMode, candidate, take: take.order, check: 'delivered-geometry', reasons: [takeDrift] }),
+            artifactId: artifact.id,
+          },
+        })
+        await deps.db.submissionAttempt.update({ where: { id: attemptRowId }, data: { status: 'settled', resolution: 'failed', errorSnapshot: takeDrift } })
+        await deps.db.shotTake.updateMany({ where: { storyboardId, order: take.order }, data: { status: 'REJECTED', videoArtifactId: artifact.id } })
+        await taskLog(deps.db, anchor, 'error', 'video.geometryRejected', `${label(candidate)}: take ${take.order} — ${takeDrift}`, { take: take.order, artifactId: artifact.id })
+        return { status: 'next', error: `${label(candidate)}: take ${take.order} does not match the frame it was conditioned on — ${takeDrift}` }
+      }
       const endFrameArtifactId = await ensureEndFrame(file, durationMs, take.order, artifact.id)
-      const verdict = await checker.check({
+      const auditVerdict = await checker.check({
         taskId: task.id,
         organizationId: task.organizationId,
         projectId: task.batch.episode.project.id,
@@ -1646,6 +1806,11 @@ async function runSplicedVideo(
         ...(shotIntent ? { shotIntent } : {}),
         ...(takeFrame?.conditioned ? { referenceDataUrl: takeFrame.dataUrl } : {}),
       })
+      // SD-183：每条落版 take 先过镜内闪变读数（台账 #5 案：4.04 s 素材 7 次场景跳）。
+      // rework 档把 pass 翻成 rework（与版式缺区块同一硬属性纪律），warn 档只追加
+      // finding；读不出报 unknown 原样交回——不许把没测当通过，也不许多烧一次审核调用。
+      const flicker = await measureIntraShotFlicker(file)
+      const verdict = applyIntraShotFlicker(auditVerdict, flicker)
       await deps.db.qualityCheck.create({
         data: {
           status: verdict.decision === 'pass' ? 'APPROVED' : 'NEEDS_REVIEW',
@@ -1660,6 +1825,7 @@ async function runSplicedVideo(
             plannedMs: take.plannedMs,
             reasons: verdict.decision === 'pass' ? [] : verdict.reasons,
             ...(verdict.decision !== 'unjudged' ? { findings: verdict.findings ?? [], frameScores: verdict.frameScores ?? [] } : {}),
+            flicker,
           }),
           artifactId: artifact.id,
         },
@@ -1687,19 +1853,6 @@ async function runSplicedVideo(
       }
 
       await deps.db.submissionAttempt.update({ where: { id: attemptRowId }, data: { status: 'settled', resolution: 'succeeded', artifactId: artifact.id } })
-      // 段一过审就记账，而不是等整镜收尾：后面某一段失败时，前面已付的段不该从
-      // 账本里消失——重试复用它们，也不会再记第二笔。
-      await deps.db.usageLedger.create({
-        data: {
-          organizationId: task.organizationId,
-          taskId: task.id,
-          provider: candidate.provider,
-          model: candidate.model,
-          modality: capability.modality,
-          inputUnits: promptChars,
-          outputUnits: stored.sizeBytes,
-        },
-      })
       await deps.db.shotTake.updateMany({
         where: { storyboardId, order: take.order },
         data: { status: 'SUCCEEDED', videoArtifactId: artifact.id, endFrameArtifactId, firstFrameArtifactId: takeFrame?.conditioned ? expectedFirstFrame : null },
@@ -1739,6 +1892,9 @@ async function runSplicedVideo(
       data: {
         organizationId: task.organizationId,
         taskId: task.id,
+        // 拼接母带就是这一镜的成片，归属写在行上；中途的段产物/末帧仍留空，
+        // 它们不是镜头的对外产物，只靠 metadata 反指任务与镜头。
+        storyboardId: task.storyboardId,
         stage: 'VIDEO',
         objectKey: masterStored.key,
         checksum: masterStored.checksum,
@@ -1757,6 +1913,17 @@ async function runSplicedVideo(
     // 母带的过审结论是各段结论的合成：每一段都过了，整镜才算过；分数取最差那段。
     // 报告写明 aggregated，回看时不会把这条当成对母带字节重新审过一遍。
     const worst = results.reduce((acc, result) => (result.score < acc.score ? result : acc), results[0]!)
+    // SD-184：这一镜的落版画面与紧邻的前几镜几乎相同吗。链长 3 就是台账实测案档
+    // （#44-46/#57-59 三连重复 = 13.00 s 无切点段）。报警走 finding 通道，不改判——
+    // 重抽治不了选版重复；读数随聚合报告落库，测不出报 unknown。
+    const neighborReading = await measureShotNeighborDuplicates({
+      db: deps.db,
+      storage: deps.storage,
+      workdir,
+      organizationId: task.organizationId,
+      storyboardId,
+      videoFile: masterPath,
+    })
     await deps.db.qualityCheck.create({
       data: {
         status: 'APPROVED',
@@ -1771,10 +1938,20 @@ async function runSplicedVideo(
           splice: { intentMs: plan.intentMs, takeCount: results.length },
           takes: results.map(result => ({ order: result.order, plannedMs: result.plannedMs, durationMs: result.durationMs, score: result.score, kind: result.kind, reused: result.reused })),
           reasons: [],
+          neighborDuplicate: neighborReading,
         }),
         artifactId: master.id,
       },
     })
+    const neighborMessage = neighborDuplicateMessage(neighborReading)
+    if (neighborMessage) {
+      await deps.db.qualityFinding.upsert({
+        where: { compositionId_findingKey: { compositionId: `artifact:${master.id}`, findingKey: 'neighbor-duplicate' } },
+        create: { organizationId: task.organizationId, episodeId: task.batch.episodeId, compositionId: `artifact:${master.id}`, fingerprint: master.checksum, findingKey: 'neighbor-duplicate', dimension: 'continuity', severity: 'warning', message: neighborMessage, evidenceTimeSeconds: null, artifactId: master.id, storyboardId },
+        update: {},
+      })
+      await taskLog(deps.db, anchor, 'warn', 'video.neighborDuplicate', neighborMessage, { artifactId: master.id })
+    }
 
     await taskLog(deps.db, anchor, 'info', 'candidate.success', `${label(candidate)} produced a ${results.length}-take spliced shot (${Math.round((masterMeta?.durationMs ?? 0) / 100) / 10}s master, all takes audited)`, { artifactId: master.id, takeCount: results.length })
     const written = await fencedTaskWrite(deps.db, task.id, lease.token, {
@@ -1887,19 +2064,96 @@ export async function measureMissingMeta(material: Material, workdir: string): P
   return measured
 }
 
+/** 画幅三态：竖屏/横屏/方片。竖屏项目里横屏素材串进母带就是上下黑边（SD-180 实测）。 */
+export type Orientation = 'portrait' | 'landscape' | 'square'
+
+export function orientationOf(width: number, height: number): Orientation {
+  if (height > width) return 'portrait'
+  if (width > height) return 'landscape'
+  return 'square'
+}
+
+/** 同一朝向内允许的画幅比漂移：厂商偶尔把 9:16 出成 1080×1896 之类的近似值，
+ *  20% 之内的差是同一块画布；超过它意味着画面被裁成条或被加边（SD-069 同族）。 */
+const ASPECT_DRIFT = 0.2
+
+/**
+ * SD-180：供应商报 SUCCESS 不等于这一单买对了。图生视频请求的画幅契约就是我们送出去
+ * 的那张条件帧——实测交付片与它朝向不同（或同朝向但画幅比漂移超阈值）就是首帧被静默
+ * 丢弃、换回一段与本镜无关的素材。判据只用实测字节，不用厂商自报的宽高自证。
+ * 读不出实测（探测没有资格失败一条已付费产物）时返回 null：不判。
+ */
+export function geometryDrift(
+  measured: MediaMeta | null | undefined,
+  expected: { width: number; height: number } | null | undefined,
+): string | null {
+  if (!expected || expected.width <= 0 || expected.height <= 0) return null
+  const width = measured?.width ?? 0
+  const height = measured?.height ?? 0
+  if (width <= 0 || height <= 0) return null
+  const want = orientationOf(expected.width, expected.height)
+  const got = orientationOf(width, height)
+  if (got !== want) {
+    return `delivered ${width}x${height} (${got}) but the request was conditioned on ${expected.width}x${expected.height} (${want}) — the model dropped the first frame and returned an unrelated clip`
+  }
+  const wantRatio = expected.width / expected.height
+  const drift = Math.abs(width / height - wantRatio) / wantRatio
+  if (drift > ASPECT_DRIFT) {
+    return `delivered ${width}x${height} is ${(drift * 100).toFixed(0)}% off the conditioned aspect ${expected.width}x${expected.height} — the frame was cropped or padded, not animated`
+  }
+  return null
+}
+
+/**
+ * 交付字节的实测画幅。落盘到调用方的 workdir（随任务一并清扫），只读元数据不转码，
+ * 单次 ffprobe 有界。与 measureMissingMeta 的分工：那条补的是「供应商没给」的字段，
+ * 这条是给裁决用的——一律实测，不看供应商说了什么。
+ */
+export async function measureDelivered(bytes: Uint8Array, mimeType: string, workdir: string): Promise<MediaMeta | null> {
+  const probeFile = path.join(workdir, `geometry-${randomUUID()}.${extensionFor(mimeType)}`)
+  try {
+    await writeFile(probeFile, bytes)
+    return await probeMediaMeta(probeFile)
+  } catch {
+    return null
+  } finally {
+    await rm(probeFile, { force: true }).catch(() => undefined)
+  }
+}
+
 /**
  * What this candidate did with the shot's frame, or `null` when there was nothing to
  * decide: no frame in the snapshot, or a candidate that cannot take one. `null` is what
  * keeps the text-to-video path byte-identical to the one it had before conditioning existed.
  */
 type FrameOutcome =
-  | { conditioned: true; dataUrl: string; publicUrl?: string }
-  | { conditioned: false; reason: string }
+  | { conditioned: true; dataUrl: string; publicUrl?: string; width: number; height: number }
+  | { conditioned: false; code: ReferenceCode; reason: string }
+
+/** The two reference channels a shot carries. They must never share the word
+ *  「参考图」on screen (SD-104): the pinned first frame is the i2v starting point,
+ *  the approved asset sheets are the costume photos — one can ride along while the
+ *  other is refused, and the UI has to say which is which. */
+type ReferenceChannel = 'first_frame' | 'asset_sheet'
+
+/** Stable machine codes for the web layer's human-wording map (SD-048 law: internal
+ *  报文不上屏). The code travels as a `[channel:code]` stamp at the head of `reason`;
+ *  the original prose follows the stamp as structured detail for the tooltip. */
+type ReferenceCode =
+  | 'conditioned'
+  | 'artifact_missing'
+  | 'gate_rejected'
+  | 'model_rejects_reference_images'
+  | 'unexpected_error'
+
+function referenceStamp(channel: ReferenceChannel, code: ReferenceCode, detail?: string): string {
+  return detail ? `[${channel}:${code}] ${detail}` : `[${channel}:${code}]`
+}
 
 /** One line of that story as it is kept on the succeeded task. Never the image itself. */
 type ReferenceRecord =
-  | { model: string; conditioned: true }
-  | { model: string; conditioned: false; reason: string }
+  | { model: string; channel: ReferenceChannel; conditioned: true; reason: string }
+  | { model: string; channel: ReferenceChannel; conditioned: false; code: ReferenceCode; reason: string }
 
 /**
  * Reads the shot's own frame out of storage and turns it into the conditioning image an
@@ -1934,7 +2188,7 @@ async function resolveFrame(
       where: { id: artifactId, organizationId: task.organizationId },
       select: { objectKey: true, mimeType: true, metadata: true },
     })
-    if (!artifact) return { conditioned: false, reason: 'the referenced first frame is no longer stored' }
+    if (!artifact) return { conditioned: false, code: 'artifact_missing', reason: 'the referenced first frame is no longer stored' }
 
     const bytes = await deps.storage.read(artifact.objectKey)
     const workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-reference-'))
@@ -1947,20 +2201,23 @@ async function resolveFrame(
         // that declares none gets the tightest one rather than the loosest.
         limits: { maxBytes: referenceMaxBytes(spec) },
       })
-      if (!frame.ok) return { conditioned: false, reason: frame.reason }
+      if (!frame.ok) return { conditioned: false, code: 'gate_rejected', reason: frame.reason }
       const dataUrl = toDataUrl(frame.bytes, frame.mimeType)
+      // 厂商交回的画幅是它自己的说法（SD-180 的教训），所以条件帧的画幅要按我们
+      // 真正送出去的那一份实测记下来——过了闸的那张图的宽高就是这条画幅契约。
+      const conditioned = { conditioned: true as const, dataUrl, width: frame.width, height: frame.height }
       // 一份公开地址有时是硬前提:2026-10-21 实测中转站在提交阶段就按「参考素材必须是公网
       // http/https URL，不支持 base64」拒掉了首帧(seedance.ts 的注释只对官方 Ark 成立)。
       // 厂商每次出片都回一份带签名的公网副本,本地字节没被重编码过、签名没过期时它就是
       // 同一张图的公开引用;拿不到才退回 base64。
       const publicUrl = frame.reencoded ? null : storedPublicUrl(artifact.metadata)
-      if (publicUrl && (await isReachable(publicUrl))) return { conditioned: true, dataUrl, publicUrl }
-      return { conditioned: true, dataUrl }
+      if (publicUrl && (await isReachable(publicUrl))) return { ...conditioned, publicUrl }
+      return conditioned
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }
   } catch (error) {
-    return { conditioned: false, reason: errorMessage(error) }
+    return { conditioned: false, code: 'unexpected_error', reason: errorMessage(error) }
   }
 }
 
@@ -2010,7 +2267,15 @@ async function resolveAssetReferences(
   const references = readFrameReferences(task.requestSnapshot, 'reference_image')
   if (references.length === 0) return null
   if (!capability.acceptsReferenceImages) {
-    referenceLog.push({ model: capability.model, conditioned: false, reason: `model "${capability.model}" does not take reference images; the generation ran without the approved asset sheets` })
+    // SD-104: machine code first, English detail behind it — the web layer maps the
+    // code to human wording and keeps the original as tooltip, never on screen.
+    referenceLog.push({
+      model: capability.model,
+      channel: 'asset_sheet',
+      conditioned: false,
+      code: 'model_rejects_reference_images',
+      reason: referenceStamp('asset_sheet', 'model_rejects_reference_images', `model "${capability.model}" does not take reference images; the generation ran without the approved asset sheets`),
+    })
     return null
   }
   const media: MediaReference[] = []
@@ -2021,7 +2286,7 @@ async function resolveAssetReferences(
         select: { objectKey: true, mimeType: true },
       })
       if (!artifact) {
-        referenceLog.push({ model: capability.model, conditioned: false, reason: 'the referenced asset sheet is no longer stored' })
+        referenceLog.push({ model: capability.model, channel: 'asset_sheet', conditioned: false, code: 'artifact_missing', reason: referenceStamp('asset_sheet', 'artifact_missing', 'the referenced asset sheet is no longer stored') })
         continue
       }
       const bytes = await deps.storage.read(artifact.objectKey)
@@ -2029,7 +2294,7 @@ async function resolveAssetReferences(
       try {
         const sheet = await toReferenceImage({ bytes, mimeType: artifact.mimeType, workdir, limits: { maxBytes: referenceMaxBytes(spec) } })
         if (!sheet.ok) {
-          referenceLog.push({ model: capability.model, conditioned: false, reason: sheet.reason })
+          referenceLog.push({ model: capability.model, channel: 'asset_sheet', conditioned: false, code: 'gate_rejected', reason: referenceStamp('asset_sheet', 'gate_rejected', sheet.reason) })
           continue
         }
         media.push({ type: 'reference_image', url: toDataUrl(sheet.bytes, sheet.mimeType) })
@@ -2037,11 +2302,11 @@ async function resolveAssetReferences(
         await rm(workdir, { recursive: true, force: true })
       }
     } catch (error) {
-      referenceLog.push({ model: capability.model, conditioned: false, reason: errorMessage(error) })
+      referenceLog.push({ model: capability.model, channel: 'asset_sheet', conditioned: false, code: 'unexpected_error', reason: referenceStamp('asset_sheet', 'unexpected_error', errorMessage(error)) })
     }
   }
   if (media.length === 0) return null
-  referenceLog.push({ model: capability.model, conditioned: true })
+  referenceLog.push({ model: capability.model, channel: 'asset_sheet', conditioned: true, reason: referenceStamp('asset_sheet', 'conditioned') })
   return media
 }
 

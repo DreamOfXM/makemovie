@@ -1,4 +1,4 @@
-import { classifyFailure, type FailureKind } from '@studio/domain'
+import { classifyFailure, type ComposeBlockKind, type FailureKind } from '@studio/domain'
 import type { TranslateFn } from './i18n'
 
 /**
@@ -50,4 +50,81 @@ export function assetFailureCopy(t: TranslateFn, raw: string | null): string {
   }
   const causeKey = FAILURE_CAUSE_KEY[kind]
   return causeKey ? t(causeKey) : t('assets.generateFailedHint')
+}
+
+/** 三档句子按阶段查表，不拼模板键：拼出来的键名一旦字典没跟上就原样上屏。 */
+const MEDIA_COPY = {
+  frame: { failed: 'shotboard.reason.frameFailed', playable: 'shotboard.reason.frameRetry', parked: 'shotboard.reason.frameParked' },
+  video: { failed: 'shotboard.reason.videoFailed', playable: 'shotboard.reason.videoRetry', parked: 'shotboard.reason.videoParked' },
+  // 配音没有「停在等你裁决」这一档：问询只挂在花钱的视频上，可播与否则由产物自己说。
+  audio: { failed: 'storyboards.voiceFailed', playable: 'storyboards.voiceFailed', parked: 'storyboards.voiceFailed' },
+} as const
+
+/**
+ * SD-167｜镜头卡、逐镜履历那两处红条的人话。
+ *
+ * 内部报文一律不上屏：`visual-audit: threshold not met — awaiting review (policy)`
+ * 这种句子既没说该修什么，也没说这一镜手上还剩什么。认得出的因走全站 `failure.cause.*`
+ * （额度/权限/参数/网络都是终因，重抽不会变好）；质检没过线要说清抽了几次；两者都认不出
+ * 时退回这一镜的既有句子。原文不丢——红条的 Tooltip 与批次表的「展开」都兜着它。
+ */
+export function mediaFailureCopy(
+  t: TranslateFn,
+  stage: keyof typeof MEDIA_COPY,
+  raw: string | null | undefined,
+  state: { playable: boolean; parked?: boolean } = { playable: false },
+): string {
+  const kind = classifyFailure(raw)
+  const causeKey = FAILURE_CAUSE_KEY[kind]
+  if (causeKey) return t(causeKey)
+  if (kind === 'audit') {
+    const count = auditAttempts(raw)
+    if (count !== null) return t('assets.failure.audit', { count })
+    if (state.playable) return t(state.parked ? MEDIA_COPY[stage].parked : MEDIA_COPY[stage].playable)
+  }
+  return t(MEDIA_COPY[stage].failed)
+}
+
+/**
+ * SD-167｜只说「因什么挂的」，不说「这一镜手上还剩什么」。
+ *
+ * 履历行每一行都是某一版的尝试记录：那一版有没有画面，行自己（时长、版本、状态徽章）已经说了。
+ * 把 `mediaFailureCopy` 那句套上去，会出现一条放得出来的 4s 记录旁边写着「这一镜还没有画面」。
+ * 认不出因（audit / unknown）返回 null，由调用方只留状态徽章——宁可少说一句，
+ * 也不把内部报文或错的那句话搬上屏。
+ */
+export function failureCauseCopy(t: TranslateFn, raw: string | null | undefined): string | null {
+  const causeKey = FAILURE_CAUSE_KEY[classifyFailure(raw)]
+  return causeKey ? t(causeKey) : null
+}
+
+/**
+ * SD-167｜批次表「错误」列那一格。任务可能落在任何阶段，句子不许替它猜「这一镜还没有画面」
+ * 或「调整描述」——那是镜头卡与素材行的话。这里只回答「因什么挂的」，原文由「展开」兜着。
+ */
+export function taskFailureCopy(t: TranslateFn, raw: string | null): string {
+  const cause = failureCauseCopy(t, raw)
+  if (cause) return cause
+  const count = auditAttempts(raw)
+  if (count !== null) return t('generations.errorCause.auditAttempts', { count })
+  if (classifyFailure(raw) === 'audit') return t('generations.errorCause.audit')
+  return t('generations.errorCause.unknown')
+}
+
+/**
+ * 合成整集停在「已阻塞」时的那句原因（SD-177）。按 ComposeBlockKind 枚举穷举写成
+ * Record——新增一种阻塞而字典没跟上，编译期就报错，而不是界面上印出键名。
+ * 每句都要说清「去哪修」，只说「合成失败」等于没解释。
+ */
+export const COMPOSE_BLOCK_KEY: Record<ComposeBlockKind, string> = {
+  missing_video: 'generations.composeBlocked.missing_video',
+  selection_stale: 'generations.composeBlocked.selection_stale',
+  snapshot_drift: 'generations.composeBlocked.snapshot_drift',
+  seam_unconditioned: 'generations.composeBlocked.seam_unconditioned',
+  edit_clip_unknown: 'generations.composeBlocked.edit_clip_unknown',
+  edit_source_missing: 'generations.composeBlocked.edit_source_missing',
+  clip_not_editable: 'generations.composeBlocked.clip_not_editable',
+  trim_failed: 'generations.composeBlocked.trim_failed',
+  wrong_episode: 'generations.composeBlocked.wrong_episode',
+  unknown: 'generations.composeBlocked.unknown',
 }

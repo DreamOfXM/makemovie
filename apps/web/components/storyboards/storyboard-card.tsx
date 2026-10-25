@@ -21,9 +21,10 @@ import {
   type Storyboard,
 } from '@/lib/api'
 import { translateEnum, useI18n, type TranslateFn } from '@/lib/i18n'
+import { mediaFailureCopy } from '@/lib/failure-cause'
 import { cn, formatDuration } from '@/lib/utils'
 import type { ShotEvent } from '@/lib/shot-history'
-import { audioModeWord, shotAudioMode, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
+import { audioModeWord, cloudVoiceEntersMaster, shotAudioMode, shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { Badge } from '@/components/ui/badge'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Button } from '@/components/ui/button'
@@ -32,6 +33,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { LineageBadge } from '@/components/lineage-badge'
 import { ArtifactMedia } from '@/components/generations/artifact-media'
+import { referenceTraceCopy } from '@/components/generations/generations-panel'
 import { ShotHistory, ShotReadout } from '@/components/storyboards/shot-history'
 
 /** The three stages that belong to one shot rather than to the whole episode. */
@@ -51,8 +53,10 @@ interface StoryboardCardProps {
   onBindAssets(storyboardId: string, assets: { assetId: string }[]): Promise<void>
   onEdit(): void
   onChangeStatus(): void
-  /** 逐镜重生成:操作发生在分镜卡上(用户看镜头的地方),结果回写同卡片。 */
-  onRegenerateStage?(storyboardId: string, stage: ShotStage): void
+  /** 逐镜重生成:操作发生在分镜卡上(用户看镜头的地方),结果回写同卡片。
+   *  regenerate 由卡片按「这一格手上有没有产物」算出:缺产物走「生成」(只补缺),
+   *  有产物走「重跑」(覆盖重来)。请求、按钮字样、说明与回执四处读同一个判据(SD-070)。 */
+  onRegenerateStage?(storyboardId: string, stage: ShotStage, regenerate: boolean): void
   /** 正在重生成的镜头与阶段(`${id}:${stage}`),用于按钮转圈与禁用。 */
   regeneratingShotStage?: string | null
   /** 数据驱动的进行中键(`${id}:${stage}`):任务在排队/运行时按钮保持转圈,直到出图。 */
@@ -71,6 +75,16 @@ function artifactOf(storyboard: Storyboard, stage: ShotStage): GenerationArtifac
   return stage === 'IMAGE' ? storyboard.firstFrame : stage === 'VIDEO' ? storyboard.video : shotVoiceTrack(storyboard)
 }
 
+/**
+ * 卡片这一格放哪一条成片：生效版（钦定 > 最新成功 > 本机画面）优先，没有生效版时
+ * 退到停在「等你裁决」上的那一版（SD-168）。那一版是真花了钱、播放器放得出来的产物，
+ * 把它藏起来就会出现同一张卡上「成片重抽没过线」与「还没有成片」并排的自相矛盾。
+ * 只给画面与时长读数用；状态点仍认生效版，否则未过线的版本会被涂成绿。
+ */
+export function shotClip(storyboard: Storyboard): GenerationArtifact | null | undefined {
+  return storyboard.video ?? storyboard.videoParked
+}
+
 /** 落库时长优先；缺了就取播放器刚量到的那个值——但只认同一份产物，换版后旧读数立刻作废。 */
 function measuredDurationMs(
   artifact: GenerationArtifact | null | undefined,
@@ -78,6 +92,23 @@ function measuredDurationMs(
 ): number | null {
   if (!artifact) return null
   return artifact.durationMs ?? (hit && hit.id === artifact.id ? hit.ms : null)
+}
+
+/**
+ * SD-104(d)：素材定妆照没参与本次生成这件事，过去只有展开批次深处才看得见
+ * （实测镜头卡 `shot_card_reference_lines: []`）。逐镜评审处必须自己说一遍，
+ * 否则人读完这一镜并不知道画面质感不是由已审批的定妆照撑起来的。
+ * 只报「没吃进参考图」的那几条：正常条件化的一进一退是流水线的常态，不值得占屏。
+ */
+export function shotReferenceDegradations(
+  t: TranslateFn,
+  storyboardId: string,
+  shotTasks?: Map<string, GenerationTask>,
+) {
+  return (['IMAGE', 'VIDEO'] as const).flatMap(stage => {
+    const entries = shotTasks?.get(`${storyboardId}:${stage}`)?.retryTrace?.reference ?? []
+    return entries.filter(entry => !entry.conditioned).map(entry => referenceTraceCopy(t, entry))
+  })
 }
 
 /** 首帧/视频的失败理由分镜数据自带;配音没有独立错误字段,回落到最新一次 AUDIO 任务。 */
@@ -157,9 +188,12 @@ export function StoryboardCard({
   // 声音来源决定这一镜欠不欠一条人声轨，以及那一格里播的是哪个文件（TTS 或导入件）。
   const owesVoice = shotOwesVoice(storyboard)
   const voiceTrack = shotVoiceTrack(storyboard)
+  // SD-189：导入档下云端配音不进母带，重跑它就是白烧一次付费调用——入口跟着判据收口。
+  const voiceLive = cloudVoiceEntersMaster(storyboard)
   const kindById = new Map(episodeAssets.map(asset => [asset.id, asset.kind]))
   const characters = [...boundIds].filter(id => kindById.get(id) === 'character').length
-  const clipMs = measuredDurationMs(storyboard.video, measured.clip)
+  const clip = shotClip(storyboard)
+  const clipMs = measuredDurationMs(clip, measured.clip)
   const voiceMs = measuredDurationMs(voiceTrack, measured.voice)
 
   const busyKey = (stage: ShotStage) => `${storyboard.id}:${stage}`
@@ -169,6 +203,7 @@ export function StoryboardCard({
     regeneratingShotStage === busyKey(stage) || Boolean(generatingShotStages?.has(busyKey(stage)))
   const anyBusy = Boolean(regeneratingShotStage) || Boolean(generatingShotStages?.size)
   const shotBusy = SHOT_STAGES.some(stage => stageBusy(stage))
+  const referenceDegradations = shotReferenceDegradations(t, storyboard.id, shotTasks)
 
   // 读数里的质检分与右栏产物同源:都取自这一阶段最新那条任务,而不是"历史里最高那次"。
   const taskQc = (stage: ShotStage) => shotTasks?.get(`${storyboard.id}:${stage}`)?.qc?.score ?? null
@@ -379,18 +414,35 @@ export function StoryboardCard({
                     key={stage}
                     storyboard={storyboard}
                     stage={stage}
+                    artifact={stage === 'IMAGE' ? storyboard.firstFrame : clip}
+                    parked={stage === 'VIDEO' && !storyboard.video && Boolean(storyboard.videoParked)}
                     busy={stageBusy(stage)}
                     error={errorOf(storyboard, stage, shotTasks)}
                     editable={editable && Boolean(onRegenerateStage)}
                     blockedBy={anyBusy}
-                    onRegenerate={() => onRegenerateStage?.(storyboard.id, stage)}
+                    onRegenerate={regenerate => onRegenerateStage?.(storyboard.id, stage, regenerate)}
                     onClipDuration={ms => {
-                      const id = storyboard.video?.id
+                      const id = clip?.id
                       if (id) setMeasured(value => ({ ...value, clip: { id, ms } }))
                     }}
                   />
                 ))}
               </div>
+              {referenceDegradations.length > 0 && (
+                // muted 而非红/琥珀：这是「这次没吃什么」的事实，不是故障也不是等你。
+                <ul className="text-muted-foreground space-y-0.5">
+                  {referenceDegradations.map((copy, index) => (
+                    <li key={`${copy.text}:${index}`}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <p className="cursor-help text-xs">{copy.text}</p>
+                        </TooltipTrigger>
+                        {copy.raw && <TooltipContent className="max-w-md break-all">{copy.raw}</TooltipContent>}
+                      </Tooltip>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <div>
                 <p className="text-muted-foreground mb-1 flex items-center gap-1 text-xs font-medium">
                   <MicIcon className="size-3.5" />
@@ -420,29 +472,34 @@ export function StoryboardCard({
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <p className="text-destructive mt-1 line-clamp-2 text-xs">
-                              {t('storyboards.voiceFailed')}:{errorOf(storyboard, 'AUDIO', shotTasks)}
+                              {mediaFailureCopy(t, 'audio', errorOf(storyboard, 'AUDIO', shotTasks))}
                             </p>
                           </TooltipTrigger>
                           <TooltipContent className="break-all">
-                            {t('storyboards.voiceFailed')}:{errorOf(storyboard, 'AUDIO', shotTasks)}
+                            {errorOf(storyboard, 'AUDIO', shotTasks)}
                           </TooltipContent>
                         </Tooltip>
                       )}
+                      {!voiceLive && (
+                        <p className="text-muted-foreground mt-1 text-xs">{t('shotboard.audio.importedNoRerun')}</p>
+                      )}
                     </div>
-                    {editable && onRegenerateStage && (
+                    {editable && onRegenerateStage && voiceLive && (
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
                             variant="outline"
                             size="icon-sm"
                             disabled={!canWrite || anyBusy}
-                            onClick={() => onRegenerateStage(storyboard.id, 'AUDIO')}
+                            onClick={() => onRegenerateStage(storyboard.id, 'AUDIO', Boolean(voiceTrack))}
                           >
                             {stageBusy('AUDIO') ? <LoaderCircleIcon className="animate-spin" /> : <MicIcon />}
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          {stageBusy('AUDIO') ? t('generations.cellGenerating') : t('storyboards.regenVoiceHint')}
+                          {stageBusy('AUDIO')
+                            ? t('generations.cellGenerating')
+                            : t(voiceTrack ? 'storyboards.regenVoiceHint' : 'storyboards.genVoiceHint')}
                         </TooltipContent>
                       </Tooltip>
                     )}
@@ -460,7 +517,7 @@ export function StoryboardCard({
                 frameScore={taskQc('IMAGE')}
                 clipScore={taskQc('VIDEO')}
                 qcThreshold={qcThreshold}
-                hasClip={Boolean(storyboard.video)}
+                hasClip={Boolean(clip)}
                 characters={characters}
               />
               <ShotHistory
@@ -469,8 +526,14 @@ export function StoryboardCard({
                 canRetry={Boolean(onRegenerateStage)}
                 canPin={canWrite}
                 qcThreshold={qcThreshold}
+                voiceLive={voiceLive}
                 busy={shotBusy}
-                onRetry={stage => onRegenerateStage?.(storyboard.id, stage)}
+                onRetry={stage =>
+                  // 履历里能出现重试入口的行必然是失败行：那一步真跑过、欠一次重做，
+                  // 所以它恒走覆盖重跑，不看这一格现在有没有产物（产物缺失时「只补缺」
+                  // 会撞回同一条在途提交，等于把这一步的出口又锁一次）。
+                  onRegenerateStage?.(storyboard.id, stage, true)
+                }
                 onPin={artifactId => onPinVideo?.(artifactId)}
               />
             </>
@@ -491,26 +554,44 @@ function dotLabel(state: DotState, t: TranslateFn): string {
 interface ShotMediaCellProps {
   storyboard: Storyboard
   stage: 'IMAGE' | 'VIDEO'
+  /** 这一格要放的产物：成片那一档由父层按「生效版 > 等你裁决的那一版」裁决后给进来。 */
+  artifact: GenerationArtifact | null | undefined
+  /** 只有停在「等你裁决」上的那一版时为中：格子里有画面，但它没过线、还没入片。 */
+  parked: boolean
   busy: boolean
   error: string | null
   editable: boolean
   blockedBy: boolean
-  onRegenerate(): void
+  onRegenerate(regenerate: boolean): void
   /** 片段真实时长，来自播放器；只有 VIDEO 会有。 */
   onClipDuration?(ms: number): void
 }
 
-function ShotMediaCell({ storyboard, stage, busy, error, editable, blockedBy, onRegenerate, onClipDuration }: ShotMediaCellProps) {
+function ShotMediaCell({ storyboard, stage, artifact, parked, busy, error, editable, blockedBy, onRegenerate, onClipDuration }: ShotMediaCellProps) {
   const { t } = useI18n()
-  const artifact = artifactOf(storyboard, stage)
   const Icon = SHOT_STAGE_ICONS[stage]
   const stageLabel = translateEnum(t, 'generations.stage', stage)
-  const busyLabel = stage === 'IMAGE' ? t('storyboards.regenningFrame') : t('storyboards.regenningClip')
+  // 这一格有没有产物，决定动词、请求与回执三处（SD-070）：「重生成首帧」这类第三种句式
+  // 全站只剩「生成「首帧」/重跑「首帧」」两个，且首生那一格不许说「重」。
+  const rerun = Boolean(artifact)
+  const busyWords = t('generations.cellGenerating')
+  // SD-167：红条说人话，报文进 Tooltip。「有可播的东西」与「停在等你裁决」必须分开说——
+  // 对着一条放得出来的成片写「这一镜还没有画面」，整张卡就都不能信了。
+  const failureCopy = mediaFailureCopy(t, stage === 'IMAGE' ? 'frame' : 'video', error, {
+    playable: Boolean(artifact),
+    parked,
+  })
   return (
     <div className="min-w-0">
       <p className="text-muted-foreground mb-1 flex items-center gap-1 text-xs font-medium">
         <Icon className="size-3.5" />
         {stageLabel}
+        {parked && (
+          // muted：它是「这一版等你放行」的事实，不是状态徽章的第三种颜色，也不是按钮。
+          <Badge variant="muted" className="ml-1 h-4 px-1.5 text-[10px] font-normal">
+            {t('workbench.awaitingDecision')}
+          </Badge>
+        )}
       </p>
       <div className="relative min-h-24 overflow-hidden rounded-lg border">
         {artifact ? (
@@ -526,7 +607,7 @@ function ShotMediaCell({ storyboard, stage, busy, error, editable, blockedBy, on
               <div className="bg-background/50 absolute inset-0 flex items-center justify-center backdrop-blur-sm">
                 <span className="text-primary inline-flex items-center gap-1.5 text-xs font-medium">
                   <LoaderCircleIcon className="size-3.5 animate-spin" />
-                  {busyLabel}
+                  {busyWords}
                 </span>
               </div>
             )}
@@ -536,18 +617,14 @@ function ShotMediaCell({ storyboard, stage, busy, error, editable, blockedBy, on
             {busy ? (
               <span className="text-primary inline-flex items-center gap-1.5">
                 <LoaderCircleIcon className="size-3.5 animate-spin" />
-                {busyLabel}
+                {busyWords}
               </span>
             ) : error ? (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="text-destructive line-clamp-2 px-2 text-center">
-                    {stage === 'IMAGE' ? t('storyboards.frameFailed') : t('storyboards.clipFailed')}:{error}
-                  </span>
+                  <span className="text-destructive line-clamp-2 px-2 text-center">{failureCopy}</span>
                 </TooltipTrigger>
-                <TooltipContent className="break-all">
-                  {stage === 'IMAGE' ? t('storyboards.frameFailed') : t('storyboards.clipFailed')}:{error}
-                </TooltipContent>
+                <TooltipContent className="break-all">{error}</TooltipContent>
               </Tooltip>
             ) : (
               t('generations.notGenerated')
@@ -558,13 +635,9 @@ function ShotMediaCell({ storyboard, stage, busy, error, editable, blockedBy, on
       {artifact && !busy && error && (
         <Tooltip>
           <TooltipTrigger asChild>
-            <p className="text-destructive mt-1 line-clamp-2 text-xs">
-              {stage === 'IMAGE' ? t('storyboards.frameFailed') : t('storyboards.clipFailed')}:{error}
-            </p>
+            <p className="text-destructive mt-1 line-clamp-2 text-xs">{failureCopy}</p>
           </TooltipTrigger>
-          <TooltipContent className="break-all">
-            {stage === 'IMAGE' ? t('storyboards.frameFailed') : t('storyboards.clipFailed')}:{error}
-          </TooltipContent>
+          <TooltipContent className="break-all">{error}</TooltipContent>
         </Tooltip>
       )}
       {editable && (
@@ -575,14 +648,18 @@ function ShotMediaCell({ storyboard, stage, busy, error, editable, blockedBy, on
               size="sm"
               className="mt-2 w-full"
               disabled={blockedBy}
-              onClick={onRegenerate}
+              onClick={() => onRegenerate(rerun)}
             >
               {busy ? <LoaderCircleIcon className="animate-spin" /> : <Icon />}
-              {busy ? busyLabel : stage === 'IMAGE' ? t('storyboards.regenFrame') : t('storyboards.regenClip')}
+              {busy
+                ? busyWords
+                : t(rerun ? 'workbench.rerunStage' : 'workbench.generateStage', { stage: stageLabel })}
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {stage === 'IMAGE' ? t('storyboards.regenFrameHint') : t('storyboards.regenClipHint')}
+            {stage === 'IMAGE'
+              ? t(rerun ? 'storyboards.regenFrameHint' : 'storyboards.genFrameHint')
+              : t(rerun ? 'storyboards.regenClipHint' : 'storyboards.genClipHint')}
           </TooltipContent>
         </Tooltip>
       )}

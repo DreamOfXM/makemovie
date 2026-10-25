@@ -6,6 +6,7 @@ import { PIPELINE_QUEUE, createPipelineQueue, enqueue, jobIdFor, type PipelinePa
 import { recordJobIntent } from '@studio/pipeline'
 import { FfmpegComposer, storageFrom } from '@studio/media'
 import { loadWorkerConfig } from './config.js'
+import { reclaimOrphanedSubmissions } from './reclaim-orphans.js'
 import type { PipelineDeps } from './deps.js'
 import { ModelQualityChecker } from './visual-audit.js'
 
@@ -79,9 +80,23 @@ const outboxSweeper = setInterval(() => {
   })
 }, OUTBOX_SWEEP_INTERVAL_MS)
 outboxSweeper.unref()
-sweepJobOutbox().catch(error => {
-  process.stderr.write(`job outbox startup sweep failed: ${error instanceof Error ? error.message : String(error)}\n`)
-})
+
+// SD-131 启动序:先把 outbox 里等待重推的投递补回队列,再做孤儿回收——顺序反了
+// 会把「马上会被重投并正常开跑」的任务误判成孤儿。回收只动查不到活作业的 RUNNING,
+// 正在被任何消费者处理的任务不受影响。
+void (async () => {
+  await sweepJobOutbox().catch(error => {
+    process.stderr.write(`job outbox startup sweep failed: ${error instanceof Error ? error.message : String(error)}\n`)
+  })
+  try {
+    const reclaimed = await reclaimOrphanedSubmissions(db, queue)
+    for (const orphan of reclaimed) {
+      process.stderr.write(`orphan reclaimed at boot: task ${orphan.taskId} attempt ${orphan.attempt} (${orphan.submissionRowsMarked} submission row(s) → submission_unknown)\n`)
+    }
+  } catch (error) {
+    process.stderr.write(`orphan reclaim failed: ${error instanceof Error ? error.message : String(error)}\n`)
+  }
+})()
 
 process.stdout.write('worker ready\n')
 

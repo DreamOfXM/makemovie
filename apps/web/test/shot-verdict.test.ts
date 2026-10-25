@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerationArtifact, ShotboardShot } from '@/lib/api'
+import type { GenerationArtifact, ShotVideoCandidate, ShotboardShot } from '@/lib/api'
 import { dictionaries, type Locale } from '@/lib/i18n'
-import { cardFailureCode, cardStage, isUnknownSubmission, productionWord, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
+import { cardFailureCode, cardStage, cloudVoiceEntersMaster, hasPlayablePicture, hasPlayableVideo, isUnknownSubmission, pictureParkedOnly, previewSurface, productionWord, retryWordForError, shotDemandText, shotFailureKind, shotVerdict, stageWord, stripIsEmpty } from '@/lib/shot-verdict'
 
 /**
  * 真文案，不是替身：断言直接读字典，所以键写错、少一门语言、或把「重抽无效」
@@ -24,6 +24,23 @@ const AUDIT_MISSED = 'visual-audit: threshold not met after 3 attempts'
 const MODERATION = '["dashscope/wan2.2-t2i-flash: DataInspectionFailed | Green net check rejected text (input)"]'
 
 const anArtifact = { id: 'artifact-keep' } as GenerationArtifact
+
+/** 停在「等你裁决」上的那一版：任务判退、问询没人答，播得出来但没进生效链（SD-168 真形）。 */
+function parkedClip(over: Partial<ShotVideoCandidate> = {}): ShotVideoCandidate {
+  return {
+    artifactId: 'v-parked',
+    taskId: 't-parked',
+    origin: 'generation',
+    version: 1,
+    mimeType: 'video/mp4',
+    durationMs: 4000,
+    createdAt: '2026-10-01T08:00:00.000Z',
+    selected: false,
+    qc: null,
+    awaitingDecision: true,
+    ...over,
+  }
+}
 
 function shot(over: Partial<ShotboardShot>): ShotboardShot {
   return {
@@ -67,8 +84,10 @@ function shot(over: Partial<ShotboardShot>): ShotboardShot {
     usage: null,
     slot: 'empty',
     production: 'video',
+    method: null,
     attention: [],
     storyboardGaps: [],
+    staleFirstFrameArtifactId: null,
     waitingSince: null,
     ...over,
   }
@@ -147,7 +166,7 @@ describe('失败归因', () => {
 
   it('待处理那句先报真因，再报这一镜手上还剩什么', () => {
     const kept = shot({ attention: ['frame_failed'], firstFrame: anArtifact, firstFrameError: QUOTA_CHAIN })
-    expect(shotDemandText(zh, kept, 'frame_failed')).toBe('上一版首帧还挂在这一镜上 · 模型额度已用尽 · 先充值或关闭「仅用免费额度」，再抽也不会变')
+    expect(shotDemandText(zh, kept, 'frame_failed')).toBe('上一版首帧还挂在这一镜上 · 模型额度已用尽 · 等额度窗口重置或在模型中心换一条连接，再抽也不会变')
 
     const empty = shot({ attention: ['video_failed'], videoError: ACCESS_DENIED })
     expect(shotDemandText(zh, empty, 'video_failed')).toBe('这一次没产出成片 · 模型拒绝本账号调用（AccessDenied）· 到模型中心换绑一个有权限的模型')
@@ -255,6 +274,28 @@ describe('提交状态未知的报文', () => {
  * （packages/media 的 planAudioBridges 与 AUDIO_BRIDGE_TAIL_MS，那边有真 ffmpeg 断言钉
  * 行为）。这里钉的是界面别重新骗人。
  */
+/**
+ * SD-189：不生效的旧档不挂付费入口。生效声档是「导入音频」时混音层只认导入件
+ * （compose manifest 的 audio 档同源），云端配音那一版永远不上片——它的「重跑「配音」」
+ * 每点一次真烧一次云端调用。这一枚判据是 preview-panel 收口三处入口（生成/重跑/钦定）
+ * 的唯一事实源；空台词镜被 domain 折进 'voice' 档（导入路另走），不在收口之列。
+ */
+describe('云端配音进不进母带（cloudVoiceEntersMaster）', () => {
+  it('钦定「导入音频」的镜：云端配音不进母带，付费重跑入口必须收口', () => {
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '你来了。', audioSource: 'IMPORTED' }))).toBe(false)
+  })
+
+  it('其余档照旧：配音在上片链上，生成/重跑/钦定入口一个不动', () => {
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '你来了。', audioSource: 'VOICE' }))).toBe(true)
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '你来了。', audioSource: 'VOICE_NATIVE' }))).toBe(true)
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '你来了。', audioSource: null }))).toBe(true)
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '', audioSource: 'NATIVE' }))).toBe(true)
+    // 无台词镜被 domain 折回 'voice'：它的「配音」走导入路，档位读数不含 imported，
+    // 收口判据不误伤（导入门另有自己的话，见 audio-source-row）。
+    expect(cloudVoiceEntersMaster(shot({ dialogue: '', audioSource: 'VOICE' }))).toBe(true)
+  })
+})
+
 describe('导入环境音的长短读数', () => {
   const bed = (key: string, audio: string, picture: string, gap: string) => zh(key, { audio, picture, gap })
 
@@ -273,5 +314,108 @@ describe('导入环境音的长短读数', () => {
   it('剧本点名的底，两处都带着那一列的原文', () => {
     expect(zh('shotboard.audio.ambienceAskedEmpty', { bed: '雨打铁皮棚', mode: '只用原声' })).toContain('雨打铁皮棚')
     expect(zh('shotboard.audio.ambienceAsked', { bed: '雨打铁皮棚' })).toContain('雨打铁皮棚')
+  })
+})
+
+/**
+ * SD-168（2026-10-24 镜头 #9 实拍）：那一版付费成片播得出来，只是被机器判退后停在
+ * 「等你裁决」上、没进生效链。旧判据只读生效链（shot.video / shot.firstFrame），于是
+ * 同一镜三处一起撒谎：红条「成片重抽没过线 · 这一镜还没有画面」、徽章「视频失败」、
+ * 放映条画斜纹，而播放器正在放 v1。
+ * 口径（任务 #238）：「有没有画面」按播不播得出来算，且三档不许压成一句话——
+ * 真的没有 / 有可播那一版但停在等你裁决 / 上一版还在生效。
+ */
+describe('有可播产物却没过线（SD-168）', () => {
+  const parked = () => shot({ attention: ['video_failed'], videoError: AUDIT_MISSED, videoCandidates: [parkedClip()] })
+
+  it('停在等你裁决的那一版算「有画面」：徽章是「重抽没过线」，不是「视频失败」', () => {
+    const board = parked()
+    const verdict = shotVerdict(board)
+    expect(cardStage(board, verdict)).toBe('retry')
+    expect(stageWord(zh, verdict, cardStage(board, verdict), false, shotFailureKind(board))).toBe('重抽没过线')
+    expect(hasPlayableVideo(board)).toBe(true)
+    expect(hasPlayablePicture(board)).toBe(true)
+  })
+
+  it('红条说「有可播的成片 · 等你裁决」，不再说「这一镜还没有画面」', () => {
+    const line = shotDemandText(zh, parked(), 'video_failed')
+    expect(line).toBe('这一镜有可播的成片 · 没过线，等你裁决')
+    expect(line).not.toContain('这一镜还没有画面')
+    // 也不是「上一版还在生效」那句：手上这条根本没上片，说「收下这一版」是另一件事。
+    expect(line).not.toContain('决定再抽一次还是收下')
+  })
+
+  it('认得出真因时先报还剩这一版可播，再报原因（三档不撞词）', () => {
+    expect(shotDemandText(zh, shot({ attention: ['video_failed'], videoError: ACCESS_DENIED, videoCandidates: [parkedClip()] }), 'video_failed')).toBe(
+      '这一镜还有一版可播的成片 · 模型拒绝本账号调用（AccessDenied）· 到模型中心换绑一个有权限的模型',
+    )
+    expect(shotDemandText(zh, shot({ attention: ['video_failed'], videoError: QUOTA_CHAIN, video: anArtifact }), 'video_failed')).toBe(
+      '上一版成片还挂在这一镜上 · 模型额度已用尽 · 等额度窗口重置或在模型中心换一条连接，再抽也不会变',
+    )
+    expect(pictureParkedOnly(shot({ attention: ['video_failed'], video: anArtifact, videoCandidates: [parkedClip()] }), 'video')).toBe(false)
+  })
+
+  it('首帧同一口径：可播那一版停在等你裁决时不说「还没有画面」', () => {
+    const board = shot({ attention: ['frame_failed'], firstFrameError: AUDIT_MISSED, frameCandidates: [parkedClip({ artifactId: 'f-parked', mimeType: 'image/png' })] })
+    expect(cardStage(board, shotVerdict(board))).toBe('retry')
+    expect(shotDemandText(zh, board, 'frame_failed')).toBe('这一镜有可播的首帧 · 没过线，等你裁决')
+    expect(pictureParkedOnly(board, 'frame')).toBe(true)
+  })
+
+  it('真的一件产物都没有时照旧说「还没有画面」「视频失败」，口径不许反向失守', () => {
+    const empty = shot({ attention: ['video_failed'], videoError: AUDIT_MISSED })
+    expect(hasPlayableVideo(empty)).toBe(false)
+    expect(cardStage(empty, shotVerdict(empty))).toBe('failed')
+    expect(stageWord(zh, shotVerdict(empty), 'failed')).toBe('视频失败')
+    expect(shotDemandText(zh, empty, 'video_failed')).toBe('成片重抽没过线 · 这一镜还没有画面')
+  })
+
+  it('「等你审」也按播不播得出来报：有可播那一版就说片段已出', () => {
+    expect(shotDemandText(zh, shot({ status: 'NEEDS_REVIEW', videoCandidates: [parkedClip()] }), 'awaiting_review')).toBe('片段已出，等你放行')
+    expect(shotDemandText(zh, shot({ status: 'NEEDS_REVIEW', frameCandidates: [parkedClip({ artifactId: 'f-only', mimeType: 'image/png' })] }), 'awaiting_review')).toBe('首帧已出，等你放行')
+    expect(shotDemandText(zh, shot({ status: 'NEEDS_REVIEW' }), 'awaiting_review')).toBe('这一镜等你验收后放行')
+  })
+
+  it('放映条：只有停在等你裁决那一版的镜不画斜纹（付费成片不许在时间轴上抹成空格）', () => {
+    const board = shot({ videoCandidates: [parkedClip()] })
+    const stage = cardStage(board, shotVerdict(board))
+    expect(stage).toBe('idle')
+    expect(stripIsEmpty(board, stage)).toBe(false)
+    expect(stripIsEmpty(shot({}), 'idle')).toBe(true)
+  })
+})
+
+/**
+ * SD-103（实拍 s6 镜头 #6）：头部那句「正看：视频片段」按 activeProduct 取值，画布却在
+ * 没有成片时自己回落显示首帧——同一块面板两句话互相否定。裁决挪进 previewSurface，
+ * 画布分支与头部读同一份，这里钉的是裁决本身的四条边界。
+ */
+describe('大预览真正显示的那一件（previewSurface）', () => {
+  const framed = { firstFrame: anArtifact }
+
+  it('想看成片、这一镜没有成片 → 画布实际显示首帧，「正看」跟着改成首帧并记住回落来源', () => {
+    expect(previewSurface(framed, 'video', false, false)).toEqual({ shown: 'frame', fellBackFrom: 'video' })
+  })
+
+  it('成片在场（含停在等你裁决那一版）就报成片，不回落', () => {
+    expect(previewSurface(framed, 'video', true, false)).toEqual({ shown: 'video', fellBackFrom: null })
+  })
+
+  it('那一段正在产时不许改口报首帧：画布是那一档的生成中蒙版，否则蒙版转圈、头上说在看静帧', () => {
+    expect(previewSurface(framed, 'video', false, true)).toEqual({ shown: 'video', fellBackFrom: null })
+    expect(previewSurface(framed, 'audio', false, true)).toEqual({ shown: 'audio', fellBackFrom: null })
+  })
+
+  it('想看配音但没有配音、也没有首帧 → 画布是空态，「正看」不谎称在看首帧', () => {
+    expect(previewSurface({ firstFrame: null }, 'audio', false, false)).toEqual({ shown: 'audio', fellBackFrom: null })
+  })
+
+  it('想看配音、有首帧垫着 → 回落报首帧且来源记在配音（头部那句要自带原因，角标此时不亮）', () => {
+    expect(previewSurface(framed, 'audio', false, false)).toEqual({ shown: 'frame', fellBackFrom: 'audio' })
+  })
+
+  it('想看首帧永远不算回落：那一件就画在画布上', () => {
+    expect(previewSurface(framed, 'frame', false, false)).toEqual({ shown: 'frame', fellBackFrom: null })
+    expect(previewSurface({ firstFrame: null }, 'frame', false, false)).toEqual({ shown: 'frame', fellBackFrom: null })
   })
 })

@@ -745,7 +745,8 @@ function AssetCard({ asset, busy, phase, runError, onApprove, onRemoveVersion, o
         )}
         <span className="shrink-0">
           {thumb ? (
-            <ArtifactMedia artifact={thumb} label={asset.name} className="h-10 w-10 rounded object-cover" />
+            /* 整行是展开按钮：缩略图的失败条里不许嵌重试钮，重试在展开抽屉的大图上（SD-122）。 */
+            <ArtifactMedia retryless artifact={thumb} label={asset.name} className="h-10 w-10 rounded object-cover" />
           ) : (
             <span className="bg-muted flex size-10 items-center justify-center rounded">
               {phase === 'running' ? (

@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify'
 import type { Composition, GenerationBatch, GenerationTask, MediaArtifact, PrismaClient, QualityCheck, TaskStatus, WorkflowStatus } from '@studio/db'
 import { syncBatchStatus } from '@studio/db'
-import { COMPOSITION_STEP, QC_THRESHOLD, advancePipeline, buildGenerationPlan, createComposition, generationStages, isGenerationStage, liveStoryboards, parseGenerationReview, recordAssetVersion, toApiStage, triggerStage, type GenerationReviewSnapshot, type GenerationStage } from '@studio/pipeline'
+import { COMPOSITION_STEP, QC_THRESHOLD, advancePipeline, buildGenerationPlan, createComposition, episodeRetryBudget, generationStages, isGenerationStage, liveStoryboards, parseGenerationReview, recordAssetVersion, toApiStage, triggerStage, type GenerationReviewSnapshot, type GenerationStage } from '@studio/pipeline'
+import { classifyComposeBlock, type ComposeBlockKind } from '@studio/domain'
 import { recordAudit } from '../lib/audit.js'
 import { pipelineJobs } from '../lib/jobs.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -64,6 +65,9 @@ interface TaskDto {
   status: TaskStatus
   attempts: number
   provider: string | null
+  /** SD-082：用户起的连接名。任务行只存厂商，连接身份留在提交台账上；没有台账
+   *  （还没提交过 / 连接已删）时为 null，界面退回报厂商。 */
+  connectionName: string | null
   model: string | null
   error: string | null
   createdAt: Date
@@ -95,6 +99,9 @@ interface CompositionDto {
   /** The music bed actually mixed into this master, through the composition's own
    * lineage rather than "the newest score", so it cannot drift after a regenerate. */
   score: ArtifactDto | null
+  /** SD-177：这一轮合成为什么停在「已阻塞」。kind 是界面说人话的键，detail 是
+   * worker 原文（只进 Tooltip/展开行，不进正文）。 */
+  block: { kind: ComposeBlockKind; detail: string } | null
 }
 
 type TaskRow = GenerationTask & { mediaArtifacts: MediaArtifact[] }
@@ -141,7 +148,38 @@ async function latestChecks(db: PrismaClient, tasks: TaskRow[]): Promise<Quality
   return db.qualityCheck.findMany({ where: { artifactId: { in: artifactIds } }, orderBy: { id: 'desc' } })
 }
 
-function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
+/**
+ * SD-082：每个任务最后一次提交所用的连接名。任务行只记厂商，连接身份在提交台账上
+ * （`SubmissionAttempt.connectionId`，无外键），所以按任务取最新一条再回表查名字。
+ * 连接删掉后台账行还在——查不到名字就报 null，界面退回厂商，不编一个名字。
+ */
+async function latestConnectionNames(db: PrismaClient, tasks: TaskRow[]): Promise<Map<string, string>> {
+  if (tasks.length === 0) return new Map()
+  const attempts = await db.submissionAttempt.findMany({
+    where: { taskId: { in: tasks.map(task => task.id) }, connectionId: { not: null } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { taskId: true, connectionId: true },
+  })
+  const connectionByTask = new Map<string, string>()
+  for (const attempt of attempts) {
+    if (!attempt.taskId || !attempt.connectionId || connectionByTask.has(attempt.taskId)) continue
+    connectionByTask.set(attempt.taskId, attempt.connectionId)
+  }
+  if (connectionByTask.size === 0) return new Map()
+  const connections = await db.providerConnection.findMany({
+    where: { id: { in: [...new Set(connectionByTask.values())] } },
+    select: { id: true, name: true },
+  })
+  const nameById = new Map(connections.map(connection => [connection.id, connection.name]))
+  const names = new Map<string, string>()
+  for (const [taskId, connectionId] of connectionByTask) {
+    const name = nameById.get(connectionId)
+    if (name) names.set(taskId, name)
+  }
+  return names
+}
+
+function toTaskDto(task: TaskRow, checks: QualityCheck[], connectionName: string | null): TaskDto {
   const artifactIds = new Set(task.mediaArtifacts.map((artifact: MediaArtifact) => artifact.id))
   const own = checks.filter(candidate => candidate.artifactId !== null && artifactIds.has(candidate.artifactId))
   const [newest] = own
@@ -152,6 +190,7 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
     status: task.status,
     attempts: task.attempts,
     provider: task.provider,
+    connectionName,
     model: task.model,
     error: task.errorSnapshot,
     createdAt: task.createdAt,
@@ -165,12 +204,13 @@ function toTaskDto(task: TaskRow, checks: QualityCheck[]): TaskDto {
 }
 
 async function toTaskDtos(db: PrismaClient, tasks: TaskRow[]): Promise<TaskDto[]> {
-  const checks = await latestChecks(db, tasks)
-  return tasks.map(task => toTaskDto(task, checks))
+  const [checks, connectionNames] = await Promise.all([latestChecks(db, tasks), latestConnectionNames(db, tasks)])
+  return tasks.map(task => toTaskDto(task, checks, connectionNames.get(task.id) ?? null))
 }
 
 async function toBatchDtos(db: PrismaClient, batches: BatchRow[]): Promise<BatchDto[]> {
-  const checks = await latestChecks(db, batches.flatMap(batch => batch.tasks))
+  const tasks = batches.flatMap(batch => batch.tasks)
+  const [checks, connectionNames] = await Promise.all([latestChecks(db, tasks), latestConnectionNames(db, tasks)])
   return batches.map(batch => ({
     id: batch.id,
     stage: toApiStage(batch.stage),
@@ -179,7 +219,7 @@ async function toBatchDtos(db: PrismaClient, batches: BatchRow[]): Promise<Batch
     // GenerationBatch has no timestamp columns; the batch and its tasks are
     // written together, so the first task stamps the batch.
     createdAt: batch.tasks[0]?.createdAt ?? new Date(0),
-    tasks: batch.tasks.map(task => toTaskDto(task, checks)),
+    tasks: batch.tasks.map(task => toTaskDto(task, checks, connectionNames.get(task.id) ?? null)),
   }))
 }
 
@@ -204,6 +244,9 @@ async function toCompositionDto(db: PrismaClient, composition: Composition): Pro
     artifact: artifact ? toArtifactDto(artifact) : null,
     subtitle: subtitle ? toArtifactDto(subtitle) : null,
     score: score ? toArtifactDto(score) : null,
+    block: composition.status === 'BLOCKED' && composition.errorSnapshot
+      ? { kind: classifyComposeBlock(composition.errorSnapshot), detail: composition.errorSnapshot }
+      : null,
   }
 }
 
@@ -219,6 +262,17 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       if (!isGenerationStage(stage)) return reply.code(400).send({ error: `stage must be one of: ${generationStages.join(', ')}` })
       const durationDecisions = parseDurationDecisions(request.body?.durationDecisions)
       if (durationDecisions === null) return reply.code(400).send({ error: 'durationDecisions is malformed' })
+      // SD-175：时长缺口确认门过去只认「没有 storyboardIds」的整集触发，逐镜那一击
+      // 因此在零提示下把钱花在更短/更低分辨率的一档上（实测四镜重拍后掉到 720P / 5.37 s，
+      // 本集从此混了两种分辨率）。triggerStage 里那条 `!options.storyboardIds` 不在本
+      // agent 的可改范围内，这里用与它同源的只读预审把契约补上：状态码、错误码与
+      // reasons 形状逐字一致，界面只需一套确认逻辑，两条路径不会分叉。
+      const gapMs = await perShotDurationGap(app.db, auth.organizationId, request.params.episodeId, stage, {
+        storyboardIds: request.body?.storyboardIds,
+        regenerate: request.body?.regenerate === true,
+        acceptDurationGap: request.body?.acceptDurationGap === true,
+      })
+      if (gapMs !== null) return reply.code(409).send({ error: 'generations:durationGap', reasons: [`${Math.ceil(gapMs / 1000)}s`] })
       const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, request.params.episodeId, stage, {
         storyboardIds: request.body?.storyboardIds,
         assetIds: request.body?.assetIds,
@@ -229,9 +283,10 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         durationDecisions,
       })
       if (!result.ok) return reply.code(result.code).send({ error: result.error, ...(result.reasons ? { reasons: result.reasons } : {}) })
-      // created:false 是命中了已有幂等结果(同键已成功/已阻塞/停在问询),没有新任务也没有新花费。
-      // 客户端必须据此区分「已排队」和「什么都没发生」,否则 200 会被当成又一次成功提交。
-      return reply.code(result.created ? 201 : 200).send({ created: result.created, batch: await toBatchDto(app.db, result.batchId) })
+      // created/requeued 合起来才是这次点击的全部后果：created:false + requeued:0 才表示
+      // 命中已有幂等结果、一笔任务也没排（同键已成功/已阻塞/停在问询）。
+      // 只给一个布尔会把「失败任务已按当前绑定重排、正在烧钱」报成「什么都没发生」。
+      return reply.code(result.created ? 201 : 200).send({ created: result.created, requeued: result.requeued, batch: await toBatchDto(app.db, result.batchId) })
     },
   )
 
@@ -313,7 +368,10 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requirePermission('read') },
     async (request, reply) => {
       const auth = request.auth!
-      const episode = await findEpisodeInOrg(app.db, request.params.episodeId, auth.organizationId)
+      const episode = await app.db.episode.findFirst({
+        where: { id: request.params.episodeId, project: { organizationId: auth.organizationId } },
+        include: { project: true },
+      })
       if (!episode) return reply.code(404).send({ error: 'Episode not found' })
       const batches = await app.db.generationBatch.findMany({
         where: { episodeId: episode.id },
@@ -323,11 +381,16 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
         orderBy: { id: 'desc' },
       })
       const composition = await app.db.composition.findFirst({ where: { episodeId: episode.id }, orderBy: { id: 'desc' } })
+      // SD-170：本集重抽额度是活算值（与 worker 同一套 episodeRetryBudget）。
+      // 界面要展示「现在用了多少」就只能从这里读；任务快照里那份是那次裁决当时的
+      // 用量，把它印成现值就会在不同日子读出互相矛盾的数。
+      const retryBudget = await episodeRetryBudget(app.db, episode.id, episode.project)
       return {
         batches: await toBatchDtos(app.db, batches),
         composition: composition ? await toCompositionDto(app.db, composition) : null,
         // 质检线随数据一起下发:界面自己写死一份,worker 一改阈值界面就开始说谎。
         limits: { qcThreshold: QC_THRESHOLD },
+        retryBudget,
       }
     },
   )
@@ -378,18 +441,64 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
   // 与审计，没填就只记「谁在什么时候收下了」；两种都要把被豁免产物从待审改为通过，
   // 否则下游（首帧喂 i2v、成片合成）仍会把它当成未过审而拒用，豁免就成了一个只改标签
   // 不改行为的假动作。
-  app.post<{ Params: { taskId: string }; Body: { action?: string; reason?: string } }>(
+  //
+  // SD-179｜`rerun` 是「收下之后仍然不想要这一版」的那一刀：收下解锁了合成，却也把这一镜
+  // 钉成「已覆盖」——任务不再是 FAILED，重跑入口随之消失，而补跑那条路撞回同一幂等键
+  // （界面读成「这一镜已有一笔提交在途或待核对」）。于是收下坏版本＝永久锁死这一镜。
+  // 这里给的是出口：对**已经裁决为收下**的那一版再点一次重跑，走 regenerate 的新幂等键，
+  // 已settled的收下任务不再被当成在途。与「重跑「视频片段」」同一道缺口确认门，不改写
+  // 收下的记录——那一版为什么被收下，仍是履历里的事实。
+  app.post<{ Params: { taskId: string }; Body: { action?: string; reason?: string; acceptDurationGap?: boolean } }>(
     '/generations/tasks/:taskId/review',
     { preHandler: requirePermission('generation:trigger') },
     async (request, reply) => {
       const auth = request.auth!
       const action = request.body?.action
-      if (action !== 'retry' && action !== 'waive') return reply.code(400).send({ error: "action must be 'retry' or 'waive'" })
+      if (action !== 'retry' && action !== 'waive' && action !== 'rerun') {
+        return reply.code(400).send({ error: "action must be 'retry', 'waive' or 'rerun'" })
+      }
       const reason = request.body?.reason?.trim()
 
       const task = await app.db.generationTask.findFirst({ where: { id: request.params.taskId, organizationId: auth.organizationId } })
       if (!task) return reply.code(404).send({ error: 'task not found' })
       const review = parseGenerationReview(task.reviewSnapshot)
+
+      if (action === 'rerun') {
+        if (!review) return reply.code(409).send({ error: 'task has no review record' })
+        if (review.state !== 'waived') return reply.code(409).send({ error: 'rerun is only for a take a human has accepted' })
+        if (!task.storyboardId) return reply.code(409).send({ error: 'rerun works on shot-level tasks only' })
+        // 付费重跑必须带着人的方向：无方向盲抽是这条产品线的红线（与「调整这一镜」同一要求）。
+        if (!reason) return reply.code(400).send({ error: 'rerun:directionRequired' })
+        const batch = await app.db.generationBatch.findUnique({ where: { id: task.batchId }, select: { episodeId: true } })
+        if (!batch?.episodeId) return reply.code(409).send({ error: 'task has no episode to rerun in' })
+        const stage = toApiStage(task.stage)
+        // 与 POST /generations 同一道 SD-175 缺口门：同一个理由、同一个状态码，两条路不分叉。
+        const gapMs = await perShotDurationGap(app.db, auth.organizationId, batch.episodeId, stage, {
+          storyboardIds: [task.storyboardId],
+          regenerate: true,
+          acceptDurationGap: request.body?.acceptDurationGap === true,
+        })
+        if (gapMs !== null) return reply.code(409).send({ error: 'generations:durationGap', reasons: [`${Math.ceil(gapMs / 1000)}s`] })
+        const result = await triggerStage({ db: app.db, enqueueJob }, auth.organizationId, auth.userId, batch.episodeId, stage, {
+          storyboardIds: [task.storyboardId],
+          regenerate: true,
+          promptNote: reason.slice(0, 500),
+          acceptDurationGap: request.body?.acceptDurationGap === true,
+        })
+        if (!result.ok) return reply.code(result.code).send({ error: result.error, ...(result.reasons ? { reasons: result.reasons } : {}) })
+        await recordAudit(app.db, {
+          organizationId: auth.organizationId,
+          userId: auth.userId,
+          action: 'generation.rerunAfterWaive',
+          entityType: 'generation-task',
+          entityId: task.id,
+          payload: { batchId: result.batchId, stage, storyboardId: task.storyboardId, reason: reason.slice(0, 500) },
+        })
+        // created:false 只会发生在幂等命中上；对一条已settled的收下任务，这一击必然开新批次，
+        // 界面仍按同一段代码区分「已排队」与「什么都没发生」，不谎报。
+        return reply.code(result.created ? 201 : 200).send({ created: result.created, requeued: result.requeued, batch: await toBatchDto(app.db, result.batchId) })
+      }
+
       if (!review) return reply.code(409).send({ error: 'task has no pending review' })
       if (review.state !== 'pending') return reply.code(409).send({ error: 'review already decided' })
       if (task.status !== 'FAILED') return reply.code(409).send({ error: 'only failed tasks can be reviewed' })
@@ -471,6 +580,45 @@ export async function generationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(201).send({ composition: await toCompositionDto(app.db, composition) })
     },
   )
+}
+
+/**
+ * SD-175：逐镜重跑（storyboardIds 点名的 VIDEO 触发）要不要先让人确认时长缺口。
+ * 台账的口径是「逐镜重跑绕过时长/分辨率缺口门」——绕过的正是「这一镜已经买过一次、
+ * 现在按第二次价再买一遍」那条路径：第一次的档已在片里，第二次买到 5 s / 720P 就把
+ * 整集从承诺的时长与统一画幅上拽下来，而界面零提示。所以拦的判据是重买，不是首买
+ * （首买那一档由整集路径的门负责，逐镜补它会把「修单点」也一起卡死）。
+ *
+ * 让路给更硬的话：
+ * - 预审自身不放行 ⇒ 交回 triggerStage：缺首帧、剧本没批这类「根本跑不起来」的错
+ *   必须先上屏，缺口只是最后一道确认。
+ * - 这一批里还有超出单次时长上限、等人给决议的镜头 ⇒ 同样让路，触发端会报
+ *   generations:shotDurationOverflow / generations:shotNeedsSplit，那是这一镜的真问题。
+ * 只读一次计划，不建批次、不排队、不花钱。
+ */
+async function perShotDurationGap(
+  db: PrismaClient,
+  organizationId: string,
+  episodeId: string,
+  stage: GenerationStage,
+  options: { storyboardIds?: string[]; regenerate: boolean; acceptDurationGap: boolean },
+): Promise<number | null> {
+  if (stage !== 'VIDEO') return null
+  const storyboardIds = options.storyboardIds
+  if (!storyboardIds || storyboardIds.length === 0) return null
+  if (options.acceptDurationGap) return null
+  // 只有「这一镜已经有一版成功的视频」才算重买：没有成功版本时，这一击是在补片，
+  // 不是在把已有的档换掉。
+  const alreadyBilled = await db.generationTask.findFirst({
+    where: { organizationId, storyboardId: { in: storyboardIds }, stage: 'VIDEO', status: 'SUCCEEDED' },
+    select: { id: true },
+  })
+  if (!alreadyBilled) return null
+  const result = await buildGenerationPlan(db, organizationId, episodeId, 'VIDEO', { storyboardIds, regenerate: options.regenerate })
+  if (!result.ok) return null
+  if (result.plan.durationPreflight.length > 0) return null
+  const gapMs = result.plan.durationGapMs ?? 0
+  return gapMs > 0 ? gapMs : null
 }
 
 /** Live shots that own two or more succeeded clips and no human pick: the gate's subjects. */

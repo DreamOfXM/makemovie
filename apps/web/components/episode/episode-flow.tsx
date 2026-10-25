@@ -5,6 +5,8 @@ import { toast } from 'sonner'
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon, LoaderCircleIcon, MoreVerticalIcon, PlayIcon, SparklesIcon } from 'lucide-react'
 import { ApiError, isLiveStoryboard, toWorkflowStatus, type EpisodeComposition, type GenerationBatch, type GenerationPlan, type GenerationStage, type ShotDurationDecision, type Storyboard } from '@/lib/api'
 import { translateEnum, type TranslateFn, useI18n } from '@/lib/i18n'
+import { FAILURE_CAUSE_KEY } from '@/lib/failure-cause'
+import { classifyFailure } from '@studio/domain'
 import { shotOwesVoice, shotVoiceTrack } from '@/lib/shot-verdict'
 import { useSession } from '@/lib/session'
 import { useAsync } from '@/lib/use-async'
@@ -19,7 +21,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { PlanDialog } from '@/components/generations/plan-dialog'
 import { apiErrorMessage } from '@/lib/api-error'
 
-const STEP_KEYS = ['source', 'script', 'assets', 'storyboards', 'media', 'composition', 'delivery'] as const
+// storyboards 排在 assets 前面不是排版选择，而是门禁本身（SD-022）：
+// PIPELINE_STAGES 里 STORYBOARD 先于 ASSET，分镜没被逐镜读完并整批批准之前，
+// 素材阶段不该「轮到你」。firstIncomplete 按本数组顺序扫描，顺序即流程真相。
+const STEP_KEYS = ['source', 'script', 'storyboards', 'assets', 'media', 'composition', 'delivery'] as const
 export type StepKey = (typeof STEP_KEYS)[number]
 type StepStatus = 'done' | 'current' | 'todo'
 
@@ -58,7 +63,35 @@ interface ProgressData {
   compositionCompleted: boolean
   /** 交付是人工签收动作：只有 status=APPROVED 的交付才算过，草稿行只证明生成过一份清单。 */
   deliveryAccepted: boolean
+  /** 最近一次 STORYBOARD 批次（端点按新→旧返回，取第一条即可）：SD-020 的失败信号
+   *  就藏在这里——rollUpBatchStatus 把任何 FAILED/BLOCKED 任务归成 BLOCKED 批次。 */
+  storyboardBatch: { status: string; error: string | null } | null
   unsettled: boolean
+}
+
+/** 活体镜头里还没被人工整批批准的那些（status≠APPROVED）。批准走
+ *  POST /episodes/:id/storyboard-status——审批是签收，不借道逐镜状态机。 */
+export function shotsAwaitingApproval(live: Storyboard[]): Storyboard[] {
+  return live.filter(storyboard => toWorkflowStatus(storyboard.status) !== 'approved')
+}
+
+/**
+ * SD-020：最近一次分镜批次是不是「最新一次尝试失败了」。批次由
+ * rollUpBatchStatus 归位，FAILED/BLOCKED 任务都会把整批顶成 BLOCKED；
+ * FAILED 一并认，防旧数据。COMPLETED / RUNNING / NEEDS_REVIEW 都不算失败——
+ * 在途批次由 unsettled 说话，部分取消不是「分镜生成不出来」。
+ */
+export function storyboardBatchFailure(batch: { status: string; error: string | null } | null): { error: string | null } | null {
+  if (!batch) return null
+  if (batch.status !== 'BLOCKED' && batch.status !== 'FAILED') return null
+  return { error: batch.error }
+}
+
+/** 分镜批次失败的人话（SD-020）。认得出因的按因说（复用全站 failure.cause.*），
+ *  认不出退回一句通用文案——原始报文只进 Tooltip，绝不上屏当正文。 */
+export function storyboardFailureCopy(t: TranslateFn, raw: string | null): string {
+  const causeKey = FAILURE_CAUSE_KEY[classifyFailure(raw)]
+  return causeKey ? t(causeKey) : t('stepper.storyboardBatchFailed.fallback')
 }
 
 /**
@@ -91,11 +124,17 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
       api<{ versions: Array<{ status: string }> }>(`/episodes/${episodeId}/source-versions`),
       api<{ versions: Array<{ status: string }> }>(`/episodes/${episodeId}/script-versions`),
       api<{ assets: Array<{ status: string; usageCount?: number; versions: Array<{ id: string }> }> }>(`/episodes/${episodeId}/assets`),
-      api<{ batches: Array<{ stage: string; tasks: Array<{ status: string }> }>; composition: { status: string } | null }>(
-        `/episodes/${episodeId}/generations`,
-      ),
+      api<{
+        batches: Array<{ stage: string; status: string; tasks: Array<{ status: string; error: string | null }> }>
+        composition: { status: string } | null
+      }>(`/episodes/${episodeId}/generations`),
       api<{ deliveries: Array<{ status: string }> }>(`/episodes/${episodeId}/deliveries`),
     ])
+    // 端点按 id 降序返回全部批次（cuid 即时间序），第一条 STORYBOARD 就是最近一次分镜尝试。
+    // 失败原因取批次内第一条 FAILED/BLOCKED 任务的 error——批次状态已把这一步
+    // 定性为「等人」，这里只负责把「等人来修什么」的那句话带出来。
+    const [storyboardBatch] = generations.batches.filter(batch => batch.stage === 'STORYBOARD')
+    const failedTask = storyboardBatch?.tasks.find(task => task.status === 'FAILED' || task.status === 'BLOCKED')
     return {
       sourceApproved: sources.versions.some(version => version.status === 'APPROVED'),
       scriptApproved: scripts.versions.some(version => version.status === 'APPROVED'),
@@ -111,6 +150,7 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
       musicAttempted: generations.batches.some(batch => batch.stage === 'MUSIC'),
       compositionCompleted: generations.composition?.status === 'COMPLETED',
       deliveryAccepted: deliveries.deliveries.some(delivery => delivery.status === 'APPROVED'),
+      storyboardBatch: storyboardBatch ? { status: storyboardBatch.status, error: failedTask?.error ?? null } : null,
       // Anything still in flight: the worker relays from a finished batch straight
       // into planning the next one, so a task that is queued or running — or a
       // composition being built — means the progress below is not the final word yet.
@@ -145,13 +185,19 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
   // 首帧失败的镜头不再单独算视频失败——一次只报最靠前的那个数，与总览缺口队列同一优先级。
   const frameFailed = live.filter(storyboard => Boolean(storyboard.firstFrameError))
   const clipFailed = live.filter(storyboard => !storyboard.firstFrameError && Boolean(storyboard.videoError))
+  // SD-022：分镜这一步的「完成」不是「有行」，是「每一行都被读过并整批批准」。
+  // 63 行全 DRAFT 却直通素材阶段，等于流水线替人签了字。
+  const pendingApproval = shotsAwaitingApproval(live)
+  // SD-020：最近一次分镜批次失败——旧版镜头还在那儿，但新剧本的分镜没生成出来，
+  // 这一步不能安静地读成「已完成」。
+  const batchFailure = storyboardBatchFailure(data?.storyboardBatch ?? null)
 
   const done: Record<StepKey, boolean> = {
     source: data?.sourceApproved ?? false,
     script: data?.scriptApproved ?? false,
     // 与首帧阶段的素材门禁同一语义:被镜头引用的素材全部定稿,这一步才算过。
     assets: (data?.pendingReferencedAssets ?? 0) === 0,
-    storyboards: live.length > 0,
+    storyboards: live.length > 0 && pendingApproval.length === 0 && batchFailure === null,
     // A shot is not finished until both its picture and its voice exist, so the two
     // stages the media table shows are settled together. A shot list with no lines
     // owes no voice and only becomes handled once the score ran or a master exists,
@@ -182,7 +228,15 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
         ? { kind: 'review', anchor: 'script', labelKey: 'stepper.action.reviewScript' }
         : { kind: 'generate', stage: 'SCRIPT', labelKey: 'stepper.action.generateScript' }
     } else if (live.length === 0) nextAction = { kind: 'generate', stage: 'STORYBOARD', labelKey: 'stepper.action.generateStoryboard' }
-    else if (data.assetImagesMissing > 0) {
+    else if (pendingApproval.length > 0) {
+      // 整批批准是人工签收：跳转去分镜卡区的「全部通过」，不是发令——批准不花钱，
+      // 但决定权必须在读完镜头的人手里（SD-022）。
+      nextAction = { kind: 'review', anchor: 'storyboards', labelKey: 'stepper.action.reviewStoryboards', count: pendingApproval.length }
+    } else if (batchFailure !== null) {
+      // 失败重试要花钱（重出一版整集分镜），所以这里也只是跳转，把那一下按下留给
+      // 分镜卡上「重新分镜」的确认弹窗（SD-020）。
+      nextAction = { kind: 'review', anchor: 'storyboards', labelKey: 'stepper.action.retryStoryboard' }
+    } else if (data.assetImagesMissing > 0) {
       // 缺图不是缺审批：连参考图都没有，审批无从下手，这一步的唯一出路是去素材区批量生成。
       // 仍是跳转不是发令——每张图都花计费次数，钱的动作留在那块面板上，由人按下。
       nextAction = { kind: 'review', anchor: 'assets', labelKey: 'stepper.action.generateAssetImages', count: data.assetImagesMissing }
@@ -208,7 +262,16 @@ export function useEpisodeProgress(episodeId: string | null, storyboards: Storyb
     }
   }
 
-  return { loading, steps, nextStep: firstIncomplete, nextAction, unsettled: data?.unsettled ?? false, reload }
+  return {
+    loading,
+    steps,
+    nextStep: firstIncomplete,
+    nextAction,
+    unsettled: data?.unsettled ?? false,
+    pendingApproval: pendingApproval.length,
+    batchFailure,
+    reload,
+  }
 }
 
 /**
@@ -274,7 +337,7 @@ interface EpisodeFlowProps {
 export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAdvanced, children }: EpisodeFlowProps) {
   const { t, locale } = useI18n()
   const { api, can } = useSession()
-  const { loading, steps, nextStep, nextAction, unsettled, reload } = useEpisodeProgress(episodeId, storyboards)
+  const { loading, steps, nextStep, nextAction, unsettled, pendingApproval, batchFailure, reload } = useEpisodeProgress(episodeId, storyboards)
   const [advancing, setAdvancing] = useState(false)
   const [runningAction, setRunningAction] = useState(false)
   const [openDone, setOpenDone] = useState(false)
@@ -502,6 +565,8 @@ export function EpisodeFlow({ episodeId, storyboards, blocks, revealTarget, onAd
             nextAction={nextAction}
             unsettled={unsettled}
             runningAction={runningAction}
+            pendingApproval={pendingApproval}
+            batchFailure={batchFailure}
             storyboards={storyboards}
             canTrigger={can('generation:trigger')}
             advancing={advancing}
@@ -602,6 +667,10 @@ interface TurnCardProps {
   runningAction: boolean
   advancing: boolean
   canTrigger: boolean
+  /** 活体镜头里没被整批批准的条数（SD-022）：当前步是分镜时，下一步那句话按它说。 */
+  pendingApproval: number
+  /** 最近一次 STORYBOARD 批次的失败信号（SD-020）：null = 没有失败要说。 */
+  batchFailure: { error: string | null } | null
   storyboards: Storyboard[]
   openRail: boolean
   onToggleRail: () => void
@@ -624,6 +693,8 @@ function TurnCard({
   runningAction,
   advancing,
   canTrigger,
+  pendingApproval,
+  batchFailure,
   storyboards,
   openRail,
   onToggleRail,
@@ -654,7 +725,15 @@ function TurnCard({
             <h2 className="mt-0.5 truncate text-base font-semibold">
               {nextStep ? t('stepper.stepOf', { index: stepIndex, step: t(`stepper.step.${nextStep}`) }) : t('stepper.allDone')}
             </h2>
-            {nextStep && <p className="text-muted-foreground mt-1 text-sm">{t(`stepper.next.${nextStep}`)}</p>}
+            {nextStep && (
+              <p className="text-muted-foreground mt-1 text-sm">
+                {/* SD-022：分镜在册但没人批准时，这一步等的是一次签收，不是一次生成——
+                    那句「把剧集拆成分镜」会把读完了的人绕回去重拆。 */}
+                {nextStep === 'storyboards' && pendingApproval > 0
+                  ? t('stepper.next.storyboardsAwaitingApproval', { count: pendingApproval })
+                  : t(`stepper.next.${nextStep}`)}
+              </p>
+            )}
             {parts.length > 0 && <p className="text-faint-foreground mt-1 text-xs tabular-nums">{parts.join(' · ')}</p>}
           </div>
           {canTrigger && (
@@ -673,6 +752,31 @@ function TurnCard({
             </DropdownMenu>
           )}
         </div>
+
+        {batchFailure && (
+          // SD-020：失败的批次过去在流程页永远不出现——红条挂在这张从不折叠的卡上，
+          // 人话原因进正文、原始报文只进 Tooltip，重试入口是跳回分镜卡的「重新分镜」，
+          // 不是在这里替人按下那一下要花钱的按钮。
+          <div className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <p className="text-destructive cursor-help text-xs font-medium">{t('stepper.storyboardBatchFailed.title')}</p>
+                </TooltipTrigger>
+                {batchFailure.error && <TooltipContent className="max-w-md break-all">{batchFailure.error}</TooltipContent>}
+              </Tooltip>
+              <p className="text-muted-foreground mt-0.5 text-xs">{storyboardFailureCopy(t, batchFailure.error)}</p>
+            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" onClick={() => onRunAction({ kind: 'review', anchor: 'storyboards', labelKey: 'stepper.action.retryStoryboard' })}>
+                  {t('stepper.action.retryStoryboard')}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('stepper.jumpHint')}</TooltipContent>
+            </Tooltip>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           {nextAction && (

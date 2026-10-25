@@ -37,6 +37,7 @@ function capability(model: string, provider = 'dashscope'): Capability {
     credentialVerifiedAt: '2026-09-20T00:00:00.000Z',
     lastProbedAt: '2026-09-20T00:00:00.000Z',
     spec: null,
+    specSource: 'catalog',
     durationEvidence: null,
     connection: { id: `conn-${provider}`, provider, name: provider, enabled: true },
   } as Capability

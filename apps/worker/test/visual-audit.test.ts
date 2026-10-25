@@ -6,11 +6,12 @@ import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PrismaClient } from '@studio/db'
 import { probeDuration } from '@studio/media'
+import { ASSET_LAYOUT_BLOCKS_BY_KIND, ASSET_REFERENCE_SPECS_BY_KIND } from '@studio/pipeline'
 import { MOCK_VLM_VERDICT, resetDashScopeSyncResults } from '@studio/providers'
 import { encryptSecret } from '@studio/security'
 import { loadWorkerConfig } from '../src/config.js'
 import { HashQualityChecker, QC_THRESHOLD, auditPlanFor, type AuditFinding, type AuditFrameScore, type QcSubject, type QualityChecker } from '../src/qc.js'
-import { AUDIT_CALL_BUDGET_PER_TASK, AUDIT_FRAME_POSITIONS, ModelQualityChecker, auditImages, buildAuditPrompt, parseVerdict } from '../src/visual-audit.js'
+import { AUDIT_CALL_BUDGET_PER_TASK, AUDIT_FRAME_POSITIONS, ModelQualityChecker, auditExpectation, auditImages, buildAuditPrompt, parseVerdict } from '../src/visual-audit.js'
 import { MASTER_KEY } from './env.js'
 
 const run = promisify(execFile)
@@ -54,6 +55,9 @@ The image is a single frame taken from the middle of the generated clip. You can
 在此之上再判断通用缺陷:是否呈现了生成指令描述的场景,有无明显瑕疵(模糊、肢体扭曲、乱码文字、主体缺失或重复、压缩噪点)。
 Reply with JSON only and no surrounding prose: {"score": <number between 0 and 1>, "reasons": ["<short reason>", ...]}
 A score of ${QC_THRESHOLD} or above means the artifact is usable.`
+
+/** 一份真实的角色板生成 prompt：规格行就是审核端反查 kind 的指纹（SD-042）。 */
+const CHARACTER_SHEET_PROMPT = `角色设定板：陈默。沉默的搬尸工\n\n${ASSET_REFERENCE_SPECS_BY_KIND.character}`
 
 function subject(overrides: Partial<QcSubject> = {}): QcSubject {
   return {
@@ -197,6 +201,43 @@ describe('parseVerdict', () => {
   it('accepts the exact ends of the range', () => {
     expect(parseVerdict('{"score":0}')).toEqual({ score: 0, reasons: [] })
     expect(parseVerdict('{"score":1}')).toEqual({ score: 1, reasons: [] })
+  })
+})
+
+/**
+ * SD-042：素材板审核必须逐项回答版式清单。2026-10-21 实测里，一张裸半身照与五区块
+ * 齐全的角色板拿到同分同空 findings（0.95 / 0.95）——清单不存在时，「版式不成立」
+ * 没有任何地方能说出来。这一组钉住：清单从生成端的规格行反查（不另抄一份）、
+ * 只认 present:true、漏答区块就是缺、整段没答是没审。
+ */
+describe('素材板版式核对（SD-042）', () => {
+  const blocks = ASSET_LAYOUT_BLOCKS_BY_KIND.character!
+  const expectation = { layoutBlocks: blocks, expectedReadout: null, forbidsReadableText: false }
+
+  it('从生成端写进 prompt 的规格行反查该 kind 的清单，不另抄一份', () => {
+    expect(auditExpectation({ prompt: CHARACTER_SHEET_PROMPT })).toEqual(expectation)
+    expect(auditExpectation({ prompt: ASSET_REFERENCE_SPECS_BY_KIND.scene! }).layoutBlocks).toEqual(ASSET_LAYOUT_BLOCKS_BY_KIND.scene)
+    expect(auditExpectation({ prompt: 'a rainy night market' }).layoutBlocks).toEqual([])
+  })
+
+  it('只认 present:true 的确认，漏答的区块就是缺', () => {
+    const layout = blocks.map((block, index) => ({ block, present: index !== 4 }))
+    const verdict = parseVerdict(JSON.stringify({ score: 0.95, reasons: [], layout }), [], expectation)
+    expect(verdict?.layoutGaps).toEqual([blocks[4]])
+    expect(verdict?.layoutUnanswered).toBeUndefined()
+  })
+
+  it('区块名的编号与空格重排不影响比对', () => {
+    const layout = blocks.map(block => ({ block: block.replace(/^[①②③④⑤]/, '').replace(/ /g, ''), present: true })).reverse()
+    const verdict = parseVerdict(JSON.stringify({ score: 0.95, reasons: [], layout }), [], expectation)
+    expect(verdict?.layoutGaps).toBeUndefined()
+    expect(verdict?.layoutUnanswered).toBeUndefined()
+  })
+
+  it('整段没答清单是没审，不是缺区块', () => {
+    const verdict = parseVerdict('{"score":0.95,"reasons":[]}', [], expectation)
+    expect(verdict).toMatchObject({ score: 0.95, layoutUnanswered: true })
+    expect(verdict?.layoutGaps).toBeUndefined()
   })
 })
 
@@ -452,6 +493,52 @@ describe('ModelQualityChecker against a bound auditor', () => {
     const verdict = await auditor(unboundAuditorDb()).check(subject({ referenceDataUrl: REFERENCE_DATA_URL }))
     expect(verdict).toEqual({ kind: 'visual-audit', decision: 'unjudged', reasons: ['no verified visual_audit binding'] })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  // SD-042：审美分再高也不能替版式作保。这张回答五官与质感都给了满分，
+  // 但第五区块（表情集）缺席——裸半身照正是这样骗过旧审核的。
+  it('rejects a sheet missing a required block however clean the score says it looks', async () => {
+    const blocks = ASSET_LAYOUT_BLOCKS_BY_KIND.character!
+    fetchMock.mockResolvedValue(answeredWith(JSON.stringify({
+      score: 0.95,
+      reasons: [],
+      layout: blocks.map((block, index) => ({ block, present: index !== 4 })),
+    })))
+    const verdict = await auditor().check(subject({ prompt: CHARACTER_SHEET_PROMPT }))
+
+    const gap = `版式缺区块：${blocks[4]}`
+    expect(verdict).toEqual({
+      kind: 'visual-audit',
+      decision: 'rework',
+      score: 0.95,
+      reasons: [gap],
+      findings: [{ dimension: 'content', severity: 'warning', message: gap, evidenceTimeSeconds: null }],
+    })
+    // 清单是发出去问过的，不是只在解析端存在。
+    const sent = sentRequest().prompt
+    expect(sent).toContain('版式核对（最高优先级，逐项回答 layout）')
+    expect(sent).toContain('"layout": [{"block"')
+    expect(sent).toContain(blocks[4])
+  })
+
+  it('reports an unanswered layout as unjudged instead of passing the high score through', async () => {
+    fetchMock.mockResolvedValue(answeredWith('{"score":0.95,"reasons":[]}'))
+    const verdict = await auditor().check(subject({ prompt: CHARACTER_SHEET_PROMPT }))
+    expect(verdict.kind).toBe('visual-audit')
+    expect(verdict.decision).toBe('unjudged')
+    expect((verdict as { reasons: string[] }).reasons[0]).toContain('未回答版式清单')
+    expect((verdict as { reasons: string[] }).reasons[0]).toContain('要求逐项确认 5 个区块')
+  })
+
+  it('passes the sheet once every block is confirmed and the score clears the floor', async () => {
+    const blocks = ASSET_LAYOUT_BLOCKS_BY_KIND.character!
+    fetchMock.mockResolvedValue(answeredWith(JSON.stringify({
+      score: 0.9,
+      reasons: [],
+      layout: blocks.map(block => ({ block, present: true })),
+    })))
+    expect(await auditor().check(subject({ prompt: CHARACTER_SHEET_PROMPT })))
+      .toEqual({ kind: 'visual-audit', decision: 'pass', score: 0.9 })
   })
 })
 

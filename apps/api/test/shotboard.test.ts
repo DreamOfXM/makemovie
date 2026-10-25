@@ -5,6 +5,12 @@ let env: TestEnv
 
 const authHeaders = (token: string) => env.authHeaders(token)
 
+interface QcReadingsWire {
+  frameScores?: { position: number; score: number }[]
+  structureDrift?: { measured: boolean; earlyLateDistance: number | null; firstMidDistance: number | null; maxStepDistance: number | null; sampleSeconds: number[] } | null
+  auditRepetition?: { matchedArtifactId: string | null; pictureDistance: number | null; status: string } | null
+}
+
 interface ShotboardShot {
   id: string
   number: number
@@ -25,12 +31,15 @@ interface ShotboardShot {
   firstFrameError: string | null
   videoError: string | null
   inflight: string[]
-  qc: { kind: string; status: string; score: number | null }[]
+  qc: (QcReadingsWire & { kind: string; status: string; score: number | null })[]
   selectedVideoArtifactId: string | null
-  videoCandidates: { artifactId: string; taskId: string; version: number; mimeType: string; durationMs: number | null; createdAt: string; selected: boolean; awaitingDecision?: boolean; qc: { kind: string; status: string; score: number | null; reasons?: string[] } | null }[]
+  videoCandidates: { artifactId: string; taskId: string; version: number; mimeType: string; durationMs: number | null; createdAt: string; selected: boolean; awaitingDecision?: boolean; qc: (QcReadingsWire & { kind: string; status: string; score: number | null; reasons?: string[] }) | null }[]
   usage: { inputUnits: number; outputUnits: number; models: string[]; calls: number } | null
   slot: string
   attention: string[]
+  /** 分镜文本逐镜软检（storyboard-gaps.ts）：只提示不拦路，开烧前把付费产物跑偏的
+   *  已知原因摆出来。空数组 = 这一镜的文字没被挑出问题。 */
+  storyboardGaps: string[]
 }
 
 interface ShotboardCastAsset {
@@ -159,6 +168,36 @@ describe('GET /episodes/:episodeId/shotboard', () => {
     expect(shot2.slot).toBe('running')
     expect(shot2.usage).toBeNull()
     expect(shot2.attention).toEqual([])
+  })
+
+  it('SD-123：零绑定的实拍镜在开烧前就被点名，绑上素材后这条消失', async () => {
+    // #23/#25 两次付费重抽买回的都是模型自己编的道具：素材叫「床头钟」，那一镜只绑了
+    // 「卧室」，界面在开烧前看不出任何异常。这条判据只陈述「一个素材都没绑」这一事实，
+    // 不替人判断该绑谁；绑上任何一条素材（哪怕绑错了）都会让它消失，所以判据必须与
+    // 绑定接口共用同一份数据。
+    const source = await env.db.episode.findUnique({ where: { id: episodeId }, select: { projectId: true } })
+    const solo = await env.app.inject({ method: 'POST', url: `/api/projects/${source!.projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 2, title: 'SD-123' } })
+    expect(solo.statusCode).toBe(201)
+    const soloId = solo.json().id as string
+    const created = await env.app.inject({
+      method: 'POST', url: `/api/episodes/${soloId}/storyboards`, headers: authHeaders(ownerToken),
+      payload: { number: 1, title: '钟体入水', durationMs: 4000, description: '（特写·侧面·跟随）钟体脱离手掌飞向水面' },
+    })
+    expect(created.statusCode).toBe(201)
+    const shotId = created.json().id as string
+    const prop = await env.db.asset.create({ data: { episodeId: soloId, kind: 'prop', name: '床头钟', description: '木质床头钟', status: 'APPROVED' } })
+
+    const before = await shotboard(ownerToken, soloId)
+    expect(before.body.shots.find(shot => shot.id === shotId)!.storyboardGaps).toContain('no_asset_binding')
+
+    const bound = await env.app.inject({
+      method: 'PUT', url: `/api/storyboards/${shotId}/assets`, headers: authHeaders(ownerToken),
+      payload: { assets: [{ assetId: prop.id }] },
+    })
+    expect(bound.statusCode).toBe(200)
+
+    const after = await shotboard(ownerToken, soloId)
+    expect(after.body.shots.find(shot => shot.id === shotId)!.storyboardGaps).not.toContain('no_asset_binding')
   })
 
   it('reads back the transition the workbench writes, and clamps the length it asks for', async () => {
@@ -445,6 +484,23 @@ describe('shotboard parked takes and the accept path', () => {
     expect(shot.attention).not.toContain('selection_open')
   })
 
+  it('tells the flow page the same truth: no effective clip, but a clip that exists', async () => {
+    // SD-168：流程页的分镜 DTO 过去只认 SUCCEEDED，于是同一张卡上「成片重抽没过线」
+    // 与读数「还没有成片」并存。读数要分得开「根本没有」和「有但停在等你裁决」，
+    // 这一格就必须随 DTO 下发——生效位仍然空着，两边不许反过来。
+    const flow = await env.app.inject({
+      method: 'GET',
+      url: `/api/episodes/${episodeId}/storyboards`,
+      headers: authHeaders(ownerToken),
+    })
+    expect(flow.statusCode).toBe(200)
+    const shot = (flow.json() as { id: string; video: { id: string } | null; videoParked: { id: string } | null; videoError: string | null }[])
+      .find(item => item.id === parkedShotId)
+    expect(shot?.video).toBeNull()
+    expect(shot?.videoParked).toMatchObject({ id: parkedClipId })
+    expect(shot?.videoError).toContain('awaiting review')
+  })
+
   it('refuses to pin the parked take, then accepts it into a usable version', async () => {
     const rejected = await select({ artifactId: parkedClipId })
     expect(rejected.statusCode).toBe(400)
@@ -465,5 +521,71 @@ describe('shotboard parked takes and the accept path', () => {
     // 收下之后它才成为可选版本：钦定不再被拒，质检也从待审转通过。
     expect((await select({ artifactId: parkedClipId })).statusCode).toBe(200)
     expect((await env.db.qualityCheck.findFirstOrThrow({ where: { artifactId: parkedClipId } })).status).toBe('APPROVED')
+  })
+})
+
+/**
+ * SD-081：worker 把逐帧分、结构漂移与复印件读数都写进了 report，接口过去只交出分数，
+ * 屏上于是只剩一个数。这里钉住三份读数随候选抵达，以及读不出的报文仍照常出候选。
+ */
+describe('shotboard QC readings', () => {
+  it('serves the three readings per candidate and leaves unreadable reports without them', async () => {
+    const batch = await env.db.generationBatch.create({ data: { organizationId, episodeId, stage: 'VIDEO', plannedCount: 1 } })
+    const task = await env.db.generationTask.create({
+      data: { organizationId, batchId: batch.id, stage: 'VIDEO', status: 'SUCCEEDED', storyboardId: shotOneId, provider: 'mock', model: 'mock-t2v', attempts: 1 },
+    })
+    const readClipId = (await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: task.id, stage: 'VIDEO', objectKey: `readings/${task.id}-v1.mp4`, checksum: 'rd-v1', mimeType: 'video/mp4', version: 11, durationMs: 3000 },
+    })).id
+    const garbageClipId = (await env.db.mediaArtifact.create({
+      data: { organizationId, taskId: task.id, stage: 'VIDEO', objectKey: `readings/${task.id}-v2.mp4`, checksum: 'rd-v2', mimeType: 'video/mp4', version: 12, durationMs: 3000 },
+    })).id
+    const frameScores = [
+      { position: 0, score: 0.9 },
+      { position: 0.5, score: 0.62 },
+      { position: 1, score: 0.3 },
+    ]
+    const structureDrift = { measured: true, earlyLateDistance: 0.1585, firstMidDistance: 0.1132, maxStepDistance: 0.0741, sampleSeconds: [0, 0.45, 1.5, 2.55] }
+    const auditRepetition = { matchedArtifactId: null, pictureDistance: 0.2419, status: 'distinct' }
+    await env.db.qualityCheck.create({
+      data: {
+        status: 'NEEDS_REVIEW',
+        kind: 'visual-audit',
+        score: 0.62,
+        report: JSON.stringify({ kind: 'visual-audit', reasons: ['visual-audit: 结构漂移'], frameScores, structureDrift, auditRepetition }),
+        storyboardId: shotOneId,
+        artifactId: readClipId,
+      },
+    })
+    await env.db.qualityCheck.create({
+      data: { status: 'NEEDS_REVIEW', kind: 'video', score: 0.4, report: 'not json', storyboardId: shotOneId, artifactId: garbageClipId },
+    })
+
+    const { statusCode, body } = await shotboard(ownerToken, episodeId)
+    expect(statusCode).toBe(200)
+    const shot = body.shots.find(item => item.id === shotOneId)!
+
+    const read = shot.videoCandidates.find(candidate => candidate.artifactId === readClipId)!
+    expect(read.qc).toMatchObject({
+      kind: 'visual-audit',
+      status: 'NEEDS_REVIEW',
+      score: 0.62,
+      frameScores,
+      structureDrift,
+      auditRepetition,
+    })
+
+    // 报错不能因为一份坏报文而失败：分数照展，读数键干脆不出现在响应里。
+    const garbage = shot.videoCandidates.find(candidate => candidate.artifactId === garbageClipId)!
+    expect(garbage.qc).toMatchObject({ kind: 'video', status: 'NEEDS_REVIEW', score: 0.4 })
+    expect(garbage.qc).not.toHaveProperty('frameScores')
+    expect(garbage.qc).not.toHaveProperty('structureDrift')
+    expect(garbage.qc).not.toHaveProperty('auditRepetition')
+
+    // 镜头级读数同一口径：同一份 report 在两条出口上给出同一组数。
+    const shotLevel = shot.qc.find(entry => entry.kind === 'visual-audit')!
+    expect(shotLevel).toMatchObject({ frameScores, structureDrift, auditRepetition })
+    const shotLevelGarbage = shot.qc.find(entry => entry.kind === 'video')!
+    expect(shotLevelGarbage).not.toHaveProperty('frameScores')
   })
 })

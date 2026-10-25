@@ -30,6 +30,11 @@ export interface StoryboardGapShot {
   continuityOut: string | null
   durationMs: number
   method: string | null
+  /**
+   * 这一镜已绑定的素材条数。undefined/null 表示调用方没有读绑定关系，那么这条判据
+   * 整体跳过——「没读」与「读到 0」必须是两件事。
+   */
+  boundAssetCount?: number | null
 }
 
 export interface StoryboardGapOptions {
@@ -101,6 +106,8 @@ export function inspectStoryboardGaps(shots: readonly StoryboardGapShot[], optio
   shots.forEach((shot, index) => {
     const found: string[] = []
     const description = (shot.description ?? '').trim()
+    const dialogue = (shot.dialogue ?? '').trim()
+    const speaker = (shot.speaker ?? '').trim()
     const video = shotProduction(shot.method) === 'video'
 
     if (video) {
@@ -110,7 +117,17 @@ export function inspectStoryboardGaps(shots: readonly StoryboardGapShot[], optio
       } else if (group[1].split(/[·・]/).filter(part => part.trim() !== '').length < 3) {
         found.push('camera_movement_missing')
       }
-      if (ON_SCREEN_TEXT.some(pattern => pattern.test(description))) found.push('on_screen_text_in_shot')
+      // SD-174：画面与台词是 prompt 契约里分开的两列（description 写「画面与动作」、
+      // dialogue 放「台词原文」）。把台词抄进画面描述（#47 实测「他：别删我。」）就是
+      // 在首帧提示词里索要一段可读文字，模型照办把它烧成招牌。这条不认词、只看两列
+      // 有没有串——所以 ON_SCREEN_TEXT 那份写法清单漏掉的「说话人：台词」也接得住。
+      const quotedInPicture = dialogue.length >= 2 && description.includes(dialogue)
+      if (ON_SCREEN_TEXT.some(pattern => pattern.test(description)) || quotedInPicture) found.push('on_screen_text_in_shot')
+      // SD-123：绑定是参考图通道的唯一来源。零绑定不等于这一镜该配空画面——#23/#25
+      // 两次付费重抽买回的道具都是模型自己画的（素材叫「床头钟」，出片是木壳挂钟），
+      // 而那两镜在开烧前的界面上看不出任何异常。这条只陈述事实，不判断该不该绑：
+      // 空镜、纯 CG 镜本来就可能一个素材都不需要。
+      if (shot.boundAssetCount === 0) found.push('no_asset_binding')
     }
 
     if (index > 0 && (shot.continuityIn ?? '').trim() === '') found.push('continuity_in_missing')
@@ -120,8 +137,6 @@ export function inspectStoryboardGaps(shots: readonly StoryboardGapShot[], optio
     // 与 motion-sequence 守卫同一阈值、同一词表。
     if (out !== '' && SEQUENCE_MARKERS.filter(marker => out.includes(marker)).length >= 2) found.push('continuity_out_process')
 
-    const dialogue = (shot.dialogue ?? '').trim()
-    const speaker = (shot.speaker ?? '').trim()
     if (dialogue !== '' && speaker === '') found.push('dialogue_without_speaker')
     if (speaker !== '' && castNames.length > 0 && !SOURCE_MARKER.test(speaker) && !matchedCast(speaker, castNames)) found.push('speaker_not_in_cast')
 

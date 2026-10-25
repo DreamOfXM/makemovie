@@ -65,8 +65,10 @@ export { OFFICIAL_RECIPES, projectAspect, recipeChecksum, type OfficialRecipe, t
 export type { GenerationStage } from '@studio/domain'
 export {
   askReasonFor,
+  budgetedRetryStages,
   classifyQcFailure,
   defaultRetryPolicy,
+  episodeRetryBudget,
   isRetryClass,
   isRetryPolicy,
   parseGenerationReview,
@@ -125,8 +127,8 @@ export type { StoryboardContract, StoryboardContractRow } from './storyboard-con
 
 // 分镜表的「生成方式」列：决定这一镜要不要进图片/视频的计费队列。解析在
 // storyboard-contract 里，这里只把分类规则交给 worker 落库与两条触发路径共用。
-export { needsGeneratedMedia, shotProduction } from './shot-method.js'
-export type { ShotProduction } from './shot-method.js'
+export { METHOD_WORDS, needsGeneratedMedia, parseMethod, shotProduction } from './shot-method.js'
+export type { MethodInput, ShotProduction } from './shot-method.js'
 
 // 镜头↔素材绑定：落库时与每次触发 IMAGE/VIDEO 前共用同一套匹配规则。
 // 素材晚于分镜创建时，只在落库那一刻匹配会让后补的场景/道具永远绑不上。
@@ -136,13 +138,14 @@ export type { LinkableAsset, LinkableShot, ShotAssetLink } from './asset-links.j
 // 文字产物的确定性体检:剧本与分镜的结构契约,零成本、不调模型、不会 unjudged。
 // worker 在落库前用它判定这一抽算不算数——不过关就换下一个候选,而不是把一份
 // 分镜切不动的剧本或空描述的分镜写进库里。判据见 prompts.ts 的成文要求。
-export { auditScriptText, auditStoryboardShots, describeFindings, DEFAULT_SHOT_RHYTHM, SHORT_SHOT_MS, normalizeShotRhythm, resolveShotRhythm, measureShotRhythm, rhythmFromSpans, evaluateShotRhythm } from './content-audit.js'
+export { auditScriptText, auditStoryboardShots, describeFindings, DEFAULT_SHOT_RHYTHM, MAX_CONSECUTIVE_CARDS, SHORT_SHOT_MS, normalizeShotRhythm, resolveShotRhythm, measureShotRhythm, rhythmFromSpans, evaluateShotRhythm } from './content-audit.js'
 export type { ContentFinding, ShotRhythmSettings, ShotRhythmReadings, ShotRhythmGate } from './content-audit.js'
 
 // 验收三读数（S5）：节奏/转场/声音都从母带自己的台账里读，缺一项就不给签字。
 // 判「有没有数」，不判「好不好看」——后者归项目节奏设置，只摆数不拦人。
-export { readCompositionReview, reviewGapCodes } from './review-readings.js'
-export type { CompositionReviewReadings, RhythmReading, TransitionReading, SoundReading, ReviewGap, ReviewReadingInput } from './review-readings.js'
+// SD-184 邻镜重复是第四轴读数：像素距离在 worker 侧实测，这里只做台账数学。
+export { readCompositionReview, reviewGapCodes, readNeighborDuplicates, NEIGHBOR_DUPLICATE_DISTANCE, NEIGHBOR_DUPLICATE_RUN } from './review-readings.js'
+export type { CompositionReviewReadings, RhythmReading, TransitionReading, SoundReading, ReviewGap, ReviewReadingInput, NeighborDuplicateReading } from './review-readings.js'
 
 // 分镜层（plan_2026-10-24 §3–§5）：镜头类型、转场、镜内多句台词、环境音床，
 // 以及超长镜拆连续段的计划与帧链校验。词表与校验都是纯函数，落库、审批前
@@ -222,6 +225,63 @@ export function toRunTaskCandidate(candidate: SlotCandidate): RunTaskCandidate {
     provider: candidate.provider,
     model: candidate.model,
   }
+}
+
+/** 预审与派发共用的模型标签：「连接名 · provider/model」——两条凭据供同一模型时人分得清先烧谁。 */
+export function formatSlotCandidate(candidate: SlotCandidate): string {
+  return `${candidate.connectionName} · ${candidate.provider}/${candidate.model}`
+}
+
+/** 一条付费任务决定候选链所需的、任务之外的事实。 */
+export interface CandidateOrderInput {
+  stage: GenerationStage
+  /** AUDIO：这一条是无台词镜的音效任务，花的是 sfx 槽而不是 tts_voice。 */
+  sfx?: boolean
+  /** 这一条携带该镜自己的首帧（i2v 的输入）。 */
+  hasReferenceArtifact?: boolean
+  /** 这一条携带绑定素材的定妆照/设定图（r2v 与图像编辑模型的输入）。 */
+  hasAssetReferences?: boolean
+  /** 人选的「换模型」决议：被点名的候选排到链首，其余候选仍按原序兜底。 */
+  preferredCapabilityId?: string
+}
+
+export interface CandidatePools {
+  candidates: SlotCandidate[]
+  sfxCandidates?: SlotCandidate[]
+  conditioning?: SlotCandidate[]
+  referenceModeling?: SlotCandidate[]
+}
+
+/**
+ * 一条任务的候选链顺序，单一事实源：triggerStage 真排队读它，buildGenerationPlan
+ * 给每一条目报「第一候选」也读它。按需排序的三条分支：
+ * - 音效任务只从 sfx 槽取，与 tts_voice 是两笔钱；
+ * - 图像/素材：带参考图的任务编辑模型优先，纯文字出图文生图模型优先；
+ * - 视频：带帧/带定妆照的候选前置，t2v 垫底兜底。
+ */
+export function orderTaskCandidates(input: CandidateOrderInput, pools: CandidatePools): SlotCandidate[] {
+  const conditioning = pools.conditioning ?? []
+  const referenceModeling = pools.referenceModeling ?? []
+  if (input.stage === 'AUDIO' && input.sfx) return pools.sfxCandidates ?? []
+  if (input.stage === 'IMAGE' || input.stage === 'ASSET') {
+    // 素材板不吃参考图：无论调用方传什么，都按纯文生图排序。
+    const hasRefs = input.stage === 'ASSET' ? false : input.hasAssetReferences === true
+    return [...pools.candidates].sort((a, b) =>
+      hasRefs
+        ? Number(b.acceptsReferenceImages) - Number(a.acceptsReferenceImages)
+        : Number(a.acceptsReferenceImages) - Number(b.acceptsReferenceImages),
+    )
+  }
+  if (conditioning.length === 0 && referenceModeling.length === 0) return pools.candidates
+  const plan = planVideoModels(
+    [...conditioning, ...referenceModeling, ...pools.candidates],
+    input.hasReferenceArtifact === true,
+    input.hasAssetReferences === true,
+  )
+  const preferred = input.preferredCapabilityId
+  return preferred
+    ? [...plan.candidates].sort((a, b) => Number(b.capabilityId === preferred) - Number(a.capabilityId === preferred))
+    : plan.candidates
 }
 
 function isPrismaUniqueViolation(error: unknown): boolean {
@@ -1093,6 +1153,65 @@ export async function usableFirstFrames(
   return newest
 }
 
+/** 「这一帧按哪段文字画的」的判据输入。 */
+export interface ShotFrameText {
+  description: string
+  /** 人钦定的那一帧：他挑过画面，就不再按文字判它过期。 */
+  selectedFrameArtifactId?: string | null
+}
+
+/** 比对前折叠空白：改一个空格、多一个换行不是画面意图变了。 */
+function squashFrameText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 内容依赖失效：这一镜的首帧是不是按当前描述画的。
+ *
+ * 首帧是图生视频的画面基准，也是总览上这一镜的缩略图；改描述只写 `Storyboard`
+ * 那一张表，旧帧一个字没动。放行下去，买回来的是一段「新文字 + 旧画面」的混合体
+ * ——2026-10-24 实测镜头 #12：描述里的「黑屏；第 2 次。」早已删掉，i2v 仍拿那张
+ * 带黑屏卡的首帧当基准，付费产物把缺陷又拍了一遍。
+ *
+ * 判据不建新表、不加字段：出帧那一刻的提示词就存在任务快照里，而图像阶段的提示词
+ * 按 `${title}: ${description}` 组装（见本文件图像阶段分支），所以「当前描述出现在
+ * 快照提示词里」等价于「这一帧就是照当前文字画的」。拿不到快照的产物（人工导入的
+ * 帧、旧数据）不判——证据缺失时不许拦人，也不能反过来谎报过期。
+ */
+export async function firstFrameTextDrift(
+  db: PrismaClient,
+  frames: ReadonlyMap<string, string>,
+  textByShot: ReadonlyMap<string, ShotFrameText>,
+): Promise<Set<string>> {
+  const artifactIds = [...new Set(frames.values())]
+  if (artifactIds.length === 0) return new Set()
+  const artifacts = await db.mediaArtifact.findMany({
+    where: { id: { in: artifactIds } },
+    select: { id: true, task: { select: { requestSnapshot: true } } },
+  })
+  const promptByArtifact = new Map<string, string>()
+  for (const artifact of artifacts) {
+    const snapshot = artifact.task?.requestSnapshot
+    if (!snapshot) continue
+    try {
+      const prompt = (JSON.parse(snapshot) as { input?: { prompt?: unknown } }).input?.prompt
+      if (typeof prompt === 'string') promptByArtifact.set(artifact.id, prompt)
+    } catch {
+      // 快照不是合法 JSON：这一帧没有可比对的文字证据。
+    }
+  }
+  const stale = new Set<string>()
+  for (const [shotId, artifactId] of frames) {
+    const shot = textByShot.get(shotId)
+    if (!shot || shot.selectedFrameArtifactId === artifactId) continue
+    const description = squashFrameText(shot.description ?? '')
+    const prompt = promptByArtifact.get(artifactId)
+    if (description === '' || prompt === undefined) continue
+    if (!squashFrameText(prompt).includes(description)) stale.add(shotId)
+  }
+  return stale
+}
+
 /** 参与绑定对账的镜头字段。分镜落库时匹配过一次，之后素材新增/改名不会再触发。 */
 export interface ReconcileShot {
   id: string
@@ -1168,6 +1287,267 @@ export function sceneMasterGroupKey(shot: { location: string | null; sceneNumber
     return { key: `place:${location.toLowerCase().replace(/\s+/g, '')}`, label: location }
   }
   return shot.sceneNumber === null ? null : { key: `scene:${shot.sceneNumber}`, label: `场景 ${shot.sceneNumber}` }
+}
+
+/** 一个景的首镜：编号最小、参与主帧分组的那一镜。 */
+export interface SceneMasterFirst {
+  id: string
+  number: number
+  label: string
+}
+
+export interface SceneMasterState {
+  /** 每颗生成镜 → 它所在景的首镜。没有实景分组的镜不在表里。 */
+  sceneFirstByShot: Map<string, SceneMasterFirst>
+  /** 首镜 id → 可用钦定首帧的 artifact id（该景主帧）。 */
+  sceneMasterFrames: Map<string, string>
+  /** 非首镜 id → 为何本轮等待主帧（BLOCKED 的 errorSnapshot 原话）。 */
+  blockedByMaster: Map<string, string>
+}
+
+/**
+ * 场景主帧的唯一计算入口：triggerStage 据此把非首镜排成 BLOCKED，预审门
+ * （buildGenerationPlan）据此把它们移出本轮真正派出的数字。分组按整集的活镜头
+ * 算（不是本次选中的子集）——同一景的首镜不因这次只选了后半段而改变；两处各算
+ * 一份，界面承诺的与实际排队的就会分叉。
+ */
+export async function resolveSceneMasters(
+  db: PrismaClient,
+  organizationId: string,
+  episodeId: string,
+): Promise<SceneMasterState> {
+  const sceneShots = await db.storyboard.findMany({
+    where: { episodeId, supersededAt: null },
+    select: { id: true, location: true, sceneNumber: true, number: true, method: true },
+  })
+  const firstByGroup = new Map<string, SceneMasterFirst>()
+  const groupByShot = new Map<string, { key: string; label: string }>()
+  for (const shot of sceneShots) {
+    // 本机镜头不会产出首帧：它当了某景首镜，同景的生成镜头就会永远等一张
+    // 不会到来的主帧。
+    if (!needsGeneratedMedia(shot.method)) continue
+    const group = sceneMasterGroupKey(shot)
+    // 字卡/黑屏/播放器这类镜头没有实景，不参与主帧分组，也不把别人的等待引到它身上。
+    if (!group) continue
+    const current = firstByGroup.get(group.key)
+    if (!current || shot.number < current.number) firstByGroup.set(group.key, { id: shot.id, number: shot.number, label: group.label })
+    groupByShot.set(shot.id, group)
+  }
+  // 每镜指向「它所在景的首镜」——不是它自己（首镜映射写反曾让闸门永不触发）。
+  const sceneFirstByShot = new Map<string, SceneMasterFirst>()
+  for (const [shotId, group] of groupByShot) {
+    sceneFirstByShot.set(shotId, firstByGroup.get(group.key)!)
+  }
+  // usableFirstFrames 已是「钦定优先，悬空回退最新」——主帧跟人的选择走。只有会被等的
+  // 首镜才需要查帧：没有非首镜的景，主帧在场的意义也只是它自己。
+  const sceneMasterFrames = new Map<string, string>()
+  const firstIds = [...new Set([...sceneFirstByShot.entries()]
+    .filter(([shotId, first]) => first.id !== shotId)
+    .map(([, first]) => first.id))]
+  if (firstIds.length > 0) {
+    const masters = await usableFirstFrames(db, organizationId, episodeId, firstIds)
+    for (const id of firstIds) {
+      const artifactId = masters.get(id)
+      if (artifactId) sceneMasterFrames.set(id, artifactId)
+    }
+  }
+  const blockedByMaster = new Map<string, string>()
+  for (const [shotId, first] of sceneFirstByShot) {
+    if (first.id === shotId) continue
+    if (!sceneMasterFrames.has(first.id)) {
+      blockedByMaster.set(shotId, `等待「${first.label}」主帧：先生成并钦定该景首镜（#${first.number}）的首帧，再重试这一镜`)
+    }
+  }
+  return { sceneFirstByShot, sceneMasterFrames, blockedByMaster }
+}
+
+/**
+ * 画面文字规则（SD-052 / SD-085）。三档，全部由「这段画面里到底该不该有字」决定：
+ *
+ * - `numericDisplayRule`：点名了数字读数（床头钟 7:07）时放行且只放行那个读数。
+ * - `NO_TEXT_RULE`：其余一切画面——含「不添加描述之外的道具与装饰」，模型不会自行
+ *   补一只带随机数的钟。
+ * - `TEXT_LANGUAGE_RULE`：只留给字卡/UI 镜。它的原文要求短文字「清晰可读」，
+ *   把它当成逐镜首帧的默认档，等于平台在提示词里主动要求画面出现可读字符：
+ *   2026-10-21 镜头 #4 的首帧就是这么长出读数「138」的数字钟的（SD-085）。
+ *
+ * 提到模块层是因为判档的输入不止一处：素材板看素材自身文字，逐镜首帧/视频要看
+ * 镜头文本＋随附素材外观文字＋已定稿道具的读数，三处必须共用同一份措辞。
+ */
+const TEXT_LANGUAGE_RULE_ZH = '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
+const TEXT_LANGUAGE_RULE_EN = 'Text rendered inside the image (titles, labels, signage) must be in English; long-form document body text may be rendered blurred, but no other language may appear.'
+// 禁令不逐项点名：把「招牌/证书/海报」写进提示词等于给模型递素材，2026-10-21
+// 第三次卧室重跑里这些词在 prompt 出现四遍，墙上就多出三只证书框和一张海报。
+// 改成正向约束「保持简洁、不添加描述之外的东西」，同一条规则不点名也在生效。
+const NO_TEXT_RULE_ZH = '画面文字规则（最高优先级）：画面中不出现任何文字或可读字符；画面保持简洁，不添加描述之外的道具与装饰。'
+const NO_TEXT_RULE_EN = 'Text rule (highest priority): no text or readable characters anywhere in the image; keep the frame free of props and decorations not named in the description.'
+/** 数字读数（床头钟 7:07）：NO_TEXT_RULE 会连描述里写明的读数一起禁掉。 */
+export const NUMERIC_DISPLAY = /\d{1,2}[:：]\d{2}/
+
+function numericDisplayRule(prompt: string, locale: ContentLocale): string | null {
+  const readout = prompt.match(NUMERIC_DISPLAY)?.[0]
+  if (!readout) return null
+  return locale === 'zh'
+    ? `画面文字规则（最高优先级）：画面中唯一允许出现的可读字符是数字读数 ${readout}，必须与描述逐字一致，不得改写、增加或减少字符；除此之外不出现任何文字；画面保持简洁，不添加描述之外的道具与装饰。`
+    : `Text rule (highest priority): the only readable characters allowed are the numeric readout "${readout}", rendered exactly as written; no other text may appear; keep the frame free of props and decorations not named in the description.`
+}
+
+function textLanguageRule(locale: ContentLocale): string {
+  return locale === 'zh' ? TEXT_LANGUAGE_RULE_ZH : TEXT_LANGUAGE_RULE_EN
+}
+
+function noTextRule(locale: ContentLocale): string {
+  return locale === 'zh' ? NO_TEXT_RULE_ZH : NO_TEXT_RULE_EN
+}
+
+/**
+ * 一条 prompt 里的画面文字规则倒推出的文字政策——审核端用它判断「画面里那串数字该不该存在」。
+ * 放在生成端同一份文件里，是因为这三档措辞由生成端写死：审核端自己再抄一份，
+ * 任何一次改文案都会让审核悄悄失效（SD-085③ 的实测缺口就是审核根本不看剧本读数）。
+ */
+export type ScreenTextPolicy =
+  | { mode: 'whitelist'; readout: string }
+  | { mode: 'no-text' }
+  | { mode: 'text-allowed' }
+  | { mode: 'unknown' }
+
+export function screenTextPolicy(prompt: string): ScreenTextPolicy {
+  const readout = prompt.match(WHITELIST_READOUT)?.[1]
+  if (readout) return { mode: 'whitelist', readout }
+  if (prompt.includes(NO_TEXT_RULE_ZH) || prompt.includes(NO_TEXT_RULE_EN)) return { mode: 'no-text' }
+  if (prompt.includes(TEXT_LANGUAGE_RULE_ZH) || prompt.includes(TEXT_LANGUAGE_RULE_EN)) return { mode: 'text-allowed' }
+  return { mode: 'unknown' }
+}
+
+/** 白名单档的固定句式里的读数（zh「数字读数 7:07」/ en `readout "7:07"`）。 */
+const WHITELIST_READOUT = new RegExp(`(?:数字读数|numeric readout)\\s*"?(${NUMERIC_DISPLAY.source})"?`)
+
+/**
+ * 逐镜首帧/视频的画面文字档（SD-085①）。读数取自镜头文本与随附素材外观文本，
+ * 不再只看素材描述——素材板那套按 `assetId` 选的档从没作用到过逐镜首帧上。
+ * 本镜没有读数但场景素材里摆着一只带读数的钟时，也沿用道具的白名单：那只钟本来
+ * 就在画面里，禁掉字符只会让模型再画一只没有读数的（SD-085③ 的另一半归图片审核）。
+ */
+export function shotTextRule(
+  shot: { title: string; description: string; method?: string | null },
+  context: { assetText?: string; approvedPropReadouts?: string[] },
+  locale: ContentLocale,
+): string {
+  // 字卡/UI/合成/录屏这些本机镜的画面就是排版本身，文字规则照旧归字卡档。
+  if (!needsGeneratedMedia(shot.method)) return textLanguageRule(locale)
+  const shotText = `${shot.title} ${shot.description}`
+  return numericDisplayRule(shotText, locale)
+    ?? numericDisplayRule(context.assetText ?? '', locale)
+    ?? (context.approvedPropReadouts ?? []).map(readout => numericDisplayRule(readout, locale)).find(rule => rule !== null)
+    ?? noTextRule(locale)
+}
+
+/** 素材板的版式规格（定妆照/设定图标准，对齐 docs/skills/film-production 的角色一致性要求）：
+ *  角色图是身份锚点，必须多角度、中性背景、无文字——裸描述会生成剧照而非参考图。
+ *  角色设定已从"白底三视图"升级为"角色板"（Character Board,2026 行业新标准）：
+ *  一张竖版海报内集成身份信息+多角度脸部特写+全身三视图+服饰细节+表情集，
+ *  信息密度远高于裸三视图，视频模型能读出更稳定的身份特征。
+ *  规格只管版式与一致性，质感交给风格预设：参考图与首帧必须同一画风，
+ *  否则逐镜都在跟定妆照打架。
+ *  文书条款只追加给真正需要文字的道具：它曾固定挂在所有道具规格里，
+ *  床头钟因此被诱导在钟面印上「请参阅说明书」（2026-10-21 实测，0.65）。 */
+const TEXTUAL_PROP = /文书|书刊|证书|招牌|文件|告示|报纸|招贴|信件|合同|协议|书页/
+export const ASSET_REFERENCE_SPECS_BY_KIND: Record<string, string> = {
+  character:
+    '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。',
+  scene: '场景概念图：无人物空镜，构图与光线符合描述，细节清晰；画面保持简洁，不添加描述之外的道具或装饰，不出现文字；无水印。',
+  prop: '道具设定图：单品居中，中性背景，细节清晰，无水印。',
+}
+
+/**
+ * 每种素材的版式清单（SD-042）：审核方与生成方读同一份，不允许各存一套区块名。
+ * 逐条都是从 `ASSET_REFERENCE_SPECS_BY_KIND` 里那条规格抽出来的核对项——规格说什么，
+ * 审核就核什么。此前 ASSET 审核只核硬属性（性别/年龄/人数/道具），一张裸半身照和
+ * 一张五区块齐全的板同分同空 findings（实测 0.95 / 0.95），门等于没有。
+ * 清单只到「区块在不在」，好坏归审美项：区块画得糙是质量问题，缺区块是版式不成立。
+ */
+export const ASSET_LAYOUT_BLOCKS_BY_KIND: Record<string, string[]> = {
+  character: [
+    '①顶部角色名与身份标签',
+    '②脸部特写 4 个角度（正面/左右 45 度/侧面）',
+    '③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）',
+    '④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）',
+    '⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）',
+  ],
+  scene: [
+    '无人物空镜',
+    '构图与光线符合描述',
+    '不出现文字与水印',
+  ],
+  prop: [
+    '单品居中',
+    '中性背景',
+    '不出现文字与水印',
+  ],
+}
+
+/** 该 kind 的版式清单；认不出的 kind 返回空表——不拿一份猜出来的清单去拦人。 */
+export function assetLayoutChecklist(kind: string | null | undefined): string[] {
+  if (!kind) return []
+  return ASSET_LAYOUT_BLOCKS_BY_KIND[kind] ?? []
+}
+
+/** 素材板的版式锁句（SD-041）：调整要求压过版式规格的那次实测之后，锁必须排在自由文字之后。 */
+const LAYOUT_SHEET_LABEL: Record<string, string> = { character: '角色设定板', scene: '场景概念图', prop: '道具设定图' }
+
+export function assetLayoutLock(kind: string | null | undefined): string | null {
+  const blocks = assetLayoutChecklist(kind)
+  if (!kind || blocks.length === 0) return null
+  const label = LAYOUT_SHEET_LABEL[kind] ?? '素材设定图'
+  return `版式锁定（最高优先级，不随调整要求改变）：本图仍是一张${label}，以下区块逐项必须存在——${blocks.join('；')}。调整要求只允许改画面内容与质感，不得增删区块、不得改成单张剧照。`
+}
+
+/** 素材板阶段的画面文字档：prop 才认读数白名单与文书类，scene 一律禁字。 */
+function assetTextRule(kind: string | undefined, prompt: string, locale: ContentLocale): string {
+  const numeric = kind === 'prop' ? numericDisplayRule(prompt, locale) : null
+  if (numeric) return numeric
+  return kind === 'scene' || (kind === 'prop' && !TEXTUAL_PROP.test(prompt)) ? noTextRule(locale) : textLanguageRule(locale)
+}
+
+/**
+ * 把镜头↔已定稿道具的读数缺口列出来（SD-085②）。缺口＝画面文字点名的读数没有任何
+ * 已定稿道具图能对上，或画面里摆着一只带读数的钟（镜头自己写的，或场景描述点名的）
+ * 却没有任何已定稿道具图随附——模型此刻只能自己编一个数字。
+ * 只列事实不改选参考图：绑谁、送哪几张图是 `isShotVisible` 的既有口径（SD-034），
+ * 在这里放宽就是把「台词里提到但没出场」的东西画进画面。
+ */
+/** 带读数的计时道具：场景描述点名它，画面里就会有一只钟，读数必须有锚。 */
+const READOUT_PROP = /闹钟|数字钟|电子钟|电子表|秒表|计时器/
+
+export function unanchoredReadoutShots(
+  shots: { id: string; number: number; title: string; description: string }[],
+  links: { storyboardId: string; asset: { id: string; kind: string; name: string; description: string; status: string } }[],
+): { shotNumber: number; code: string }[] {
+  const byShot = new Map<string, { propReadouts: string[]; sceneText: string }>()
+  for (const link of links) {
+    const entry = byShot.get(link.storyboardId) ?? { propReadouts: [], sceneText: '' }
+    const approved = link.asset.status === 'APPROVED'
+    const readout = link.asset.description.match(NUMERIC_DISPLAY)?.[0]
+    if (readout && approved && link.asset.kind === 'prop') entry.propReadouts.push(readout)
+    if (link.asset.kind === 'scene') entry.sceneText = `${entry.sceneText} ${link.asset.name} ${link.asset.description}`
+    byShot.set(link.storyboardId, entry)
+  }
+  const gaps: { shotNumber: number; code: string }[] = []
+  for (const shot of shots) {
+    const entry = byShot.get(shot.id) ?? { propReadouts: [], sceneText: '' }
+    const shotText = `${shot.title} ${shot.description}`
+    const wanted = shotText.match(NUMERIC_DISPLAY)?.[0] ?? null
+    if (wanted) {
+      // 剧本写死了读数，却没有任何一张定稿道具图带着它进画面：这一镜的数字全靠模型发挥。
+      if (!entry.propReadouts.includes(wanted)) gaps.push({ shotNumber: shot.number, code: 'numericDisplayUnanchored' })
+      continue
+    }
+    // 读数没写在镜头文本里，但画面里确实站着一只钟（镜头自己点名，或场景描述摆的）：
+    // 文字档只能选「禁一切字符」，而那只钟本来就该显示 7:07。
+    const clockInFrame = READOUT_PROP.test(shotText) || READOUT_PROP.test(entry.sceneText)
+    if (clockInFrame && entry.propReadouts.length === 0) gaps.push({ shotNumber: shot.number, code: 'sceneReadoutUnanchored' })
+  }
+  return gaps
 }
 
 interface GenerationTarget {
@@ -1318,7 +1698,16 @@ export interface PipelineStore {
   enqueueJob(payload: PipelinePayload): Promise<void>
 }
 
-export type TriggerResult = { ok: true; batchId: string; created: boolean } | { ok: false; code: number; error: string; reasons?: string[] }
+/**
+ * 一次触发的三种结果，客户端的回执必须与它们一一对应：
+ * `created` 只说新建了几行任务；`requeued` 说撞键后按当前绑定重排的既有任务数
+ * （失败/被守卫拦下/被人叫停的那几笔）；两者全 0 才是「什么都没发生」。
+ * 旧实现只有 created 一个布尔，重排被报成 false，界面据此弹「未新建任务 · 这一镜
+ * 已有一笔提交在途」——那笔任务其实正在排队、正在烧钱。
+ */
+export type TriggerResult =
+  | { ok: true; batchId: string; created: boolean; requeued: number }
+  | { ok: false; code: number; error: string; reasons?: string[] }
 
 export type AdvanceResult =
   | { ok: true; step: 'stage'; stage: PipelineStage; batchId: string; created: boolean }
@@ -1671,46 +2060,19 @@ export async function triggerStage(
   // 上面的素材上下文只服务"画面里出现的";画面里有人却没点名时,外观锚点由守卫接住——
   // 两者共用同一份 links 与同一个可见性判定,口径不会分叉。
   const shotGuardInfo = new Map<string, { boundAssetCount: number; characters: GuardCharacterInfo[] }>()
-  // 场景主帧的事实底座：按地点聚合每处首镜（编号最小），首镜的可用钦定帧=该景主帧。
-  // usableFirstFrames 已是「钦定优先，悬空回退最新」——主帧跟人的选择走。
-  const sceneFirstByShot = new Map<string, { id: string; number: number; label: string }>()
-  const sceneMasterFrames = new Map<string, string>()
-  const blockedByMaster = new Map<string, string>()
-  if (stage === 'IMAGE') {
-    const sceneShots = await db.storyboard.findMany({
-      where: { episodeId: episode.id, supersededAt: null },
-      select: { id: true, location: true, sceneNumber: true, number: true, method: true },
-    })
-    const firstByGroup = new Map<string, { id: string; number: number; label: string }>()
-    const groupByShot = new Map<string, { key: string; label: string }>()
-    for (const shot of sceneShots) {
-      // 本机镜头不会产出首帧：它当了某景首镜，同景的生成镜头就会永远等一张
-      // 不会到来的主帧。
-      if (!needsGeneratedMedia(shot.method)) continue
-      const group = sceneMasterGroupKey(shot)
-      // 字卡/黑屏/播放器这类镜头没有实景，不参与主帧分组，也不把别人的等待引到它身上。
-      if (!group) continue
-      const current = firstByGroup.get(group.key)
-      if (!current || shot.number < current.number) firstByGroup.set(group.key, { id: shot.id, number: shot.number, label: group.label })
-      groupByShot.set(shot.id, group)
-    }
-    // 每镜指向「它所在景的首镜」——不是它自己（首镜映射写反曾让闸门永不触发）。
-    for (const [shotId, group] of groupByShot) {
-      sceneFirstByShot.set(shotId, firstByGroup.get(group.key)!)
-    }
-    const nonFirstSelected = selected.filter(storyboard => {
-      const first = sceneFirstByShot.get(storyboard.id)
-      return first != null && first.id !== storyboard.id
-    })
-    const firstIds = [...new Set(nonFirstSelected.map(storyboard => sceneFirstByShot.get(storyboard.id)!.id))]
-    if (firstIds.length > 0) {
-      const masters = await usableFirstFrames(db, organizationId, episode.id, firstIds)
-      for (const id of firstIds) {
-        const artifactId = masters.get(id)
-        if (artifactId) sceneMasterFrames.set(id, artifactId)
-      }
-    }
-  }
+  // SD-085①：本镜画面文字规则的第三路输入——已定稿道具描述里的读数。道具绑到了这镜
+  // 但没在画面文本点名时不送参考图（SD-034 的口径），它的读数却已经随场景的外观文字
+  // 进了提示词；文字档若不认识它，就会把「不许有可读字符」压在一只本来就该显示 7:07
+  // 的钟上（SD-052 在素材板阶段修过一次，逐镜这条分支当时没跟着改）。
+  const approvedPropReadouts = new Map<string, string[]>()
+  // 场景主帧的事实底座：分组、首镜、可用钦定帧、等待原因都在 resolveSceneMasters 里。
+  // 预审门读同一份实现——两处各算一次，界面承诺的与真排队的就会分叉。
+  const sceneMasters = stage === 'IMAGE'
+    ? await resolveSceneMasters(db, organizationId, episode.id)
+    : null
+  const sceneFirstByShot = sceneMasters?.sceneFirstByShot ?? new Map<string, SceneMasterFirst>()
+  const sceneMasterFrames = sceneMasters?.sceneMasterFrames ?? new Map<string, string>()
+  const blockedByMaster = sceneMasters?.blockedByMaster ?? new Map<string, string>()
   if (stage === 'IMAGE' || stage === 'VIDEO') {
     // 落库时匹配过一次，素材晚建/晚改名就漏了。触发前补齐（只增不删，人锁过的镜头不动），
     // 之后这次查询读到的就是补齐后的全部绑定。
@@ -1762,6 +2124,11 @@ export async function triggerStage(
           .filter(link => link.asset.kind === 'character' && link.asset.status === 'APPROVED')
           .map(link => ({ name: link.asset.name, description: link.asset.description, mentioned: visible(link) })),
       })
+      const readouts = shotLinks
+        .filter(link => link.asset.kind === 'prop' && link.asset.status === 'APPROVED')
+        .map(link => link.asset.description.match(NUMERIC_DISPLAY)?.[0])
+        .filter((readout): readout is string => readout !== undefined && readout !== '')
+      if (readouts.length > 0) approvedPropReadouts.set(storyboard.id, readouts)
       if (stage !== 'IMAGE') {
         // VIDEO(r2v)的参考图与首帧阶段同一过滤口径:只送画面里出现的角色+场景
         // (台词里说话的是画外音,送定妆照反而把不入场的人画进画面),顺序
@@ -1805,7 +2172,11 @@ export async function triggerStage(
         if (masterLine) lines.push(masterLine)
         referenced.forEach((link, index) => {
           const sheetKind = link.asset.kind === 'character' ? '角色外观参考' : '设定图'
-          lines.push(`图${index + 2}＝${sheetKind}｜${link.asset.kind}·${link.asset.name}：${link.asset.description}`)
+          // SD-067：序号跟着真实附带顺序走。这一支原来恒从 图2 起，前提是「图1＝场景主帧」
+          // 一定在——但场首镜（以及主帧还没出、本镜走 BLOCKED 的那一镜）根本没有主帧可挂，
+          // 第 1 张附件其实是这张定妆照，文字却把它写成 图2：模型按文字找图会整体错位一位，
+          // 而文字里没有「图1＝」这一条。
+          lines.push(`图${index + (masterLine ? 2 : 1)}＝${sheetKind}｜${link.asset.kind}·${link.asset.name}：${link.asset.description}`)
         })
       }
       for (const link of rest) {
@@ -1904,13 +2275,7 @@ export async function triggerStage(
   // 否则逐镜都在跟定妆照打架。没选预设时才由下面这句兜住插画质感。
   // 文书条款只追加给真正需要文字的道具：它曾固定挂在所有道具规格里，
   // 床头钟因此被诱导在钟面印上「请参阅说明书」（2026-10-21 实测，0.65）。
-  const TEXTUAL_PROP = /文书|书刊|证书|招牌|文件|告示|报纸|招贴|信件|合同|协议|书页/
-  const ASSET_REFERENCE_SPECS: Record<string, string> = {
-    character:
-      '角色设定板（Character Board）：单张竖版海报式排版。内容按区块集成——①顶部角色名与身份标签；②脸部特写 4 个角度（正面/左右 45 度/侧面），眼神与表情各异；③全身三视图（正面/侧面/背面并排，头顶到脚底完整入画）；④服装与饰品细节拆解（绣纹、配饰、鞋履等圆形小图）；⑤表情参考 6 种小图（常态/喜/怒/惊/悲/思）。严格遵循描述中的年龄、性别与体型，不得幼化或美化；米白纯色背景，无水印；同一角色全板形象严格一致，一致性优先于美观。',
-    scene: '场景概念图：无人物空镜，构图与光线符合描述，细节清晰；画面保持简洁，不添加描述之外的道具或装饰，不出现文字；无水印。',
-    prop: '道具设定图：单品居中，中性背景，细节清晰，无水印。',
-  }
+  const ASSET_REFERENCE_SPECS = ASSET_REFERENCE_SPECS_BY_KIND
   // 无预设时的质感基准沿用旧行为：规避"真人图像"内容审查（Seedance 2.0 等已明确拒绝
   // 照片级真人参考图），风格化本身也提升跨镜头一致性。选了预设，这句必须让位。
   const CHARACTER_MEDIUM_WITHOUT_STYLE = '渲染质感：CG 游戏立绘风格、插画质感（严禁照片级真人质感）'
@@ -1981,31 +2346,8 @@ export async function triggerStage(
   // 画面文字语言规则与调整要求都在风格层之后再拼（见下）：提示词尾部权重最高，
   // 英文风格词收尾时，模型会把画面里的文字也渲染成英文（2026-09-28 实测：中文项目
   // 的房屋转让协议被画成 "AGREEMENT HOUSE TRANSFER"）。
-  // 画面里允许出现文字的只有视觉阶段；文案阶段（剧本/分镜）不掺这条。
-  const TEXT_LANGUAGE_RULE = locale === 'zh'
-    ? '画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。'
-    : 'Text rendered inside the image (titles, labels, signage) must be in English; long-form document body text may be rendered blurred, but no other language may appear.'
-  // 禁令不逐项点名：把「招牌/证书/海报」写进提示词等于给模型递素材，2026-10-21
-  // 第三次卧室重跑里这些词在 prompt 出现四遍，墙上就多出三只证书框和一张海报。
-  // 改成正向约束「保持简洁、不添加描述之外的东西」，同一条规则不点名也在生效。
-  const NO_TEXT_RULE = locale === 'zh'
-    ? '画面文字规则（最高优先级）：画面中不出现任何文字或可读字符；画面保持简洁，不添加描述之外的道具与装饰。'
-    : 'Text rule (highest priority): no text or readable characters anywhere in the image; keep the frame free of props and decorations not named in the description.'
-  // 数字读数道具（床头钟 7:07）：NO_TEXT_RULE 会连描述里写明的读数一起禁掉。
-  // 只对 prop 白名单放行描述原文里的读数，其余字符仍一律禁止——不让模型自行编数。
-  const NUMERIC_DISPLAY = /\d{1,2}[:：]\d{2}/
-  const numericDisplayRule = (prompt: string): string | null => {
-    const readout = prompt.match(NUMERIC_DISPLAY)?.[0]
-    if (!readout) return null
-    return locale === 'zh'
-      ? `画面文字规则（最高优先级）：画面中唯一允许出现的可读字符是数字读数 ${readout}，必须与描述逐字一致，不得改写、增加或减少字符；除此之外不出现任何文字；画面保持简洁，不添加描述之外的道具与装饰。`
-      : `Text rule (highest priority): the only readable characters allowed are the numeric readout "${readout}", rendered exactly as written; no other text may appear; keep the frame free of props and decorations not named in the description.`
-  }
-  const assetTextRule = (kind: string | undefined, prompt: string) => {
-    const numeric = kind === 'prop' ? numericDisplayRule(prompt) : null
-    if (numeric) return numeric
-    return kind === 'scene' || (kind === 'prop' && !TEXTUAL_PROP.test(prompt)) ? NO_TEXT_RULE : TEXT_LANGUAGE_RULE
-  }
+  // 画面里允许出现文字的只有视觉阶段；文案阶段（剧本/分镜）不掺这条。三档的判档
+  // 输入与措辞在模块层（SD-085），这里只按阶段分流。
   const isVisualKind = stage === 'ASSET' || stage === 'IMAGE' || stage === 'VIDEO'
   // 运动忠实条款只进 VIDEO：视频模型一定会让画面动起来，不钉死就会自己发明动作
   // （2026-09-28 实测：「坐在长桌边一动不动，笔尖按在签字栏」被 wanx2.1-i2v-plus
@@ -2043,12 +2385,22 @@ export async function triggerStage(
     }
   }
 
+  // 逐镜文字规则要看镜头自己的文本，所以先把选中的镜头按 id 建索引（也在 P7 守卫处复用）。
+  const shotById = new Map(selected.map(storyboard => [storyboard.id, storyboard]))
+
   const tailTargets = isVisualKind
     ? targets.map(target => {
         const controlLine = target.storyboardId ? controlsByShot.get(target.storyboardId) : undefined
+        // SD-085①：素材板按素材 kind 选档，逐镜首帧/视频按镜头自己的文本选档。
+        // 过去这一行只认 `target.assetId`，逐镜一律落到 TEXT_LANGUAGE_RULE——那条规则
+        // 原文要求短文字「清晰可读」，等于平台在首帧提示词里主动索要画面文字，
+        // 于是模型自己编出一只读数「138」的数字钟（2026-10-21 镜头 #4 实测）。
+        const shot = target.storyboardId ? shotById.get(target.storyboardId) : undefined
         const textRule = target.assetId
-          ? assetTextRule(assetKindById.get(target.assetId), assetTextById.get(target.assetId) ?? '')
-          : TEXT_LANGUAGE_RULE
+          ? assetTextRule(assetKindById.get(target.assetId), assetTextById.get(target.assetId) ?? '', locale)
+          : shot
+            ? shotTextRule(shot, { assetText: assetContexts.get(shot.id), approvedPropReadouts: approvedPropReadouts.get(shot.id) }, locale)
+            : noTextRule(locale)
         return {
           ...target,
           prompt: [target.prompt, controlLine, textRule, MOTION_RULE].filter(Boolean).join('\n\n'),
@@ -2063,7 +2415,6 @@ export async function triggerStage(
   // "长相全靠提示词"的阶段。修复型改写 prompt、警告型只留痕、拦截型让任务直接
   // 落 BLOCKED 不排队;所有留痕随请求快照入库——审计要能回答"这条 prompt 被动过吗、为什么"。
   // 守卫链是有序数组(DEFAULT_PROMPT_GUARDS),增减规则不碰这里。
-  const shotById = new Map(selected.map(storyboard => [storyboard.id, storyboard]))
   // 风格预设先于守卫链应用:style-anchor 认得出「视觉风格」标记就不叠加
   // 默认写实基准,显式选的风格永远赢;没有预设时守卫照旧兜底。
   // ASSET 也在内:定妆照是逐镜首帧的参考输入,它不吃风格的话全片画风从第一步就分叉。
@@ -2074,7 +2425,15 @@ export async function triggerStage(
       }))
     : tailTargets
   if (note) {
-    promptedTargets = promptedTargets.map(target => ({ ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }))
+    // SD-041：素材板阶段自由文字的权重压在版式规格之上，实测把五区块角色板直接打回
+    // 一张裸半身照（陈默角色板 v1，2026-10-21）。自由文字是人的方向，不能删；
+    // 能做的是当场给它划界（只改内容与质感）并把版式锁排在它之后——尾部权重最高，
+    // 锁必须在最后。逐镜首帧/视频没有版式可锁，措辞与位置都保持原样。
+    promptedTargets = promptedTargets.map(target => {
+      const lock = stage === 'ASSET' ? assetLayoutLock(target.assetId ? assetKindById.get(target.assetId) : undefined) : null
+      if (!lock) return { ...target, prompt: `${target.prompt}\n\n调整要求：${note}` }
+      return { ...target, prompt: `${target.prompt}\n\n调整要求（只改画面内容与质感）：${note}\n\n${lock}` }
+    })
   }
   promptedTargets = stage === 'IMAGE' || stage === 'VIDEO'
     ? promptedTargets.map(target => {
@@ -2132,6 +2491,19 @@ export async function triggerStage(
     })
     if (inflight.length > 0) {
       return { ok: false, code: 409, error: 'generations:frameInFlight', reasons: inflight.map(storyboard => `#${storyboard.number}`) }
+    }
+    // 描述改过、首帧还是旧文字画的：i2v 会把那张旧画面当基准买进来。这里拦下并点名
+    // 镜头，出路是重跑「首帧」（花钱前的一次纠正）或在那一镜钦定现在的帧——钦定是
+    // 人明示「就要这张画面」，此时不再判过期。没有绑定图生视频时帧不进厂商请求，
+    // 上一段的缺帧门也不成立，这条同样不该拦。
+    const drifted = await firstFrameTextDrift(
+      db,
+      frames,
+      new Map(selected.map(storyboard => [storyboard.id, { description: storyboard.description, selectedFrameArtifactId: storyboard.selectedFrameArtifactId }])),
+    )
+    if (drifted.size > 0) {
+      const numbers = selected.filter(storyboard => drifted.has(storyboard.id)).map(storyboard => `#${storyboard.number}`)
+      return { ok: false, code: 409, error: 'generations:staleFirstFrame', reasons: numbers }
     }
   }
 
@@ -2208,10 +2580,15 @@ export async function triggerStage(
     ]
     return references.length > 0 ? { referenceArtifacts: references } : {}
   }
+  // 点名镜头/素材的触发是修复动作，不是链路的一步：这一批跑完不代表整个阶段跑完，
+  // 更没有理由替人买下一阶段（重跑一镜视频曾把整集配音排上队）。整阶段触发照样接力，
+  // 停不停由制作档位决定——档位管的是钱，这里管的是「谁发起的那一步」。
+  const relayEligible = !options.storyboardIds?.length && !options.assetIds?.length
   const taskRow = (target: GenerationTarget, key: string) => ({
     organizationId,
     stage: dbStage,
     idempotencyKey: key,
+    relayEligible,
     // 被拦截守卫点名的任务:带着原因落 BLOCKED，界面与待处理泳道都指得回这一镜；
     // 绑定补齐后经重试路径复活，中途不烧任何额度。
     ...(target.blockedReason ? { status: 'BLOCKED' as const, errorSnapshot: target.blockedReason } : {}),
@@ -2237,33 +2614,16 @@ export async function triggerStage(
   // slot's order. Keyed by idempotency key, because the rows come back from the database
   // in the order the database chose, not the order we wrote them in.
   const candidatesForKey = (key: string): RunTaskCandidate[] => {
-    // 图像阶段的按需排序:带参考图的任务(首帧)编辑模型优先;纯文字出图(定妆照)
-    // 纯文生图模型优先——编辑模型裸跑文字出图,质感明显弱于文生图模型(实测)。
-    // 音效任务的花费走 sfx 槽:与 tts_voice 是两笔钱、两家候选,不能混排。
-    if (stage === 'AUDIO' && targetsByKey.get(key)?.sfx) return sfxCandidates.map(toRunTaskCandidate)
-    if (stage === 'IMAGE' || stage === 'ASSET') {
-      const hasRefs = stage === 'ASSET' ? false : (targetsByKey.get(key)?.assetReferenceArtifactIds?.length ?? 0) > 0
-      const ordered = [...candidates].sort((a, b) =>
-        hasRefs
-          ? Number(b.acceptsReferenceImages ?? false) - Number(a.acceptsReferenceImages ?? false)
-          : Number(a.acceptsReferenceImages ?? false) - Number(b.acceptsReferenceImages ?? false),
-      )
-      return ordered.map(toRunTaskCandidate)
-    }
-    if (conditioning.length === 0 && referenceModeling.length === 0) return candidates.map(toRunTaskCandidate)
-    const target = promptedTargets.find((_, index) => idempotencyKeys[index] === key)
-    const plan = planVideoModels(
-      [...conditioning, ...referenceModeling, ...candidates],
-      target?.referenceArtifactId !== undefined,
-      (target?.assetReferenceArtifactIds?.length ?? 0) > 0,
-    )
-    // 换模型决议：被点名的那条候选排到本镜链首，其余候选仍按原序兜底——
-    // 一条付费模型失败后，回退链不能因为这次点名而消失。
-    const preferred = target?.durationPlan?.capabilityId
-    const ordered = preferred
-      ? [...plan.candidates].sort((a, b) => Number(b.capabilityId === preferred) - Number(a.capabilityId === preferred))
-      : plan.candidates
-    return ordered.map(toRunTaskCandidate)
+    // 排序规则全在 orderTaskCandidates 里：预审门用同一函数报「第一候选」，
+    // 两处不会各排一份链。这里只把任务身上决定排序的事实交过去。
+    const target = targetsByKey.get(key)
+    return orderTaskCandidates({
+      stage,
+      sfx: target?.sfx === true,
+      hasReferenceArtifact: target?.referenceArtifactId !== undefined,
+      hasAssetReferences: (target?.assetReferenceArtifactIds?.length ?? 0) > 0,
+      ...(target?.durationPlan?.capabilityId ? { preferredCapabilityId: target.durationPlan.capabilityId } : {}),
+    }, { candidates, sfxCandidates, conditioning, referenceModeling }).map(toRunTaskCandidate)
   }
 
   try {
@@ -2310,7 +2670,7 @@ export async function triggerStage(
     }
     await persistShotDurationPlans(db, promptedTargets)
     await audit(db, { organizationId, userId, action: options.regenerate ? 'generation.regenerate' : 'generation.trigger', entityType: 'generation-batch', entityId: batch.id, payload: { stage, plannedCount: batch.plannedCount, revision, ...gapAudit, ...durationAudit, ...takesAudit, ...guardStats(promptedTargets) } })
-    return { ok: true, batchId: batch.id, created: true }
+    return { ok: true, batchId: batch.id, created: true, requeued: 0 }
   } catch (error) {
     if (!isPrismaUniqueViolation(error)) throw error
     // Key collision = this stage already ran for (some of) these targets. A plain
@@ -2335,8 +2695,9 @@ export async function triggerStage(
     if (missingTargets.length === 0 && retryable.length === 0) {
       const anchor = existing[0]
       if (!anchor) throw error
-      return { ok: true, batchId: anchor.batchId, created: false }
+      return { ok: true, batchId: anchor.batchId, created: false, requeued: 0 }
     }
+    let newBatchId: string | null = null
     if (missingTargets.length > 0) {
       const missingKeys = idempotencyKeys.filter(key => !existingKeys.has(key))
       const batch = await db.generationBatch.create({
@@ -2355,7 +2716,9 @@ export async function triggerStage(
         await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: candidatesForKey(task.idempotencyKey ?? '') })
       }
       await syncBatchStatus(db, batch.id)
+      newBatchId = batch.id
     }
+    let requeued = 0
     for (const task of retryable) {
       const target = targetsByKey.get(task.idempotencyKey ?? '')
       // 守卫仍在拦：快照照刷（让人看到此刻还缺什么），但任务复活回 BLOCKED 而不是
@@ -2368,17 +2731,27 @@ export async function triggerStage(
           attempts: 0,
           provider: null,
           model: null,
+          // 复活的旧任务沿用这次触发的方式：点名单镜重试仍是修复，不接力。
+          relayEligible,
           errorSnapshot: stillBlocked ?? null,
           ...(target ? { requestSnapshot: taskRow(target, task.idempotencyKey ?? '').requestSnapshot } : {}),
         },
       })
-      if (!stillBlocked) await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: candidatesForKey(task.idempotencyKey ?? '') })
+      if (!stillBlocked) {
+        await store.enqueueJob({ kind: 'run-task', taskId: task.id, organizationId, attempt: 1, candidates: candidatesForKey(task.idempotencyKey ?? '') })
+        requeued += 1
+      }
     }
     if (retryable.length > 0) await syncBatchStatus(db, retryable[0].batchId)
     await persistShotDurationPlans(db, promptedTargets)
     if (takeEntries.length > 0) await persistShotTakes(db, takeEntries, { reset: Boolean(options.regenerate) })
     await audit(db, { organizationId, userId, action: 'generation.retry', entityType: 'generation-batch', entityId: retryable[0]?.batchId ?? existing[0]?.batchId ?? '', payload: { stage, retried: retryable.length, created: missingTargets.length, ...gapAudit, ...durationAudit, ...takesAudit, ...guardStats(promptedTargets) } })
-    return { ok: true, batchId: retryable[0]?.batchId ?? existing[0]!.batchId, created: false }
+    return {
+      ok: true,
+      batchId: newBatchId ?? retryable[0]?.batchId ?? existing[0]!.batchId,
+      created: missingTargets.length > 0,
+      requeued,
+    }
   }
 }
 
@@ -2393,6 +2766,54 @@ export interface GenerationPlanItem {
   label: string
   /** local = 分镜表写明由人做（字卡/屏幕录制/合成/UI），本次不排平台任务。 */
   disposition: 'new' | 'retry' | 'skipped' | 'local'
+  /** 真触发时这一条的第一候选，「连接名 · provider/model」；本轮不派或无法确定时为 null。 */
+  model: string | null
+  /** 1 = 本轮派出；2 = 等所在场景的主帧，本轮不派（只有 IMAGE 的待生成镜会出现 2）。 */
+  wave: 1 | 2
+}
+
+/** 一条本轮没派出去、在等场景主帧的条目。 */
+export interface GenerationPlanDeferred {
+  shotNumber: number
+  label: string
+  waitsForShotNumber: number
+  waitsForLabel: string
+}
+
+/** applySceneMasterWaves 的输入：条目本体 + 镜头号（非逐镜条目为 null）。 */
+export interface PlanWaveInput {
+  id: string
+  label: string
+  shotNumber: number | null
+  disposition: GenerationPlanItem['disposition']
+}
+
+/**
+ * 纯函数：把「等场景主帧」的镜从本轮真正派出的数字里剔出去。IMAGE 之外调用方传
+ * 空 blockedByMaster，所有可计费条目都保持 wave 1；只有 new/retry 才谈得上等待
+ * （skipped/local 本来就不排队）。等主帧的那一镜不报模型：主帧落位后它的参考图集合
+ * 会变，先报一个名字就是猜。
+ */
+export function applySceneMasterWaves(
+  items: PlanWaveInput[],
+  blockedByMaster: ReadonlyMap<string, string>,
+  sceneFirstByShot: ReadonlyMap<string, SceneMasterFirst>,
+  modelByShot: ReadonlyMap<string, string | null> = new Map(),
+): { items: GenerationPlanItem[]; dispatchCount: number; deferred: GenerationPlanDeferred[]; deferredCount: number } {
+  const deferred: GenerationPlanDeferred[] = []
+  let dispatchCount = 0
+  const planned: GenerationPlanItem[] = items.map(item => {
+    const billable = item.disposition === 'new' || item.disposition === 'retry'
+    const first = billable ? sceneFirstByShot.get(item.id) : undefined
+    const waiting = billable && item.shotNumber !== null && first !== undefined && first.id !== item.id && blockedByMaster.has(item.id)
+    if (waiting) {
+      deferred.push({ shotNumber: item.shotNumber!, label: item.label, waitsForShotNumber: first!.number, waitsForLabel: first!.label })
+      return { id: item.id, label: item.label, disposition: item.disposition, model: null, wave: 2 }
+    }
+    if (billable) dispatchCount += 1
+    return { id: item.id, label: item.label, disposition: item.disposition, model: billable ? modelByShot.get(item.id) ?? null : null, wave: 1 }
+  })
+  return { items: planned, dispatchCount, deferred, deferredCount: deferred.length }
 }
 
 /** 一镜的分镜文本体检结论。代码的人话解释在前端，与 shotboard 的 attention 同一形态。 */
@@ -2406,7 +2827,13 @@ export interface GenerationPlan {
   /** `provider/model`, in the order the worker would try them. */
   models: string[]
   items: GenerationPlanItem[]
+  /** 新任务数：包含本轮因等待场景主帧而没派出的条目；真正入队的数看 dispatchCount。 */
   newCount: number
+  /** 本轮真正入队的条目数：new/retry 且不等场景主帧（wave 1）。 */
+  dispatchCount: number
+  /** 本轮没派、在等场景主帧的镜头；dispatchCount 之外的那部分新任务。 */
+  deferred: GenerationPlanDeferred[]
+  deferredCount: number
   retryCount: number
   skippedCount: number
   /** 本机镜头数：列在 items 里让人看见「这些不花额度」，不计入时长。 */
@@ -2447,9 +2874,17 @@ export async function buildGenerationPlan(
       storyboards: {
         where: { supersededAt: null },
         orderBy: [{ revision: 'asc' }, { number: 'asc' }],
-        select: { id: true, number: true, title: true, description: true, durationMs: true, dialogue: true, speaker: true, continuityIn: true, continuityOut: true, location: true, lockedReferences: true, method: true },
+        select: { id: true, number: true, title: true, description: true, durationMs: true, dialogue: true, speaker: true, continuityIn: true, continuityOut: true, location: true, lockedReferences: true, method: true, selectedFrameArtifactId: true },
       },
-      assets: { orderBy: { id: 'asc' }, select: { id: true, kind: true, name: true, status: true } },
+      assets: {
+        orderBy: { id: 'asc' },
+        select: {
+          id: true, kind: true, name: true, description: true, status: true,
+          // 预审端要还原「这一镜带不带参考图」：定稿版本的 artifact 是判据，与触发端
+          // 同一条 where（APPROVED + artifactId 非空），不能只看素材状态就下结论。
+          versions: { where: { status: 'APPROVED', artifactId: { not: null } }, orderBy: { version: 'desc' }, take: 1, select: { artifactId: true } },
+        },
+      },
     },
   })
   if (!episode) return { ok: false, code: 404, error: 'Episode not found' }
@@ -2483,6 +2918,24 @@ export async function buildGenerationPlan(
   if (perAsset && selectedAssets.length === 0) return { ok: false, code: 400, error: 'episode has no assets to generate' }
   const voiced = stage === 'AUDIO' ? selected.filter(storyboard => storyboard.dialogue !== '') : generatedShots
   if (stage === 'AUDIO' && voiced.length === 0) return { ok: false, code: 400, error: 'episode has no shots with dialogue to voice' }
+  // 预审端要还原 triggerStage 的「这一镜带不带参考图」：同一份绑定（含 reconcile 会补
+  // 上的那几条）、同一份可见性、同一份 APPROVED 版本口径。只读，不补绑定。
+  const referenceFacts = stage === 'IMAGE' || stage === 'VIDEO'
+    ? {
+        links: await db.storyboardAsset.findMany({
+          where: { storyboardId: { in: voiced.map(storyboard => storyboard.id) } },
+          include: {
+            asset: {
+              select: {
+                id: true, kind: true, name: true, status: true,
+                versions: { where: { status: 'APPROVED', artifactId: { not: null } }, orderBy: { version: 'desc' }, take: 1, select: { artifactId: true } },
+              },
+            },
+          },
+        }),
+        pending: await missingShotAssetLinks(db, voiced, episode.assets),
+      }
+    : null
   // 与 triggerStage 同一份口径：预审门要报的超长镜，就是真触发会拦的那几镜。
   const durationAssessment = stage === 'VIDEO' ? await targetShotDurationPlan(db, organizationId, episode.projectId) : null
   const durationPreflight = durationAssessment ? preflightShotDurations(voiced, durationAssessment) : []
@@ -2497,15 +2950,10 @@ export async function buildGenerationPlan(
     if (!script) return { ok: false, code: 409, error: 'generations:noApprovedScript' }
     approvedScriptContent = script.content
   }
-  if (stage === 'IMAGE') {
-    const links = await db.storyboardAsset.findMany({
-      where: { storyboardId: { in: voiced.map(storyboard => storyboard.id) } },
-      include: { asset: { select: { kind: true, name: true, status: true } } },
-    })
+  if (stage === 'IMAGE' && referenceFacts) {
     // 触发端会把缺的绑定补上（只增不删），预审门必须与触发同一口径：现在不拦的
     // 草稿素材，点下去就会被触发端拦——两处各算一次必然分叉。
-    const pending = await missingShotAssetLinks(db, voiced, episode.assets)
-    const drafts = draftAssetNames(links, pending, episode.assets)
+    const drafts = draftAssetNames(referenceFacts.links, referenceFacts.pending, episode.assets)
     if (drafts.length > 0) return { ok: false, code: 409, error: 'generations:assetsNotApproved', reasons: drafts }
   }
 
@@ -2520,9 +2968,18 @@ export async function buildGenerationPlan(
   // 「将使用的模型」写的是百炼文生视频，派发日志的第一候选是已付费的 seedance。
   const chain = stage === 'VIDEO' ? planVideoModels([...conditioning, ...referenceModeling, ...candidates], true, true).candidates : candidates
 
+  // 场景主帧的事实底座与 triggerStage 同一份实现：等待中的镜在预审里必须落 wave 2，
+  // 不能算进本轮派出数。
+  const sceneMasters: SceneMasterState = stage === 'IMAGE'
+    ? await resolveSceneMasters(db, organizationId, episode.id)
+    : { sceneFirstByShot: new Map(), sceneMasterFrames: new Map(), blockedByMaster: new Map() }
+  // 与触发端同源：只有绑定了 i2v 才解析首帧，首帧决定这一镜的第一候选是 i2v 还是兜底 t2v。
+  const videoFrames = stage === 'VIDEO' && conditioning.length > 0
+    ? await usableFirstFrames(db, organizationId, episode.id, voiced.map(storyboard => storyboard.id))
+    : new Map<string, string>()
+
   if (stage === 'VIDEO' && conditioning.length > 0) {
-    const frames = await usableFirstFrames(db, organizationId, episode.id, voiced.map(storyboard => storyboard.id))
-    const missing = voiced.filter(storyboard => !frames.get(storyboard.id)).map(storyboard => `#${storyboard.number}`)
+    const missing = voiced.filter(storyboard => !videoFrames.get(storyboard.id)).map(storyboard => `#${storyboard.number}`)
     if (missing.length > 0) return { ok: false, code: 409, error: 'generations:videoMissingFrames', reasons: missing }
     const inflight = await db.storyboard.findMany({
       where: {
@@ -2533,6 +2990,15 @@ export async function buildGenerationPlan(
       orderBy: { number: 'asc' },
     })
     if (inflight.length > 0) return { ok: false, code: 409, error: 'generations:frameInFlight', reasons: inflight.map(storyboard => `#${storyboard.number}`) }
+    // 与触发端同一条内容依赖门：预审门报「能跑」而点下去 409，确认框就成了一句假话。
+    const drifted = await firstFrameTextDrift(
+      db,
+      videoFrames,
+      new Map(voiced.map(storyboard => [storyboard.id, { description: storyboard.description, selectedFrameArtifactId: storyboard.selectedFrameArtifactId }])),
+    )
+    if (drifted.size > 0) {
+      return { ok: false, code: 409, error: 'generations:staleFirstFrame', reasons: voiced.filter(storyboard => drifted.has(storyboard.id)).map(storyboard => `#${storyboard.number}`) }
+    }
   }
 
   // The plain key collides with a run that already happened, which is exactly what
@@ -2563,12 +3029,81 @@ export async function buildGenerationPlan(
   // IMAGE/VIDEO 的条目按镜头顺序混排生成镜与本机镜，本机镜以 local 明示不花额度。
   const planShots = perStoryboard ? (stage === 'AUDIO' ? voiced : selected) : []
   const localIds = new Set(localShots.map(storyboard => storyboard.id))
-  const items: GenerationPlanItem[] = perStoryboard
+
+  // 每一条目本轮真会派出的第一候选：排序走 orderTaskCandidates（与 triggerStage 同一个
+  // 函数），它读的参考图/首帧事实在这里按同一口径还原。还原不了就报 null——一个错的
+  // 模型名比没有更糟。
+  const shotById = new Map(episode.storyboards.map(storyboard => [storyboard.id, storyboard]))
+  const characterAssets = episode.assets.filter(asset => asset.kind === 'character')
+  const soleCharacterId = characterAssets.length === 1 ? characterAssets[0]!.id : null
+  const approvedReferencesByShot = new Map<string, Array<{ id: string; kind: string; name: string }>>()
+  if (referenceFacts) {
+    const assetsById = new Map(episode.assets.map(asset => [asset.id, asset]))
+    const addReference = (storyboardId: string, asset: { id: string; kind: string; name: string }, artifactId: string | null | undefined) => {
+      if (!artifactId) return
+      const list = approvedReferencesByShot.get(storyboardId) ?? []
+      list.push({ id: asset.id, kind: asset.kind, name: asset.name })
+      approvedReferencesByShot.set(storyboardId, list)
+    }
+    for (const link of referenceFacts.links) addReference(link.storyboardId, link.asset, link.asset.versions[0]?.artifactId)
+    for (const link of referenceFacts.pending) {
+      const asset = assetsById.get(link.assetId)
+      if (asset) addReference(link.storyboardId, asset, asset.versions[0]?.artifactId)
+    }
+  }
+  const hasVisibleReferences = (storyboardId: string): boolean => {
+    const shot = shotById.get(storyboardId)
+    if (!shot) return false
+    const visualText = `${shot.title} ${shot.description}`
+    return (approvedReferencesByShot.get(storyboardId) ?? []).some(asset => isShotVisible(asset, visualText, soleCharacterId))
+  }
+  // 非首镜挂该景主帧当第 1 张参考图：主帧在，这一镜就有参考图，编辑模型才排得上。
+  const hasSceneMasterReference = (storyboardId: string): boolean => {
+    const first = sceneMasters.sceneFirstByShot.get(storyboardId)
+    return first !== undefined && first.id !== storyboardId && sceneMasters.sceneMasterFrames.has(first.id)
+  }
+  const firstCandidateLabel = (input: CandidateOrderInput): string | null => {
+    const [first] = orderTaskCandidates(input, { candidates, conditioning, referenceModeling })
+    return first ? formatSlotCandidate(first) : null
+  }
+  const itemModel = (storyboardId: string): string | null => {
+    if (stage === 'IMAGE') {
+      const hasReferences = hasSceneMasterReference(storyboardId) || hasVisibleReferences(storyboardId)
+      // 带参考图却没有一个候选接得住：触发端整镜落 BLOCKED，一个模型都不会派。
+      if (hasReferences && !candidates.some(candidate => candidate.acceptsReferenceImages)) return null
+      return firstCandidateLabel({ stage: 'IMAGE', hasAssetReferences: hasReferences })
+    }
+    if (stage === 'VIDEO') {
+      if (conditioning.length === 0 && referenceModeling.length === 0) return firstCandidateLabel({ stage: 'VIDEO' })
+      // 超长镜的「换模型」决议还没做：第一候选取决于人接下来选哪条出路，此刻报谁都是猜。
+      const awaitingDecision = durationPreflight.some(item => item.storyboardId === storyboardId && item.options.some(option => option.strategy === 'switch_model' && option.available))
+      if (awaitingDecision) return null
+      return firstCandidateLabel({ stage: 'VIDEO', hasReferenceArtifact: videoFrames.has(storyboardId), hasAssetReferences: hasVisibleReferences(storyboardId) })
+    }
+    if (stage === 'AUDIO') return firstCandidateLabel({ stage: 'AUDIO' })
+    return null
+  }
+  const modelById = new Map<string, string | null>()
+  const waveInputs: PlanWaveInput[] = perStoryboard
     ? planShots.map(storyboard => {
-        const label = `#${storyboard.number} ${storyboard.title}`
-        return { id: storyboard.id, label, disposition: localIds.has(storyboard.id) ? 'local' : dispositionOf(storyboard.id) }
+        const disposition = localIds.has(storyboard.id) ? 'local' as const : dispositionOf(storyboard.id)
+        if (disposition === 'new' || disposition === 'retry') modelById.set(storyboard.id, itemModel(storyboard.id))
+        return { id: storyboard.id, label: `#${storyboard.number} ${storyboard.title}`, shotNumber: storyboard.number, disposition }
       })
-    : targets.map(target => ({ id: target.id, label: target.label, disposition: dispositionOf(target.id) }))
+    : targets.map(target => {
+        const disposition = dispositionOf(target.id)
+        if (disposition === 'new' || disposition === 'retry') {
+          modelById.set(target.id, perAsset ? firstCandidateLabel({ stage: 'ASSET' }) : firstCandidateLabel({ stage }))
+        }
+        return { id: target.id, label: target.label, shotNumber: null, disposition }
+      })
+  const waves = applySceneMasterWaves(
+    waveInputs,
+    stage === 'IMAGE' ? sceneMasters.blockedByMaster : new Map(),
+    sceneMasters.sceneFirstByShot,
+    modelById,
+  )
+  const items = waves.items
   const billable = new Set(items.filter(item => item.disposition === 'new' || item.disposition === 'retry').map(item => item.id))
   const durationById = new Map(planShots.map(storyboard => [storyboard.id, storyboard.durationMs]))
   // 开烧前的逐镜分镜体检。整集在册镜头一起送进判据（首镜与末镜的结论依赖它在序列
@@ -2576,24 +3111,55 @@ export async function buildGenerationPlan(
   // 事，报在配音预审门上只会让人以为是配音出了问题。时长地板只有 VIDEO 吃得到。
   let storyboardGaps: GenerationPlanShotGap[] = []
   if (mediaStage) {
-    const gaps = inspectStoryboardGaps(episode.storyboards, {
-      castNames: episode.assets.filter(asset => asset.kind === 'character').map(asset => asset.name),
-      scriptContent: approvedScriptContent,
-      minDurationMs: stage === 'VIDEO' ? (durationAssessment?.minMs ?? null) : null,
+    // SD-123：绑定是参考图通道的唯一来源，预审门要按「真触发时这一镜手里有几条绑定」报。
+    // 待补的那几条（reconcile 会写进库）必须算上，否则这里报零绑定、点下去却被自动挂上，
+    // 两处口径就分叉了。没读到的镜写 null 而不是 0——「没读」与「读到 0」是两件事。
+    const bindingCount = new Map<string, number>(voiced.map(storyboard => [storyboard.id, 0]))
+    if (referenceFacts) {
+      for (const link of [...referenceFacts.links, ...referenceFacts.pending]) {
+        bindingCount.set(link.storyboardId, (bindingCount.get(link.storyboardId) ?? 0) + 1)
+      }
+    }
+    const gaps = inspectStoryboardGaps(
+      episode.storyboards.map(storyboard => ({ ...storyboard, boundAssetCount: bindingCount.get(storyboard.id) ?? null })),
+      {
+        castNames: episode.assets.filter(asset => asset.kind === 'character').map(asset => asset.name),
+        scriptContent: approvedScriptContent,
+        minDurationMs: stage === 'VIDEO' ? (durationAssessment?.minMs ?? null) : null,
+      },
+    )
+    // SD-085②：画面里的数字读数没有一张定稿道具图作锚时，那一串数字全靠模型发挥
+    // （2026-10-21 镜头 #4 的床头钟显示「138」）。这里只把缺口点名到镜头上，让人先
+    // 去定稿那只钟——不改参考图的选取口径（SD-034：送错的东西比缺锚更贵）。
+    const assetsById = new Map(episode.assets.map(asset => [asset.id, asset]))
+    const boundLinks = await db.storyboardAsset.findMany({
+      where: { storyboardId: { in: voiced.map(storyboard => storyboard.id) } },
+      select: { storyboardId: true, assetId: true },
     })
+    // 触发端会补的绑定，预审门必须一起看：两处口径分叉时，这里报的镜和真跑时缺锚的镜对不上。
+    const pendingLinks = await missingShotAssetLinks(db, voiced, episode.assets)
+    const linkedAssets = [...boundLinks, ...pendingLinks].flatMap(link => {
+      const asset = assetsById.get(link.assetId)
+      return asset ? [{ storyboardId: link.storyboardId, asset }] : []
+    })
+    const readouts = new Map(unanchoredReadoutShots(voiced, linkedAssets).map(gap => [gap.shotNumber, gap.code]))
     const planned = new Set(planShots.map(storyboard => storyboard.id))
     storyboardGaps = episode.storyboards.flatMap(storyboard => {
-      const codes = gaps.get(storyboard.id)
-      return codes && codes.length > 0 && planned.has(storyboard.id) ? [{ shotNumber: storyboard.number, codes }] : []
+      const codes = [...(gaps.get(storyboard.id) ?? []), ...(readouts.has(storyboard.number) ? [readouts.get(storyboard.number)!] : [])]
+      return codes.length > 0 && planned.has(storyboard.id) ? [{ shotNumber: storyboard.number, codes }] : []
     })
   }
   return {
     ok: true,
     plan: {
       stage,
-      models: chain.map(candidate => `${candidate.connectionName} · ${candidate.provider}/${candidate.model}`),
+      models: chain.map(formatSlotCandidate),
       items,
+      // 新任务数含本轮等待主帧的那几镜；真正入队的是 dispatchCount。
       newCount: items.filter(item => item.disposition === 'new').length,
+      dispatchCount: waves.dispatchCount,
+      deferred: waves.deferred,
+      deferredCount: waves.deferredCount,
       retryCount: items.filter(item => item.disposition === 'retry').length,
       skippedCount: items.filter(item => item.disposition === 'skipped').length,
       localCount: items.filter(item => item.disposition === 'local').length,

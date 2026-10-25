@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BotIcon, CopyIcon, PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
-import { ApiError, API_BASE, getToken } from '@/lib/api'
+import { API_BASE, getToken, throwApiError } from '@/lib/api'
 import { useI18n } from '@/lib/i18n'
 import { apiErrorMessage } from '@/lib/api-error'
 import { Badge } from '@/components/ui/badge'
@@ -33,7 +33,7 @@ export function AgentAccessCard() {
   const load = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/agent-tokens`, { headers: { authorization: `Bearer ${getToken()}` } })
-      if (!response.ok) throw new ApiError(`HTTP ${response.status}`, response.status)
+      if (!response.ok) await throwApiError(response)
       setTokens((await response.json() as { tokens: AgentTokenRow[] }).tokens)
     } catch (error) {
       toast.error(apiErrorMessage(error, t))
@@ -51,7 +51,7 @@ export function AgentAccessCard() {
         headers: { authorization: `Bearer ${getToken()}`, 'content-type': 'application/json' },
         body: JSON.stringify({ name: name.trim() }),
       })
-      if (!response.ok) throw new ApiError(`HTTP ${response.status}`, response.status)
+      if (!response.ok) await throwApiError(response)
       const body = await response.json() as { secret: string }
       setSecret(body.secret)
       setName('')
@@ -66,7 +66,7 @@ export function AgentAccessCard() {
   async function revoke(id: string) {
     try {
       const response = await fetch(`${API_BASE}/agent-tokens/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${getToken()}` } })
-      if (!response.ok) throw new ApiError(`HTTP ${response.status}`, response.status)
+      if (!response.ok) await throwApiError(response)
       await load()
     } catch (error) {
       toast.error(apiErrorMessage(error, t))

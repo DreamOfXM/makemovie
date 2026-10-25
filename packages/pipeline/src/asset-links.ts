@@ -60,6 +60,30 @@ function locationMatches(location: string, assetName: string): boolean {
 const PRONOUN = /[他她]/
 
 /**
+ * SD-123：道具在镜头描述里常以「部位」出现——素材叫「床头钟」，分镜写「钟体飞向水面」。
+ * 整串包含永远判不出来。中文名词的中心语在末字，地点/属性修饰语（床头）换镜之后就
+ * 脱落了，所以末字才是道具身份。补一条「中心语 + 部位词」：
+ *
+ * - 只在道具上启用，而且名字至少三个字。「手表」「秒表」这种两字词本身已是融合名词，
+ *   末字「表」会撞上「表面上」这类日常用语；「床头钟」「门把手」「落地灯」的末字才是
+ *   真被修饰过的中心语。
+ * - 「的」也算部位词：本集实测的描述写「钟的秒针」。
+ */
+const PART_SUFFIXES = new Set('体面身壳柄罩盘座框边沿口底顶尖端带扣环腿臂盖的'.split(''))
+
+function mentionsProp(visualText: string, name: string): boolean {
+  if (visualText.includes(name)) return true
+  const chars = [...name]
+  if (chars.length < 3) return false
+  const head = chars[chars.length - 1]!
+  const text = [...visualText]
+  for (let index = 0; index < text.length - 1; index += 1) {
+    if (text[index] === head && PART_SUFFIXES.has(text[index + 1]!)) return true
+  }
+  return false
+}
+
+/**
  * 按「点名 > 地点 > 单角色代词」建立绑定。返回的每一对 (镜头, 素材) 只出现一次。
  *
  * - 名字：台词与说话人也算——说话的人就是出场的人（[小满] 的台词该绑小满）。
@@ -88,7 +112,7 @@ export function matchShotAssetLinks(shots: LinkableShot[], assets: LinkableAsset
         ? byName || locationMatches(location, asset.normalizedName)
         : asset.kind === 'character'
           ? byName || (PRONOUN.test(visual) && soleCharacter?.id === asset.id)
-          : byName
+          : byName || mentionsProp(visual, asset.normalizedName)
       if (!matched) continue
       seen.add(asset.id)
       links.push({ storyboardId: shot.id, assetId: asset.id, role: asset.kind })
@@ -107,6 +131,8 @@ export function matchShotAssetLinks(shots: LinkableShot[], assets: LinkableAsset
  */
 export function isShotVisible(asset: LinkableAsset, visualText: string, soleCharacterId: string | null): boolean {
   if (asset.kind === 'scene') return true
-  if (visualText.includes(normalizeAssetName(asset.name))) return true
+  const name = normalizeAssetName(asset.name)
+  // 道具按「点名或部位引用」进画面：绑上了却不送定妆照，这一镜的道具照样是模型自己编的。
+  if (asset.kind === 'prop' ? mentionsProp(visualText, name) : visualText.includes(name)) return true
   return asset.kind === 'character' && soleCharacterId === asset.id && PRONOUN.test(visualText)
 }

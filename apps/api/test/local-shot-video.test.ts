@@ -9,10 +9,11 @@ import { synthesizeMockMedia, titleCardCapability } from '@studio/media'
  * 手工制作镜（字卡 / 界面 / 屏幕录制 / 合成）的画面入口（SD-108）。
  *
  * 这四档镜头平台不排模型调用，此前界面上一个入口都没有：进这一镜只看到「手工制作」
- * 徽章，整集合成时后端直接抛缺片段。这里锁的是两件事——
+ * 徽章，整集合成时后端直接抛缺片段。这里锁的是几件事——
  * ① 机内真的能出片并「上传即选中」，走与模型片段完全相同的钦定/入片路径；
  * ② 三账诚实：本机产物没有 GenerationTask、没有 ArtifactOperation，用量表上不该出现它；
- * ③ 卡上的文案是这一镜的全部内容，重画不能把它换成分镜表里的占位镜号（SD-117）。
+ * ③ 卡上的文案是这一镜的全部内容，重画不能把它换成分镜表里的占位镜号（SD-117）；
+ * ④ 档位是「视频」的镜头也允许导入（SD-178）：模型出不了片时，人的这一条画面是唯一出口。
  */
 let env: TestEnv
 let ownerToken: string
@@ -226,7 +227,7 @@ describe('title card rendered on this machine', () => {
   })
 })
 
-describe('picture imported for a hand-made shot', () => {
+describe('picture imported by hand', () => {
   it('accepts a real clip, pins it, and reports the length measured from the file', async () => {
     const clipPath = join(scratch, 'screen-recording.mp4')
     await synthesizeMockMedia('t2v', clipPath, { durationMs: 2500 })
@@ -250,10 +251,18 @@ describe('picture imported for a hand-made shot', () => {
     expect(await env.db.mediaArtifact.count({ where: { storyboardId: uiShotId, stage: 'VIDEO' } })).toBe(2)
   })
 
-  it('will not let an import overwrite a shot a model is paid to shoot', async () => {
-    const res = await importVideo(modelShotId, '偷渡.mp4', Buffer.from('whatever'))
-    expect(res.statusCode).toBe(409)
-    expect(res.json().error).toMatch(/produced by a model/)
+  it('lets a human clip close a shot the model could not deliver (SD-178)', async () => {
+    const clipPath = join(scratch, 'rescue.mp4')
+    await synthesizeMockMedia('t2v', clipPath, { durationMs: 2500 })
+    const res = await importVideo(modelShotId, '实拍_床头钟.mp4', await readFile(clipPath))
+    expect(res.statusCode).toBe(201)
+    const body = res.json() as ShotVideoDto
+    expect(body.selectedVideoArtifactId).toBe(body.artifact?.id)
+    const row = await rowOf(modelShotId)
+    // 档位仍是「视频」——导入不改生成方式，只给这一镜补一条被选中的画面；
+    // 否则改档会把这一镜从模型链上摘掉，人想再让模型重拍就没有入口了。
+    expect(row?.production).toBe('video')
+    expect(row?.videoCandidates[0]).toMatchObject({ origin: 'imported', taskId: null, selected: true })
   })
 
   it('rejects a missing part, a wrong extension, an empty file and bytes no demuxer can read', async () => {

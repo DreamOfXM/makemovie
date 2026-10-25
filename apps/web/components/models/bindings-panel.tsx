@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { CircleAlertIcon, LinkIcon, ListOrderedIcon, PlusIcon, Trash2Icon } from 'lucide-react'
-import { capabilitySlots, compareSlotFallbacks, slotModality, type CapabilitySlot } from '@studio/domain'
+import { capabilitySlots, compareSlotFallbacks, type CapabilitySlot } from '@studio/domain'
 import type { Binding, Connection, Project, ResolveResponse } from '@/lib/api'
 import { bindableCapabilities, candidatesForSlot, type BindableCapability } from '@/lib/models/readiness'
 import { translateEnum, useI18n } from '@/lib/i18n'
@@ -693,11 +693,11 @@ function BindDialog({ open, pool, projects, defaultSlot, defaultScope, onOpenCha
               </SelectTrigger>
               <SelectContent>
                 {capabilitySlots.map(item => (
+                  // SD-077：槽位下拉只给人话名。此前把 modality 后缀拼在标签旁，
+                  // 缺字典键时直接印出「音效sfx」「audio_transcribeasr」——内部枚举码
+                  // 不上屏（与「内部文本五类泄漏清零」同规则），码不出现。
                   <SelectItem key={item} value={item}>
                     {translateEnum(t, 'slots', item)}
-                    <span className="text-muted-foreground ml-2 text-xs">
-                      {translateEnum(t, 'modality', slotModality[item])}
-                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

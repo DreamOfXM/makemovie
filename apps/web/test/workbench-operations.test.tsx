@@ -5,6 +5,7 @@ import { AudioSourceRow } from '@/components/shotboard/workbench/audio-source-ro
 import { ShotEditor } from '@/components/shotboard/workbench/shot-editor'
 import { TransitionRow } from '@/components/shotboard/workbench/transition-row'
 import { VersionCompare } from '@/components/shotboard/workbench/version-compare'
+import { ArtifactLoadError } from '@/components/generations/artifact-media'
 import type { ApiClient, GenerationArtifact, ShotboardShot, ShotOperation, ShotVideoCandidate } from '@/lib/api'
 
 /**
@@ -14,6 +15,26 @@ import type { ApiClient, GenerationArtifact, ShotboardShot, ShotOperation, ShotV
  * 本仓组件测试跑在 node 环境（无 DOM），走 react-dom/server 静态渲染 + i18n/session
  * 注入层 mock：t() 恒回键名让断言不随后续补字典漂移，can() 恒真走有权限分支。
  */
+
+/** 渲染出的 HTML 里不许有落在原生 button 内的可交互元素（SD-122：非法 HTML 会让整棵工作台 hydration 失败退回 CSR）。 */
+function htmlInteractiveNesting(html: string): string[] {
+  const found: string[] = []
+  const stack: string[] = []
+  const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/g
+  for (let match; (match = tagRe.exec(html)); ) {
+    const [, slash, name, attrs] = match
+    if (slash) {
+      const index = stack.lastIndexOf(name)
+      if (index >= 0) stack.length = index
+      continue
+    }
+    if (stack.includes('button') && ((name === 'button' && !/type="submit"/.test(attrs)) || name === 'a')) {
+      found.push(`<${name}${attrs.slice(0, 40)}>`)
+    }
+    if (!/\/$/.test(attrs) && !['br', 'img', 'input', 'hr'].includes(name)) stack.push(name)
+  }
+  return found
+}
 
 const sessionMock = vi.hoisted(() => {
   const calls: Array<{ path: string; init?: RequestInit }> = []
@@ -110,8 +131,10 @@ function shot(over: Partial<ShotboardShot> = {}): ShotboardShot {
     usage: null,
     slot: 'empty',
     production: 'video',
+    method: null,
     attention: [],
     storyboardGaps: [],
+    staleFirstFrameArtifactId: null,
     waitingSince: null,
     ...over,
   }
@@ -201,6 +224,80 @@ describe('延长/定向编辑入口（preview-panel）', () => {
     // 静态渲染下 Tooltip 未展开不渲染正文——「原文不上屏」这条正是靠它可证。
     expect(failed).toContain('workbench.rawErrorTrigger')
     expect(failed).not.toContain('provider boom')
+  })
+})
+
+/**
+ * SD-189：不生效的旧档不许挂着付费重跑入口。生效声档是「导入音频」时，母带里这一镜
+ * 的人声只认导入件（compose manifest 的 audio 档与 cloudVoiceEntersMaster 同一口径），
+ * 云端配音永远不上片——配音区块头的读数必须是「不进母带」这句，而不是冒充生效链的
+ * 「自动取最新 / ✓ 已钦定」；它的钦定与「重跑「配音」」（一次真计费的云端调用）整段收口
+ * （按钮在展开区，静态渲染下由 shot-verdict.test.ts 的 cloudVoiceEntersMaster 钉判据）。
+ */
+describe('导入声档的云端配音收口（preview-panel）', () => {
+  const importedFile: GenerationArtifact = {
+    id: 'imp-1',
+    mimeType: 'audio/wav',
+    objectKey: 'org-1/shot-1-voice.wav',
+    version: 1,
+    width: null,
+    height: null,
+    durationMs: 4600,
+    downloadUrl: '/artifacts/imp-1/content',
+  }
+
+  it('audioSource=IMPORTED：配音区块头说「云端配音不进母带」，不再写「自动取最新」', () => {
+    const html = renderPreview({
+      dialogue: '你来了。',
+      audioSource: 'IMPORTED',
+      importedVoice: importedFile,
+      voice: { ...importedFile, id: 'cloud-1' },
+      voiceCandidates: [candidate({ artifactId: 'cloud-1', origin: 'generation' })],
+    })
+    expect(html).toContain('workbench.voiceCloudBypass')
+    expect(html).not.toContain('workbench.autoPinned')
+    expect(html).not.toContain('✓ workbench.voicePinned')
+  })
+
+  it('云端配音仍在生效链上时（VOICE 档）不动旧读数：区块头照旧说自动取最新/已钦定', () => {
+    const html = renderPreview({
+      dialogue: '你来了。',
+      audioSource: 'VOICE',
+      voice: { ...importedFile, id: 'cloud-1' },
+      voiceCandidates: [candidate({ artifactId: 'cloud-1', origin: 'generation' })],
+    })
+    expect(html).not.toContain('workbench.voiceCloudBypass')
+    expect(html).toContain('workbench.autoPinned')
+  })
+})
+
+/**
+ * SD-168：唯一那一版付费成片停在「等你裁决」时，红条必须换口径。
+ * 这里只钉「用的是哪条键」（真句子与真词典在 test/shot-truth.test.tsx），
+ * 因为旧判据只看生效链、把「有可播那一版」和「真没产物」压成同一句「这一镜还没有画面」。
+ */
+describe('有可播产物却没过线的读数口径（preview-panel）', () => {
+  const auditFailure = 'visual-audit: threshold not met after 3 attempts'
+
+  it('候选里有停在等你裁决那一版 → 说 videoParked，不再说 videoFailed', () => {
+    const html = renderPreview({
+      attention: ['video_failed'],
+      videoError: auditFailure,
+      videoCandidates: [candidate({ awaitingDecision: true })],
+    })
+    expect(html).toContain('shotboard.reason.videoParked')
+    expect(html).not.toContain('shotboard.reason.videoFailed')
+  })
+
+  it('真的什么都没有时照旧说 videoFailed，判据不许反向失守', () => {
+    const html = renderPreview({ attention: ['video_failed'], videoError: auditFailure })
+    expect(html).toContain('shotboard.reason.videoFailed')
+    expect(html).not.toContain('shotboard.reason.videoParked')
+  })
+
+  it('放大入口只认「有没有能播的画面」：有停判那一版就给，空镜不给', () => {
+    expect(renderPreview({ videoCandidates: [candidate({ awaitingDecision: true })] })).toContain('workbench.zoom')
+    expect(renderPreview()).not.toContain('workbench.zoom')
   })
 })
 
@@ -426,5 +523,32 @@ describe('版本比较（shot-editor + version-compare）', () => {
       <VersionCompare storyboardId="shot-1" artifacts={[{ id: 'a-1', version: 1, mimeType: 'video/mp4', downloadUrl: '/artifacts/a-1/content' }]} />,
     )
     expect(html).toBe('')
+  })
+})
+
+/**
+ * SD-122：大预览格与候选格本身就是 `<button>`，而产物加载失败时格子里长出的重试钮
+ * 曾直接嵌进去——`<button>` 落在 `<button>` 里是非法 HTML，React 报 hydration 错误并把
+ * 整棵工作台退回客户端渲染。现在 retryless 宿主只报事实，重试入口落在按钮之外。
+ */
+describe('失败态重试不嵌进可点格子（SD-122）', () => {
+  it('制作台渲染出的 HTML 里没有任何落在 button 内的可交互元素', () => {
+    const html = renderPreview({
+      videoCandidates: [candidate()],
+      frameCandidates: [candidate({ artifactId: 'f-1' })],
+      voiceCandidates: [candidate({ artifactId: 'v-1', mimeType: 'audio/wav' })],
+    })
+    expect(html).toContain('aria-haspopup="menu"')
+    expect(htmlInteractiveNesting(html)).toEqual([])
+  })
+
+  it('失败条默认带一枚真按钮；标了 retryless 就一个可交互元素都不留', () => {
+    const withRetry = renderToStaticMarkup(<ArtifactLoadError onRetry={() => {}} />)
+    expect(withRetry).toContain('<button')
+    const retryless = renderToStaticMarkup(<ArtifactLoadError onRetry={() => {}} retryless />)
+    expect(retryless).not.toContain('<button')
+    expect(retryless).not.toContain('<a ')
+    // 失败事实本身不因为摘掉按钮而消失。
+    expect(retryless).toContain('generations.loadFailed')
   })
 })

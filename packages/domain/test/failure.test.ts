@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { callEvidenceKey, classifyFailure, isTerminalFailure, reduceCallEvidence, type CallEvidenceRow } from '../src/index.js'
+import { callEvidenceKey, classifyComposeBlock, classifyFailure, composeBlockKinds, isTerminalFailure, reduceCallEvidence, type CallEvidenceRow, type ComposeBlockKind } from '../src/index.js'
 
 // 每条夹具都是 2026-09-26 从本机库 GenerationTask.errorSnapshot 里原样抄出来的报文，
 // 不是编的形状：分类器错一条，界面上就是一句假的原因。
@@ -109,5 +109,45 @@ describe('reduceCallEvidence', () => {
 
   it('没有 model 的任务跳过：它证明不了任何一档模型通不通', () => {
     expect(reduceCallEvidence([task({ model: null })]).size).toBe(0)
+  })
+})
+
+// 合成整集停在「已阻塞」时，worker 写进 Composition.errorSnapshot 的原文（逐条从
+// apps/worker/src/compose.ts 的 throw 抄回，占位符换成真实形状的 id）。界面不说原文，
+// 只说这一档归类翻成人话的那句——归错档就等于给用户一句错的修法。
+const COMPOSE_RAW: readonly { kind: ComposeBlockKind; raw: string }[] = [
+  { kind: 'seam_unconditioned', raw: "storyboard sbx01: take 2 is not conditioned on take 1's end frame — the splice has a visible seam and will not render as one shot" },
+  { kind: 'snapshot_drift', raw: "storyboard sbx01: the frozen take set no longer matches the master's own segments — the master was rebuilt after this composition was queued; re-compose to pick up the current cuts" },
+  { kind: 'snapshot_drift', raw: 'storyboard sbx01: the frozen snapshot splice takes 3 segments but the video artifact is not a spliced master — re-compose this episode' },
+  { kind: 'selection_stale', raw: "storyboard's locked video selection art0001 no longer resolves — fix the selection before composing" },
+  { kind: 'selection_stale', raw: 'storyboard has lockedVideoSelection but no selectedVideoArtifactId — lock means "keep this", so a selection must exist' },
+  { kind: 'selection_stale', raw: 'storyboard sbx01: frozen video artifact art0001 no longer resolves — re-compose this episode' },
+  { kind: 'edit_clip_unknown', raw: 'edit clip clip-1 references artifact art0002 that is not a video of this shot — fix the edit before composing' },
+  { kind: 'edit_clip_unknown', raw: 'edit track trk-1 anchors a hidden or unknown clip — fix the edit before composing' },
+  { kind: 'edit_source_missing', raw: 'edit track trk-1 source artifact art0003 not found — fix the edit before composing' },
+  { kind: 'clip_not_editable', raw: 'failed to conform clip for storyboard sbx01 to 25/1 CFR before trimming — raw source is not editable media' },
+  { kind: 'trim_failed', raw: 'failed to trim clip for storyboard sbx01 [0,125) at 25.000fps' },
+  { kind: 'wrong_episode', raw: 'storyboard sbx01 does not belong to episode ep0001' },
+  { kind: 'missing_video', raw: 'storyboard sbx01 has no succeeded video artifact (resolved at queue time)' },
+  { kind: 'missing_video', raw: 'storyboard sbx01 has no succeeded video artifact' },
+]
+
+describe('classifyComposeBlock', () => {
+  it('每一条 worker 原文归到它自己那一档', () => {
+    for (const { kind, raw } of COMPOSE_RAW) expect(classifyComposeBlock(raw), raw).toBe(kind)
+  })
+
+  it('除 unknown 外每一档都有真句子够得着——字典里的句子不会空挂', () => {
+    expect(new Set(COMPOSE_RAW.map(entry => entry.kind))).toEqual(new Set(composeBlockKinds.filter(kind => kind !== 'unknown')))
+  })
+
+  it('认不出的原文落进 unknown，绝不硬套一档给用户一句错的修法', () => {
+    expect(classifyComposeBlock('ffmpeg exited with code 137')).toBe('unknown')
+    expect(classifyComposeBlock(null)).toBe('unknown')
+  })
+
+  it('裁切失败里「源不是可剪画面」优先于泛用的裁切失败', () => {
+    // 同一句里两个模式都能命中，归错档界面上就只说「文件可能坏了」，用户会重生成一个照样剪不动的镜头。
+    expect(classifyComposeBlock(COMPOSE_RAW.find(entry => entry.kind === 'clip_not_editable')!.raw)).toBe('clip_not_editable')
   })
 })

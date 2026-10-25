@@ -11,6 +11,7 @@ import { promisify } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 export * from './reference-image.js'
+import { probeVideo } from './edit-media.js'
 
 /**
  * The one child-process helper this package spawns through. Exported so sibling
@@ -415,6 +416,30 @@ export async function probeMediaMeta(file: string): Promise<MediaMeta | null> {
   }
 }
 
+/**
+ * 画面帧数实测：母带时间线的唯一基准。
+ * SD-182 的教训是「容器时长不是画面时钟」：mp4 的 format=duration 由音轨收尾——
+ * 实测一条画面 4.0417s（97 帧@24fps）的 vendor 片容器是 4.096s，按 4.096 换算
+ * 25fps 序列就每镜多排 1 帧并不存在的画面，字幕/配音照这张表排在画面上，越往后
+ * 越漂。这里只数视频流的真帧数（CFR 交付里 nb_frames 就是帧数），读不出返回 null，
+ * 由调用方决定退哪把尺。
+ */
+export async function probeVideoFrames(file: string): Promise<number | null> {
+  const probe = await probeVideo(file)
+  return probe?.frameCount ?? null
+}
+
+/**
+ * 画面时长（帧数 × 帧率换算，容器不参与）。探针读不出画面时退回容器时长——
+ * 一条已经渲染好的素材不该因为元数据读不出而失败，但读得出时必须是画面自己的时钟。
+ */
+export async function probePictureDuration(file: string): Promise<number> {
+  const probe = await probeVideo(file)
+  if (!probe) return probeDuration(file)
+  const rate = probe.fpsNum / (probe.fpsDen || 1)
+  return Number.isFinite(rate) && rate > 0 ? Math.round(probe.frameCount * 1000 / rate) : probeDuration(file)
+}
+
 /** 片段是否带音轨:图生视频模型(如 wanx2.1)无声,而 wan3.0 带环境音——合成时区别对待。 */
 export async function hasAudioStream(file: string): Promise<boolean> {
   try {
@@ -429,6 +454,106 @@ export async function hasAudioStream(file: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * SD-183 镜内闪变读数：一条素材内部到底有几次硬性场景跳。
+ *
+ * 判据与台账同一口径——`ffmpeg -vf select='gt(scene,threshold)',metadata=print` 的
+ * 场景分计数（production-log.md SD-183 行：#5 一条 4.04 s 素材里 7 次 scene-change，
+ * 最高分 1.00，用的正是 `select='gt(scene,0.2)'`）。注意元数据行是 info 级日志，
+ * 命令不许带 `-v error`，否则什么都读不出来（2026-10-25 实测）。
+ *
+ * 一次解码、不做二遍：dec 只做画面滤镜，`-an -f null` 不产出文件。读不出（ffmpeg
+ * 缺失、文件损坏）返回 null 而非 0——「没量到」与「量到 0 次」必须是两个值，前者
+ * 不许被当成通过（与 `probeVideoFrames` 的 null 降级同一族规）。阈值不在此层定，
+ * 由审核侧传入并在那一侧单点留档。
+ */
+export interface SceneCutMeasurement {
+  /** 场景分超过阈值的帧数（即镜内硬跳变次数）。 */
+  cutCount: number
+  /** 观测到的最高场景分；一次都没跳时为 null——没跳过就没有「最高」可言。 */
+  maxScore: number | null
+}
+
+export async function measureSceneCuts(file: string, sceneScoreMin: number): Promise<SceneCutMeasurement | null> {
+  if (!Number.isFinite(sceneScoreMin)) return null
+  try {
+    const { stderr } = await run('ffmpeg', [
+      '-hide_banner',
+      '-i', file,
+      '-vf', `select='gt(scene,${sceneScoreMin})',metadata=print`,
+      '-an',
+      '-f', 'null', '-',
+    ])
+    let cutCount = 0
+    let maxScore: number | null = null
+    for (const match of stderr.matchAll(/lavfi\.scene_score=([0-9.eE+-]+)/g)) {
+      const score = Number.parseFloat(match[1])
+      if (!Number.isFinite(score)) continue
+      cutCount += 1
+      if (maxScore === null || score > maxScore) maxScore = score
+    }
+    return { cutCount, maxScore }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * SD-184 邻镜重复读数（下采样灰格指纹）：取素材中段的一帧，缩到 32×32 灰度后原样
+ * 交回字节。比较在纯函数 `frameSignatureDistance` 里做，探测失败返回 null——调用方
+ * 据此把这一对判成「测不出」，绝不补一个「不相同」蒙混过关。
+ *
+ * 每素材一次解码（先 ffprobe 时长再 `-ss` 中段单帧），比较前已缩到 1024 字节，
+ * 邻镜再多也是有界的。中段帧而非首帧：首帧在 i2v 链上恰恰是上一镜的末帧（条件帧），
+ * 拿它比较会让每个接镜头都自带一份「重复」。
+ */
+export async function probeFrameSignature(file: string, workdir: string): Promise<Uint8Array | null> {
+  const durationMs = await probeDuration(file)
+  if (durationMs <= 0) return null
+  return probeFrameSignatureAt(file, workdir, durationMs / 2_000)
+}
+
+/**
+ * SD-087/SD-088 结构漂移读数要的是「同一条素材的两个时刻」——中段一帧不够，取样时刻
+ * 得由调用方给。尺与 `probeFrameSignature` 完全同一把（32×32 area 灰格），因为两条
+ * 读数必须能互相比较，也必须是台账里 0.03 那个实测阈值量出来的同一把尺。
+ * 临时文件名带时刻：同一素材多个时刻并发解码时不许互相覆盖。
+ */
+export async function probeFrameSignatureAt(file: string, workdir: string, timeSeconds: number): Promise<Uint8Array | null> {
+  if (!Number.isFinite(timeSeconds) || timeSeconds < 0) return null
+  try {
+    const target = path.join(workdir, `frame-sig-${createHash('sha1').update(`${path.resolve(file)}@${timeSeconds.toFixed(3)}`).digest('hex').slice(0, 16)}.y8`)
+    try {
+      await run('ffmpeg', [
+        '-y', '-v', 'error',
+        '-ss', timeSeconds.toFixed(3),
+        '-i', file,
+        '-frames:v', '1',
+        '-vf', 'scale=32:32:flags=area,format=gray',
+        '-f', 'rawvideo',
+        target,
+      ])
+      const bytes = await readFile(target)
+      return bytes.byteLength === 32 * 32 ? bytes : null
+    } finally {
+      await rm(target, { force: true }).catch(() => undefined)
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 两格指纹的平均灰度差，归一 0..1（0 = 逐像素同图）。长度不一致 = 不是同一把尺，
+ * 返回 null 让调用方走「测不出」，不硬算一个数。
+ */
+export function frameSignatureDistance(a: Uint8Array, b: Uint8Array): number | null {
+  if (a.length === 0 || a.length !== b.length) return null
+  let total = 0
+  for (let index = 0; index < a.length; index += 1) total += Math.abs(a[index]! - b[index]!)
+  return total / a.length / 255
 }
 
 export interface SubtitleEntry {
@@ -1134,7 +1259,7 @@ export class FfmpegComposer implements Composer {
         } else {
           await run('ffmpeg', ['-y', '-v', 'error', '-i', master, '-c', 'copy', ...labelArgs, output])
         }
-        return { durationMs: await probeDuration(output), ...(labeling ? { labeling } : {}), ...cutsResult }
+        return { durationMs: await probePictureDuration(output), ...(labeling ? { labeling } : {}), ...cutsResult }
       }
 
       // 字幕两条交付路径:硬烧进画面(短剧交付标准)或挂 mov_text 软字幕轨(外部
@@ -1164,14 +1289,13 @@ export class FfmpegComposer implements Composer {
         args.push('-c:v', 'copy')
       }
       if (finalAudio) {
-        if (extrasMixed) {
-          // Q02:extras 轨长度与画面无关——成片总长以画面时间线为准:不足补静音
-          // (apad),超出裁掉(-t),不用 -shortest 反向裁短画面。
-          const videoSeconds = (await probeDuration(master)) / 1000 + overflowSeconds
-          args.push('-c:a', 'aac', '-b:a', '192k', '-af', 'apad', '-t', videoSeconds.toFixed(3))
-        } else {
-          args.push('-c:a', 'aac', '-b:a', '192k', '-shortest')
-        }
+        // R04/Q02/V04/SD-182 同一条规则：画面时钟是唯一终局。过去这条分支用 -shortest，
+        // 等于拿音频的收尾去截画面——实测 45 帧@15fps 的母带配一条 3.023 s 的混音轨，
+        // -c:v copy 下只写出 41 帧；三条 1 秒镜拼的母带配 3.000 s 声轨掉到 43 帧。
+        // 每集几十刀累计就是台账里母带比编辑文档短的那几秒，而字幕照文档排。
+        // 改成不足补静音（apad）、超出按画面长度裁掉（-t）：音频的尾巴能切，画面一帧不许少。
+        const pictureSeconds = (await probePictureDuration(master)) / 1000 + overflowSeconds
+        args.push('-c:a', 'aac', '-b:a', '192k', '-af', 'apad', '-t', pictureSeconds.toFixed(3))
       } else if (videoFilters.length > 0) {
         args.push('-c:a', 'copy')
       }
@@ -1188,7 +1312,7 @@ export class FfmpegComposer implements Composer {
           output,
         ])
       }
-      return { durationMs: await probeDuration(output), ...(labeling ? { labeling } : {}), ...bedsResult, ...cutsResult }
+      return { durationMs: await probePictureDuration(output), ...(labeling ? { labeling } : {}), ...bedsResult, ...cutsResult }
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }
@@ -1353,11 +1477,78 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10
 }
 
-async function copyConcat(clips: string[], target: string, workdir: string): Promise<void> {
-  // concat demuxer 拿第一段的流布局当整条母带的布局：只要有一个镜头不带音轨（本机画的
-  // 字卡就是），输出的就只有视频流，后面每一个镜头的原声被一起静默丢掉，实测整集还短
-  // 0.4~0.6 s。所以不带音轨的段先按自身实测时长垫一条等长静音——画面仍走 -c:v copy，
-  // 不吃一代画质，拼接继续是 copy。
+/**
+ * 一段片子在拼接时算不算「同一布局」的字段。concat demuxer 在 `-c copy` 下拿第一段
+ * 的时间基套整条母带，所以跨 fps 序列（25/30/24）拼出来的容器时长与 PTS 全是假的：
+ * 实测三段合计 9.0417 s 被报成 8.7136 s、13 帧 PTS 倒退、字卡→#2 接缝处 0.640 s 空洞
+ * （SD-115）。而时间线、字幕时间轴、交付读数都建立在这个假时间轴上。
+ */
+export interface ClipLayout {
+  video: { codec: string; width: number; height: number; pixFmt: string; timebase: string; fps: number; fpsRate: string } | null
+  audio: { codec: string; sampleRate: number; channels: number; timebase: string } | null
+}
+
+async function probeClipLayout(file: string): Promise<ClipLayout> {
+  try {
+    const { stdout } = await run('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,timebase,avg_frame_rate',
+      '-of', 'json', file,
+    ])
+    const streams = (JSON.parse(stdout) as { streams?: Array<Record<string, string | number | undefined>> }).streams ?? []
+    const video = streams.find(s => s.codec_type === 'video')
+    const audio = streams.find(s => s.codec_type === 'audio')
+    const [num, den] = String(video?.avg_frame_rate ?? '0/1').split('/')
+    const fps = Number(den) > 0 ? Number(num) / Number(den) : 0
+    return {
+      video: video
+        ? {
+            codec: String(video.codec_name ?? ''),
+            width: Number(video.width ?? 0),
+            height: Number(video.height ?? 0),
+            pixFmt: String(video.pix_fmt ?? ''),
+            timebase: String(video.timebase ?? ''),
+            fps,
+            fpsRate: String(video.avg_frame_rate ?? '0/1'),
+          }
+        : null,
+      audio: audio
+        ? {
+            codec: String(audio.codec_name ?? ''),
+            sampleRate: Number(audio.sample_rate ?? 0),
+            channels: Number(audio.channels ?? 0),
+            timebase: String(audio.timebase ?? ''),
+          }
+        : null,
+    }
+  } catch {
+    return { video: null, audio: null }
+  }
+}
+
+/** 探不到任何一路流时返回同一个「空签名」，调用方按不一致处理，绝不拿它当一致。 */
+function layoutSignature(layout: ClipLayout): string {
+  const v = layout.video
+  const a = layout.audio
+  return v ? JSON.stringify([v.codec, v.width, v.height, v.pixFmt, v.timebase, v.fpsRate, a?.codec ?? '-', a?.sampleRate ?? '-', a?.channels ?? '-', a?.timebase ?? '-']) : ''
+}
+
+export type ConcatStrategy = 'copy' | 'normalize'
+
+/**
+ * copy 还是归一化重编码，只看一件事：每一段的流布局是否完全一致。
+ * 一致时 copy 零画质损失（无转场路径逐字节不变是硬要求）；不一致时 copy 出来的
+ * 时间轴是假的，一次本机编码换真时间轴——接缝看不出来比省一代画质重要。
+ */
+export function pickConcatStrategy(layouts: ClipLayout[]): ConcatStrategy {
+  if (layouts.length < 2) return 'copy'
+  const signature = layouts[0] ? layoutSignature(layouts[0]) : ''
+  if (!signature) return 'normalize'
+  return layouts.every(layout => layoutSignature(layout) === signature) ? 'copy' : 'normalize'
+}
+
+/** 不带音轨的段先按自身实测时长垫一条等长静音：画面仍走 -c:v copy，不吃一代画质。 */
+async function padSilentAudio(clips: string[], workdir: string): Promise<string[]> {
   const aligned: string[] = []
   for (const [index, clip] of clips.entries()) {
     const seconds = await probeDuration(clip)
@@ -1376,10 +1567,78 @@ async function copyConcat(clips: string[], target: string, workdir: string): Pro
     ])
     aligned.push(padded)
   }
+  return aligned
+}
+
+/**
+ * 归一化拼接：一次 ffmpeg、一次编码，把每段 conform 到同一条时间线。帧率取各段最大值
+ * ——低帧率段靠补帧对齐，宁可重复一帧也不丢画面（丢画面是 SD-115 ②：232 帧重编码后
+ * 只剩 204 帧）。尺寸/画幅比/像素格式统一到第一段，与 blendConcat 同一套配方。
+ * 入参必须已经补齐音轨（见 padSilentAudio），否则 concat 滤镜的音频侧接不上。
+ */
+async function normalizeConcat(clips: string[], target: string, layouts: ClipLayout[]): Promise<void> {
+  const canvas = layouts.find(l => l.video)?.video
+  const width = canvas && canvas.width > 0 ? canvas.width : 1080
+  const height = canvas && canvas.height > 0 ? canvas.height : 1920
+  const fastest = layouts.reduce((max, l) => Math.max(max, l.video?.fps ?? 0), 0)
+  const rate = fastest > 0 ? (layouts.find(l => l.video?.fps === fastest)?.video?.fpsRate ?? '25/1') : '25/1'
+  const parts: string[] = []
+  clips.forEach((_, index) => {
+    parts.push(
+      `[${index}:v]fps=${rate},scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+        `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,settb=AVTB[v${index}]`,
+    )
+    parts.push(`[${index}:a]${AUDIO_SHAPE},asetpts=PTS-STARTPTS[a${index}]`)
+  })
+  const labels = clips.map((_, index) => `[v${index}][a${index}]`).join('')
+  parts.push(`${labels}concat=n=${clips.length}:v=1:a=1[outv][outa]`)
+  await run('ffmpeg', [
+    '-y', '-v', 'error',
+    ...clips.flatMap(clip => ['-i', clip]),
+    '-filter_complex', parts.join(';'),
+    '-map', '[outv]', '-map', '[outa]',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k',
+    target,
+  ])
+}
+
+async function copyConcat(clips: string[], target: string, workdir: string): Promise<void> {
+  // concat demuxer 拿第一段的流布局当整条母带的布局：只要有一个镜头不带音轨（本机画的
+  // 字卡就是），输出的就只有视频流，后面每一个镜头的原声被一起静默丢掉，实测整集还短
+  // 0.4~0.6 s。所以不带音轨的段先按自身实测时长垫一条等长静音——画面仍走 -c:v copy，
+  // 不吃一代画质，拼接继续是 copy。
+  const aligned = await padSilentAudio(clips, workdir)
+  const layouts = await Promise.all(aligned.map(probeClipLayout))
+  if (pickConcatStrategy(layouts) === 'normalize') {
+    await normalizeConcat(aligned, target, layouts)
+    return
+  }
   const list = path.join(workdir, 'clips.txt')
   const entries = aligned.map(clip => `file '${clip.replaceAll("'", "'\\''")}'`).join('\n')
   await writeFile(list, entries + '\n')
   await run('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', target])
+  // SD-182：copy 拼接后必须把帧数数回来。demuxer 只按「上一段声明到的结束时间」续 PTS，
+  // 段尾音轨比画面长几毫秒（aac 一帧就是 23ms）时，下一镜的首帧时间戳落回已经排过的格子里，
+  // muxer 直接把它丢掉——实测 102+100 帧的两镜 copy 出来是 201 帧。每刀少一帧，63 镜就是
+  // 台账里母带比编辑文档短的那 2.5 秒，而字幕照文档排，越往后越漂。
+  // 掉帧是交付事故，比多花一次本机重编码贵得多：对不上账就整条改走滤镜拼接（逐段帧守恒）。
+  const expected = await sumFrameCount(aligned)
+  const delivered = await probeVideoFrames(target)
+  if (expected !== null && delivered !== null && delivered !== expected) {
+    await normalizeConcat(aligned, target, layouts)
+  }
+}
+
+/** 逐段实测画面帧数求和；任一段读不出就不裁决（交回 null），绝不拿能读的部分猜总数。 */
+async function sumFrameCount(files: string[]): Promise<number | null> {
+  const counts = await Promise.all(files.map(probeVideoFrames))
+  let total = 0
+  for (const count of counts) {
+    if (count === null) return null
+    total += count
+  }
+  return total
 }
 
 /**
@@ -1568,10 +1827,14 @@ export function planMasterCuts(
   }
 }
 
-/** 从文件本身算母带时间线：实测长度 + 首镜帧率，渲染侧与调用侧同一把尺。 */
+/** 从文件本身算母带时间线：逐镜实测画面帧数 × 各自帧率，渲染侧与调用侧同一把尺。 */
 export async function planMasterCutsForClips(clips: string[], transitions: (ShotTransitionInput | null | undefined)[]): Promise<MasterCutPlan> {
-  const clipMs = await Promise.all(clips.map(clip => probeDuration(clip)))
   const fps = (await probeVideoStream(clips[0] ?? ''))?.fps ?? DEFAULT_TIMELINE_FPS
+  // 时钟取自画面帧数而非容器时长（SD-182）：mp4 的 format=duration 由音轨收尾，
+  // 实测一条画面 4.0417s 的 vendor 片容器是 4.096s——按容器排表，每镜凭空多出
+  // 一帧并不存在的画面，63 镜的字幕就逐镜往后漂。混帧率时各镜按自己的帧率换算，
+  // 再统一落到母带帧率上，绝不用首镜的尺去量别人的画面。
+  const clipMs = await Promise.all(clips.map(probePictureDuration))
   return planMasterCuts(clipMs, transitions, fps)
 }
 
@@ -1699,7 +1962,7 @@ async function buildVoiceTrack(
     // 有转场时画面已经吃掉重叠、起点不再是「上一镜末尾」——落位一律按那一刀表排，
     // 再按各自的实测长度累加就会让配音比画面晚到，越往后偏得越多。
     const shotStartMs = cut ? (cut.shotStartMs[index] ?? videoCursorMs) : videoCursorMs
-    const clipMs = cut ? Math.max(1, cut.clipMs[index] ?? 1) : Math.max(1, await probeDuration(clip))
+    const clipMs = cut ? Math.max(1, cut.clipMs[index] ?? 1) : Math.max(1, await probePictureDuration(clip))
     const voice = voices[index] ?? null
     const mode: ShotAudioMode = audioSources?.[index] ?? (voice ? 'voice' : 'native')
     const useVoice = voice !== null && mode !== 'native'
@@ -1934,15 +2197,10 @@ export async function concatVideoClips(clips: string[], target: string, workdir:
   } catch {
     // fall through to re-encode
   }
-  const list = path.join(workdir, 'clips-reencode.txt')
-  await writeFile(list, clips.map(clip => `file '${clip.replaceAll("'", "'\\''")}'`).join('\n') + '\n')
-  await run('ffmpeg', [
-    '-y', '-v', 'error',
-    '-f', 'concat', '-safe', '0', '-i', list,
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '192k',
-    target,
-  ])
+  // copy 失败（段间布局不兼容到连 copy 都跑不完）时同样走归一化重编码：
+  // concat demuxer + 重编码仍然只看第一段的时间基，SD-115 的假时间轴会原样带出来。
+  const aligned = await padSilentAudio(clips, workdir)
+  await normalizeConcat(aligned, target, await Promise.all(aligned.map(probeClipLayout)))
 }
 
 export interface SynthesizedMedia {

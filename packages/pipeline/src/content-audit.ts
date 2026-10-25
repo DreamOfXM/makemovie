@@ -13,8 +13,9 @@
  */
 
 import { SCENE_MARKER, type StoryboardShot } from './storyboard.js'
-import { contractCardText, normalizeContractText, parseStoryboardContract, shotContractText, type StoryboardContract } from './storyboard-contract.js'
+import { contractCardText, normalizeContractText, parseStoryboardContract, shotContractText, type StoryboardContract, type StoryboardContractRow } from './storyboard-contract.js'
 import { normalizeShotRole, normalizeTransition, type ShotRole } from './shot-layer.js'
+import { shotProduction } from './shot-method.js'
 
 export interface ContentFinding {
   /** 机器可读的原因码，进任务日志与失败快照。 */
@@ -69,6 +70,7 @@ function sceneNumber(value: unknown): number | null {
  *
  * 传入剧本时，再按剧本自带的分镜表做契约核对：行数、每镜时长、总时长，以及字卡上
  * 逐字出现的字幕/标题文字（描述性字卡只核对行，不核对措辞）。
+ * 另有连续字卡上限（SD-187，见 auditCardWall）：四连以上的字卡墙在落库前拒收。
  * 这不是风格判断——表里的每一行都是作者已经拍板的镜头，模型压镜或省略字卡就是
  * 交错了作业。没有分镜表的剧本（绝大多数模型自写剧本）完全走原有三条。
  */
@@ -95,7 +97,58 @@ export function auditStoryboardShots(shots: readonly StoryboardShot[], scriptCon
 
   const contract = scriptContent === undefined ? null : parseStoryboardContract(scriptContent)
   findings.push(...auditShotLayer(shots, contract))
+  findings.push(...auditCardWall(shots, contract))
   if (contract) findings.push(...auditContract(shots, contract))
+  return findings
+}
+
+/**
+ * 连续字卡上限（SD-187：EP1 实测 #31 起 33 镜仅 3 镜实拍，靠 16 连字卡墙推进剧情，
+ * 观感从「剧」退化成「PPT」）。
+ *
+ * 3 不是量出来的最优值，是本仓库既有的一条重复界线：prompts.ts 早就写「不许连续三镜
+ * 同景别」（改前已在 HEAD），那条管景别，这条管字卡——同一类产品判断（三连还可能是
+ * 章节/时码组，第四颗起就不是推进剧情而是没完没了的报幕）搬到一个新轴上。搬到新轴
+ * 就要认下代价：命中的是整批拒收（worker 换候选，一次分镜生成白跑），所以留了逃生门
+ * ——作者真想要四连，把这一段写进剧本的分镜表（isCardRow 那条豁免）就不会被拦。
+ * 若后续实测发现拒收主要来自合法的四连开场，改的是这条豁免的写法，不是把上限调大。
+ */
+export const MAX_CONSECUTIVE_CARDS = 3
+
+/** 一镜是不是字卡：镜头类型说「字卡」，或生成方式认成 title-card。空值都不是。 */
+function isCardShot(shot: StoryboardShot): boolean {
+  return normalizeShotRole(shot.shotRole) === 'card' || shotProduction(text(shot.method)) === 'title-card'
+}
+
+/** 作者分镜表把这一行拍成字卡：这一镜的字卡身份是表里的决定，不是模型自由发挥。 */
+function isCardRow(row: StoryboardContractRow): boolean {
+  return normalizeShotRole(row.shotRole) === 'card' || shotProduction(row.method) === 'title-card'
+}
+
+function auditCardWall(shots: readonly StoryboardShot[], contract: StoryboardContract | null): ContentFinding[] {
+  const rows = contract !== null && contract.rows.length === shots.length ? contract.rows : null
+  const findings: ContentFinding[] = []
+  let start = -1
+  for (let index = 0; index <= shots.length; index += 1) {
+    const inRun = index < shots.length && isCardShot(shots[index]!)
+    if (inRun) {
+      if (start === -1) start = index
+      continue
+    }
+    if (start !== -1) {
+      const run = index - start
+      // 整段都被作者表拍板时不在这里拦：模型只能逐行转录，拒收等于无限重抽——
+      // 卡墙若真来自表本身，要改的是剧本层的分镜表，不是这一抽。
+      const prescribed = rows !== null && shots.slice(start, index).every((_, offset) => isCardRow(rows[start + offset]!))
+      if (run > MAX_CONSECUTIVE_CARDS && !prescribed) {
+        findings.push({
+          code: 'storyboard:cardWall',
+          detail: `第 ${start + 1}–${index} 镜连续 ${run} 张字卡，超过上限 ${MAX_CONSECUTIVE_CARDS} 颗（字卡只作锚点，剧情推进必须回到实拍镜头）`,
+        })
+      }
+      start = -1
+    }
+  }
   return findings
 }
 

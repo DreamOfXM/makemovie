@@ -419,9 +419,110 @@ describe('models entered by hand', () => {
     expect(added.statusCode).toBe(201)
     expect(added.json().spec).toMatchObject({ duration: { kind: 'range', min: 2, max: 30 }, resolutions: ['480P', '720P', '1080P'] })
 
-    // A name the catalog has never heard of stays the operator's bare claim.
+    // A name the catalog has never heard of no longer arrives with nothing. An empty spec
+    // is SD-166: the plan path read it as "the vendor decides", and a paid batch shipped
+    // 5 s at 720P while the storyboard had planned 15 s at 1080P.
     const unknown = await addModel(owner.token, connectionId, { model: 'my-fine-tune-2026', modality: 'i2v', acceptsFirstFrame: true })
-    expect(unknown.json().spec ?? null).toBeNull()
+    expect(unknown.statusCode).toBe(400)
+    expect(unknown.json().error).toMatch(/declare the lengths it accepts/)
+    expect(await env.db.modelCapability.count({ where: { connectionId, model: 'my-fine-tune-2026' } })).toBe(0)
+  })
+
+  it('inherits the catalog spec for a name typed in another case', async () => {
+    const owner = await env.register('mc-spec-case@example.com', 'Spec Case Org')
+    const created = await env.app.inject({
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'dashscope', name: 'bailian-case', apiKey: 'sk-test' },
+    })
+    const connectionId = created.json().id as string
+    await env.db.modelCapability.deleteMany({ where: { connectionId, model: 'wan3.0-video-prime' } })
+
+    // The vendor console shows some of these names differently from the API, and an
+    // operator copies what the screen shows. Case is not a different model.
+    const added = await addModel(owner.token, connectionId, { model: ' WAN3.0-Video-Prime ', modality: 'i2v', acceptsFirstFrame: true })
+    expect(added.statusCode).toBe(201)
+    expect(added.json().model).toBe('WAN3.0-Video-Prime')
+    expect(added.json().spec).toMatchObject({ duration: { kind: 'range', min: 2, max: 30 }, resolutions: ['480P', '720P', '1080P'] })
+    expect(added.json().specSource).toBe('catalog')
+  })
+
+  it('stores what the operator declares for a model no catalog describes', async () => {
+    const owner = await env.register('mc-spec-declared@example.com', 'Spec Declared Org')
+    const created = await env.app.inject({
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'dashscope', name: 'bailian-declared', apiKey: 'sk-test' },
+    })
+    const connectionId = created.json().id as string
+
+    const added = await addModel(owner.token, connectionId, {
+      model: 'my-fine-tune-2026', modality: 'i2v', acceptsFirstFrame: true,
+      duration: { kind: 'range', min: 4, max: 12 },
+      resolutions: [' 720P ', '1080P', '720P'],
+    })
+    expect(added.statusCode).toBe(201)
+    // The declaration is stored in the platform's own shape, trimmed and de-duplicated —
+    // the same shape a catalog row carries, so the worker pins from one code path.
+    expect(added.json().spec).toEqual({ duration: { kind: 'range', min: 4, max: 12 }, resolutions: ['720P', '1080P'] })
+    expect(added.json().specSource).toBe('manual')
+    const stored = await env.db.modelCapability.findUniqueOrThrow({ where: { id: added.json().id as string } })
+    expect(stored.spec).toEqual({ duration: { kind: 'range', min: 4, max: 12 }, resolutions: ['720P', '1080P'] })
+
+    // Steps and a fixed value are the other two dialects vendors actually speak.
+    expect((await addModel(owner.token, connectionId, { model: 'steps-t2v', modality: 't2v', duration: { kind: 'steps', values: [10, 5] } })).json().spec)
+      .toEqual({ duration: { kind: 'steps', values: [5, 10] } })
+    expect((await addModel(owner.token, connectionId, { model: 'fixed-i2v', modality: 'i2v', acceptsFirstFrame: true, duration: { kind: 'fixed', value: 5 } })).json().spec)
+      .toEqual({ duration: { kind: 'fixed', value: 5 } })
+
+    // A declaration this platform cannot read is refused rather than stored as nothing.
+    const unreadable = await addModel(owner.token, connectionId, { model: 'bad-t2v', modality: 't2v', duration: { kind: 'range', min: 10, max: 2 } })
+    expect(unreadable.statusCode).toBe(400)
+    expect(unreadable.json().error).toMatch(/whole positive seconds/)
+    expect((await addModel(owner.token, connectionId, { model: 'bad2-t2v', modality: 't2v', duration: { kind: 'range', min: 2, max: 15 }, resolutions: '720P' })).statusCode).toBe(400)
+
+    // A row the catalog already describes inherits; hand-declaring over it would leave the
+    // operator believing their numbers were stored, so the route says no instead.
+    const conflicting = await addModel(owner.token, connectionId, { model: 'wan2.7-t2v', modality: 't2v', duration: { kind: 'fixed', value: 5 } })
+    expect(conflicting.statusCode).toBe(400)
+    expect(conflicting.json().error).toMatch(/described by the dashscope catalog/)
+
+    // The ledger's own case: a tts id our catalog does not carry. It costs nothing per
+    // second, so it is admitted undeclared — and labelled as undeclared, not as a spec.
+    const audio = await addModel(owner.token, connectionId, { model: 'qwen-audio-3.1-tts-next', modality: 'tts' })
+    expect(audio.statusCode).toBe(201)
+    expect(audio.json().spec ?? null).toBeNull()
+    expect(audio.json().specSource).toBe('unknown')
+  })
+
+  it('tells the three spec origins apart on the connection list', async () => {
+    const owner = await env.register('mc-spec-source@example.com', 'Spec Source Org')
+    const dashscope = await env.app.inject({
+      method: 'POST', url: '/api/providers/connections', headers: authHeaders(owner.token),
+      payload: { provider: 'dashscope', name: 'bailian-labelled', apiKey: 'sk-test' },
+    })
+    await addModel(owner.token, dashscope.json().id as string, { model: 'own-t2v', modality: 't2v', duration: { kind: 'fixed', value: 8 } })
+    // mock opens no socket and bills no seconds, so an undeclared video row stays addable
+    // there — and still has to say so.
+    const mockConnection = await createMockConnection(owner.token, 'labelled-mock')
+
+    const listed = await env.app.inject({ method: 'GET', url: '/api/providers/connections', headers: authHeaders(owner.token) })
+    const rows = listed.json() as { id: string; capabilities: { model: string; modality: string; specSource: string }[] }[]
+    const bailian = rows.find(c => c.id === dashscope.json().id)!.capabilities
+    expect(bailian.find(c => c.model === 'wan3.0-video' && c.modality === 'i2v')!.specSource).toBe('catalog')
+    expect(bailian.find(c => c.model === 'own-t2v')!.specSource).toBe('manual')
+    const mock = rows.find(c => c.id === mockConnection.id)!.capabilities
+    expect(mock.find(c => c.model === 'mock-t2v')!.specSource).toBe('unknown')
+    expect(mock.find(c => c.model === 'mock-tts')!.specSource).toBe('unknown')
+  })
+
+  it('will not let a catalog overlay row pretend to carry a spec', async () => {
+    const owner = await env.register('mc-overlay-spec@example.com', 'Overlay Spec Org')
+    // That table has no spec column: accepting the fields there would store nothing at all.
+    const res = await env.app.inject({
+      method: 'POST', url: '/api/providers/catalogs/dashscope/models', headers: authHeaders(owner.token),
+      payload: { model: 'wan4.1-video', modality: 't2v', duration: { kind: 'range', min: 2, max: 30 } },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatch(/keeps no capability spec/)
   })
 
   it('lets one vendor model name carry two modalities on the same connection', async () => {

@@ -118,6 +118,103 @@ describe('分镜体检', () => {
 })
 
 /**
+ * SD-187：后半段实拍密度塌陷——16 镜连续字卡墙推进剧情。上限 3 沿用 prompt 既有
+ * 的三连界线（不许连续三镜同景别），落库前的硬检拒收超线的一抽。
+ */
+describe('连续字卡上限（SD-187）', () => {
+  const shot = (overrides: Record<string, unknown> = {}) => ({
+    description: '（全景·平视）屋内',
+    durationMs: 4000,
+    continuityIn: '门口的地砖',
+    continuityOut: '她站在窗边',
+    ...overrides,
+  })
+
+  it('四连字卡落库前被拒收——三连界线之后再起字卡就是卡墙，不是节奏', () => {
+    const shots = [
+      shot({ shotRole: '主镜' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '主镜' }),
+    ]
+    const findings = auditStoryboardShots(shots)
+    expect(findings.map(f => f.code)).toEqual(['storyboard:cardWall'])
+    expect(findings[0]!.detail).toContain('第 2–5 镜连续 4 张字卡')
+  })
+
+  it('三连字卡仍放行——章节或时码组本来就可能是三连，第四张起才拦', () => {
+    const shots = [
+      shot({ shotRole: '主镜' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '字卡' }),
+      shot({ shotRole: '主镜' }),
+    ]
+    expect(auditStoryboardShots(shots)).toEqual([])
+  })
+
+  it('字卡身份只写在生成方式里也计数——镜头类型列缺失不代表模型没在排卡', () => {
+    const shots = [
+      shot(),
+      shot({ method: '字卡' }),
+      shot({ method: '字卡' }),
+      shot({ method: '字卡' }),
+      shot({ method: '字卡' }),
+      shot(),
+    ]
+    expect(auditStoryboardShots(shots).map(f => f.code)).toEqual(['storyboard:cardWall'])
+  })
+
+  it('作者分镜表自己拍板的卡墙不在这里拒收——模型只能逐行转录，拦它等于无限重抽', () => {
+    const script = [
+      '## 分镜表',
+      '| # | 时长 | 场景 | 画面 | 生成方式 |',
+      '|---|---|---|---|---|',
+      '| 1 | 5s | 卧室 | （全景·平视）陈默睁眼 | 视频 |',
+      '| 2 | 2s | 字卡 | 黑底白字 第一次死亡 | 字卡 |',
+      '| 3 | 2s | 字卡 | 黑底白字 第二次死亡 | 字卡 |',
+      '| 4 | 2s | 字卡 | 黑底白字 第三次死亡 | 字卡 |',
+      '| 5 | 2s | 字卡 | 黑底白字 第四次死亡 | 字卡 |',
+      '| 6 | 5s | 卧室 | （中景·平视）他坐起身 | 视频 |',
+    ].join('\n')
+    const shots = [
+      shot({ durationMs: 5000 }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 5000 }),
+    ]
+    expect(auditStoryboardShots(shots, script)).toEqual([])
+  })
+
+  it('表里只有三连、模型自己多排一张成四连时照样拒收——超额的那张是模型的错，不是作者拍板', () => {
+    const script = [
+      '## 分镜表',
+      '| # | 时长 | 场景 | 画面 | 生成方式 |',
+      '|---|---|---|---|---|',
+      '| 1 | 5s | 卧室 | （全景·平视）陈默睁眼 | 视频 |',
+      '| 2 | 2s | 字卡 | 黑底白字 第一次死亡 | 字卡 |',
+      '| 3 | 2s | 字卡 | 黑底白字 第二次死亡 | 字卡 |',
+      '| 4 | 2s | 字卡 | 黑底白字 第三次死亡 | 字卡 |',
+      '| 5 | 2s | 卧室 | （特写·平视）他攥紧拳 | 视频 |',
+      '| 6 | 5s | 卧室 | （中景·平视）他坐起身 | 视频 |',
+    ].join('\n')
+    const shots = [
+      shot({ durationMs: 5000 }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 2000, method: '字卡' }),
+      shot({ durationMs: 5000 }),
+    ]
+    expect(auditStoryboardShots(shots, script).map(f => f.code)).toContain('storyboard:cardWall')
+  })
+})
+
+/**
  * 节奏读数只对「作者已经把镜头写死」的剧本生效：分镜表是唯一的镜头长度来源，
  * 自由散文没有可量的镜头。门只两条，且不判内容好坏——它拦的是无意识签收。
  */

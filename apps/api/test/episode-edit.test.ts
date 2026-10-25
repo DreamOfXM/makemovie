@@ -502,4 +502,41 @@ describe('episode edit initialization and shot sync (UX-P03)', () => {
     expect(after.revision.clips[0]).toMatchObject({ artifactId, sourceInFrame: 20, sourceOutFrame: 100 })
     expect((await getEdit(epId)).json().headRevision).toBe(after.headRevision)
   })
+
+  it('SD-101: refuses a trim that runs past the footage and names the shot', async () => {
+    const epId = await createEpisode('SD-101 Beyond Media')
+    const sb1 = await addStoryboard(epId, 1, 5000)
+    const sb2 = await addStoryboard(epId, 2, 6000)
+    const artifactId = await seedSucceededVideo(epId, sb1, 4000)
+    await env.db.storyboard.update({ where: { id: sb1 }, data: { selectedVideoArtifactId: artifactId } })
+    const headRevision = (await getEdit(epId)).json().headRevision as number
+
+    // 每次保存都按当前 head 做 CAS(GET 不会推进:人工修订一落,自动重建闸门就关)。
+    const put = async (clips: unknown[]) => env.app.inject({
+      method: 'PUT', url: `/api/episodes/${epId}/edit`, headers: json(ownerToken),
+      payload: { expectedEditRevision: (await getEdit(epId)).json().headRevision as number, fps: { fpsNum: 25, fpsDen: 1 }, clips },
+    })
+    const clip = (over: Partial<{ artifactId: string; sourceInFrame: number; sourceOutFrame: number }>) =>
+      [{ clipId: 'clip-1', storyboardId: sb1, artifactId, sourceInFrame: 0, sourceOutFrame: 100, ...over }]
+
+    // 素材 4000ms@25fps=100 帧:裁到 101 帧的合成会截掉一帧已付费画面 → 拒绝并点名第 1 镜。
+    const over = await put(clip({ sourceOutFrame: 101 }))
+    expect(over.statusCode).toBe(400)
+    expect(over.json()).toMatchObject({ error: 'episodeEdit:clipBeyondMedia', reasons: ['#1'] })
+    // 恰好裁到素材尽头(=上限)是合法整段。
+    expect((await put(clip({ sourceOutFrame: 100 }))).statusCode).toBe(200)
+    // 入点本身越界也拦得住(出点合法但入点已越过尽头)。
+    expect((await put(clip({ sourceInFrame: 150, sourceOutFrame: 160 }))).statusCode).toBe(400)
+    // 负帧号不落库。
+    expect((await put(clip({ sourceInFrame: -1, sourceOutFrame: 50 }))).statusCode).toBe(400)
+
+    // 被拒的每一次都不推进修订:脏区间进不了历史,head 还是那次合法保存。
+    const after = (await getEdit(epId)).json() as { headRevision: number; revision: { clips: Array<{ sourceOutFrame: number }> } }
+    expect(after.headRevision).toBe(headRevision + 1)
+    expect(after.revision.clips[0]!.sourceOutFrame).toBe(100)
+
+    // 没有实测读数的素材判不出上限:不许凭空拦(占位档照旧存得下,读侧报「长度未测得」)。
+    const unmeasured = await put([{ clipId: 'clip-2', storyboardId: sb2, artifactId: '', sourceInFrame: 0, sourceOutFrame: 999 }])
+    expect(unmeasured.statusCode).toBe(200)
+  })
 })

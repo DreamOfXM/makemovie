@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AUDIO_BRIDGE_PRE_MS, AUDIO_BRIDGE_TAIL_MS, FfmpegComposer, bgmVoiceMixFilter, buildSrt, planAudioBridges, planMasterCuts, run, subtitleModeFromEnv, synthesizeMockMedia, type ShotBed } from '../src/index.js'
+import { pickConcatStrategy, probeDuration, probeVideoFrames, type ClipLayout } from '../src/index.js'
 
 interface ProbeResult {
   streams: { codec_type: string; codec_name?: string; width?: number; height?: number; tags?: Record<string, string> }[]
@@ -331,6 +332,42 @@ describe('ffmpeg composer', () => {
     expect(await bandLevel(output, 1800, 2200)).toBeGreaterThan(-60)
     expect(await bandLevel(output, 180, 260)).toBeGreaterThan(-60)
   })
+
+  // SD-182：混音收尾不许吃掉画面。这条分支过去用 -shortest，等于让音频的结束时间去截
+  // 视频——实测两镜 15fps 素材（30 帧）配 2.000s 声轨只剩 28 帧、三镜（45 帧）剩 43 帧、
+  // 单镜 3 秒配 3.023s 声轨剩 41 帧，而容器时长照旧是音频的，掉帧在时长读数里看不见。
+  // 断言只认逐段实测帧数：母带帧数 = 输入帧数之和，一帧不多一帧不少。
+  it('keeps every frame of the picture when the mixed audio does not end on it (SD-182)', async () => {
+    const a = path.join(workdir, 'a.mp4')
+    const b = path.join(workdir, 'b.mp4')
+    await clip(a, 1)
+    await clip(b, 1)
+    expect(await probeVideoFrames(a)).toBe(15)
+    expect(await probeVideoFrames(b)).toBe(15)
+    const voice = path.join(workdir, 'voice.wav')
+    await tone(voice, 440, 1)
+    const bgm = path.join(workdir, 'bgm.wav')
+    await tone(bgm, 220, 2)
+    const output = path.join(workdir, 'out.mp4')
+
+    const composed = await composer.compose({ clips: [a, b], voices: [voice, null], bgm }, output)
+
+    expect(await probeVideoFrames(output)).toBe(30)
+    expect(composed.durationMs).toBe(2000)
+
+    // 母带自带原声（不建主声轨、只垫配乐）是同一把刀的另一面：帧数同样守恒。
+    // 配乐给 1 秒——它要被循环补到 3 秒画面，AAC 帧粒度让混音轨收尾在 3.023s，
+    // 正是那个不对整的尾巴过去吃掉 4 帧画面。
+    const native = path.join(workdir, 'native.mp4')
+    await clipWithNativeAudio(native, 3, 2000)
+    expect(await probeVideoFrames(native)).toBe(45)
+    const shortBgm = path.join(workdir, 'short-bgm.wav')
+    await tone(shortBgm, 220, 1)
+    const nativeOutput = path.join(workdir, 'native-out.mp4')
+    const nativeComposed = await composer.compose({ clips: [native], voices: [null], bgm: shortBgm }, nativeOutput)
+    expect(await probeVideoFrames(nativeOutput)).toBe(45)
+    expect(nativeComposed.durationMs).toBe(3000)
+  }, 60_000)
 
   it('never re-adds the native track an audio-source decision excluded when extras are mixed in (V04)', async () => {
     // 「只用配音」的镜头:原声(1600Hz)被声音来源档位排除。加一条可闻 extra 后,
@@ -983,5 +1020,114 @@ describe('subtitle delivery', () => {
     const { clip: file, srt } = await source()
 
     await expect(composer.compose({ clips: [file], srt }, path.join(workdir, 'x.mp4'))).rejects.toThrow(/libass/)
+  })
+})
+
+/**
+ * SD-115：跨帧率序列的母带时间轴。`-c copy` 下 concat demuxer 拿第一段的时间基套整条
+ * 母带，画面一帧不丢但时间轴是假的——本机复现（15/30/24 三段各 2 s）实测：容器报
+ * 6.023220 s、138 帧里有 10 次 PTS 倒退、最大倒退 −0.0666 s；再走画幅重编码时
+ * 138 帧只剩 115 帧、时长塌到 4.867 s（台账里的 232→204 是同一件事）。
+ * 归一化拼接后的同序列读数：6.000000 s、180 帧、0 次倒退、间隔恒为 0.0333 s。
+ */
+describe('concat timebase (SD-115)', () => {
+  let workdir: string
+  let composer: FfmpegComposer
+
+  beforeEach(async () => {
+    workdir = await mkdtemp(path.join(os.tmpdir(), 'studio-timebase-'))
+    composer = new FfmpegComposer()
+  })
+
+  afterEach(async () => {
+    await rm(workdir, { recursive: true, force: true })
+  })
+
+  /** 按给定帧率造一段片子；withAudio=false 模拟本机字卡（有画面没声音）。 */
+  async function clipAt(file: string, seconds: number, fps: number, withAudio: boolean): Promise<void> {
+    const args = ['-y', '-v', 'error', '-f', 'lavfi', '-i', `testsrc=duration=${seconds}:size=320x240:rate=${fps}`]
+    if (withAudio) args.push('-f', 'lavfi', '-i', `sine=frequency=440:duration=${seconds}`, '-c:a', 'aac', '-shortest')
+    args.push('-pix_fmt', 'yuv420p', file)
+    await run('ffmpeg', args)
+  }
+
+  /** 逐帧 pts_time 的三条读数：帧数、PTS 倒退次数、最大相邻间隔（秒）。 */
+  async function frameTimeline(file: string): Promise<{ frames: number; regressions: number; maxGap: number }> {
+    const { stdout } = await run('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'frame=pts_time',
+      '-of', 'default=noprint_wrappers=1:nokey=1', file,
+    ])
+    const stamps: number[] = []
+    for (const line of stdout.split('\n')) {
+      const value = Number.parseFloat(line.trim())
+      if (Number.isFinite(value)) stamps.push(value)
+    }
+    let regressions = 0
+    let maxGap = 0
+    for (let index = 1; index < stamps.length; index += 1) {
+      const delta = stamps[index]! - stamps[index - 1]!
+      if (delta < 0) regressions += 1
+      if (delta > maxGap) maxGap = delta
+    }
+    return { frames: stamps.length, regressions, maxGap }
+  }
+
+  /** 15/30/24 三段各 2 s，最后一段没音轨——正是一集里「实拍 + 实拍 + 字卡」的形状。 */
+  async function mixedFpsClips(): Promise<string[]> {
+    const a = path.join(workdir, 'a.mp4')
+    const b = path.join(workdir, 'b.mp4')
+    const c = path.join(workdir, 'c.mp4')
+    await clipAt(a, 2, 15, true)
+    await clipAt(b, 2, 30, true)
+    await clipAt(c, 2, 24, false)
+    return [a, b, c]
+  }
+
+  it('跨帧率拼接后，母带时长等于各段之和且 PTS 单调', async () => {
+    const clips = await mixedFpsClips()
+    const output = path.join(workdir, 'master.mp4')
+    const composed = await composer.compose({ clips }, output)
+
+    // 各段实测都是 2.000 s，所以母带必须落在 6.000 s 上下一个帧距内。
+    // copy 路径的读数是 6.023220 s + 10 次倒退，这两条断言在它下面都会红。
+    expect(Math.abs(composed.durationMs - 6000)).toBeLessThanOrEqual(40)
+    const timeline = await frameTimeline(output)
+    expect(timeline.regressions).toBe(0)
+    // 帧率统一到各段最大值（30），所以任何一帧的间隔都不该超过一个帧距的 1.5 倍；
+    // 台账里那条 0.640 s 的接缝空洞就是被这一条抓住的。
+    expect(timeline.maxGap).toBeLessThanOrEqual(1.5 / 30)
+    // 补帧对齐只会让帧数变多，任何一帧画面都不许被丢掉（Σ 源帧 = 30+60+48）。
+    expect(timeline.frames).toBeGreaterThanOrEqual(138)
+  })
+
+  it('母带之后再走画幅重编码，画面不再被假时间轴吃掉', async () => {
+    const clips = await mixedFpsClips()
+    const output = path.join(workdir, 'master-16x9.mp4')
+
+    await composer.compose({ clips, outputSpec: { aspect: '16:9' } }, output)
+
+    // 从假时间轴母带重编码时实测 138 帧→115 帧、6.023 s→4.867 s（SD-115 ②）。
+    const timeline = await frameTimeline(output)
+    expect(timeline.frames).toBeGreaterThanOrEqual(138)
+    expect(timeline.regressions).toBe(0)
+    expect(Math.abs((await probeDuration(output)) - 6000)).toBeLessThanOrEqual(40)
+  })
+
+  it('布局完全一致的段仍然被判为可 copy，不白掉一代画质', () => {
+    const layout = (over: Partial<NonNullable<ClipLayout['video']>> = {}): ClipLayout => ({
+      video: { codec: 'h264', width: 1080, height: 1920, pixFmt: 'yuv420p', timebase: '1/12288', fps: 24, fpsRate: '24/1', ...over },
+      audio: { codec: 'aac', sampleRate: 44100, channels: 2, timebase: '1/44100' },
+    })
+    const one = layout()
+    expect(pickConcatStrategy([one, layout()])).toBe('copy')
+    expect(pickConcatStrategy([one])).toBe('copy')
+    expect(pickConcatStrategy([one, layout({ fps: 30, fpsRate: '30/1' })])).toBe('normalize')
+    expect(pickConcatStrategy([one, layout({ timebase: '1/15360' })])).toBe('normalize')
+    expect(pickConcatStrategy([one, layout({ pixFmt: 'yuvj420p' })])).toBe('normalize')
+    expect(pickConcatStrategy([one, { ...one, audio: null }])).toBe('normalize')
+    expect(pickConcatStrategy([one, { ...one, audio: { ...one.audio!, sampleRate: 48000 } }])).toBe('normalize')
+    // 探不出流（文件损坏/非视频）时不许当一致——宁可重编码一次。
+    expect(pickConcatStrategy([one, { video: null, audio: null }])).toBe('normalize')
   })
 })

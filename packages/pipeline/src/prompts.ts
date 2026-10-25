@@ -1,5 +1,5 @@
 import type { ContentLocale } from '@studio/domain'
-import type { ShotRhythmSettings } from './content-audit.js'
+import { MAX_CONSECUTIVE_CARDS, type ShotRhythmSettings } from './content-audit.js'
 import { parseStoryboardContract } from './storyboard-contract.js'
 import type { StylePreset } from './styles/index.js'
 
@@ -188,6 +188,7 @@ export function buildStoryboardPrompt(locale: ContentLocale, scriptContent: stri
         '- 默认一镜一个说话人；同一空间、同一连续瞬间的双人对白，在后期配音下可以用 lines 一镜说完（每句带 speaker），不要为了「换说话人」拆成两颗无声反应镜。旁白与对白仍不得混入同一镜。',
         `- dialogue 必须是该说话人完整的一句话原文，总量不超过约 ${dialogueBudget} 个汉字（${seconds} 秒的自然语速）；这一镜计划更短时台词也要相应缩短或拆镜。禁止截成语气残句（如"……不……"）；剧本里的每一句台词都必须完整出现在某个镜头的 dialogue 或 lines 里，不得丢失、不得改写。`,
         '- description 必须呈现该镜台词的说话瞬间或其听者反应——画面与台词说的是同一件事。',
+        `- 字卡只作锚点，不担叙事：连续 shotRole「字卡」不得超过 ${MAX_CONSECUTIVE_CARDS} 颗，超过即把该拍剧情改写成实拍镜头（落库前审计会拒收更长的连排）。`,
         `- durationMs 按这一镜实际需要填 ${minSeconds} 秒到 ${seconds} 秒之间的整数秒 × 1000，不要每镜都填 ${maxShotMs}。${budgetRule.trim()}${totalRule}`,
       ]
     : [

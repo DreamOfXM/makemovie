@@ -67,6 +67,25 @@ describe('matchShotAssetLinks', () => {
     expect(links).toEqual([])
   })
 
+  it('binds a prop that the shot names by one of its parts (SD-123)', () => {
+    // 实测事故：#9 描述写「钟体」（素材叫「床头钟」），整串包含判不出，那一镜的白抽
+    // 就是模型自己另画了一口木壳挂钟。中心语 + 部位词是中文里指认道具的常态写法。
+    const links = matchShotAssetLinks(
+      [shot({ id: 's9', title: '钟落水', description: '（特写·侧面·跟随）钟体脱离手掌飞向水面', dialogue: '', location: '浴室' })],
+      [{ id: 'p1', name: '床头钟', kind: 'prop' }],
+    )
+    expect(links).toEqual([{ storyboardId: 's9', assetId: 'p1', role: 'prop' }])
+  })
+
+  it('does not let a two-character prop name match a common word that starts with its tail', () => {
+    // 「手表」的末字是融合名词的一部分，不是被修饰的中心语——「表面上」不该绑手表，
+    // 「门把手」的末字「手」也不该被「把手机」绑上。
+    const watch = [{ id: 'p1', name: '手表', kind: 'prop' }]
+    expect(matchShotAssetLinks([shot({ description: '他把手放在表面上' })], watch)).toEqual([])
+    const handle = [{ id: 'p2', name: '门把手', kind: 'prop' }]
+    expect(matchShotAssetLinks([shot({ description: '他把手机塞进兜里' })], handle)).toEqual([])
+  })
+
   it('never matches a scene asset from a non-set location', () => {
     for (const location of ['字卡', '黑屏', '空间', '播放器', '新项目', '真实 UI']) {
       expect(isSetLocation(location)).toBe(false)
@@ -98,6 +117,12 @@ describe('isShotVisible', () => {
     expect(isShotVisible(bedroom, '空镜，窗帘被风吹动', null)).toBe(true)
     expect(isShotVisible(chenmo, '陈默睁眼', null)).toBe(true)
     expect(isShotVisible({ id: 'p1', name: '床头钟', kind: 'prop' }, '床头钟指向 7:08', null)).toBe(true)
+  })
+
+  it('keeps a prop in the frame when the shot names one of its parts', () => {
+    expect(isShotVisible({ id: 'p1', name: '床头钟', kind: 'prop' }, '钟面停在 7:07:12', null)).toBe(true)
+    // 绑上了却不送定妆照，这一镜的道具照样是模型自己编的。
+    expect(isShotVisible({ id: 'p1', name: '手表', kind: 'prop' }, '他把手放在表面上', null)).toBe(false)
   })
 
   it('keeps a voice-over character out of the frame', () => {

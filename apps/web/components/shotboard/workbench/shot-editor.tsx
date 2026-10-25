@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { HelpHint } from '@/components/ui/help-hint'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { GuardedButton } from '@/components/permission'
@@ -72,6 +73,11 @@ export function ShotEditor({
     setError('')
   }, [shot.id])
 
+  // 分镜模型留下的自由写法（「录屏」「UI」「合成/视频」）不在五档字表里：读得到、
+  // 写不回。不把它放进下拉，Radix 就没有对应项，这一格显示成空白，人看不到模型
+  // 当初写的到底是哪一档（SD-109）。
+  const legacyMethod = form.method !== '' && !METHOD_OPTIONS.includes(form.method) ? [form.method] : []
+
   const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(pickFields(shot)), [form, shot])
   const speaker = normalizeSpeaker(form.speaker)
   const speakerNote =
@@ -91,6 +97,9 @@ export function ShotEditor({
     setBusy(true)
     setError('')
     try {
+      // 档位只在人真的动过它时才写：分镜模型留下的写法（「录屏」「合成/视频」）不在
+      // 五档字表里，每次保存都原样回写会被写入口判成非法值，改个标题就 400。
+      const methodTouched = form.method !== (shot.method ?? '')
       await api(`/storyboards/${shot.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
@@ -104,6 +113,7 @@ export function ShotEditor({
           continuityOut: form.continuityOut,
           transition: form.transition,
           transitionMs: form.transitionMs,
+          ...(methodTouched ? { method: form.method === '' ? null : form.method } : {}),
         }),
       })
       toast.success(t('workbench.shotSaved', { number: shot.number }))
@@ -297,6 +307,31 @@ export function ShotEditor({
           </label>
         </div>
 
+        {/* 生成方式（SD-109/SD-178）：模型把一镜标错档时，人必须能在界面上改。
+            这一档决定画面来路——平台生成还是本机交付，标错了就是一镜卡死、整集 BLOCKED。 */}
+        <label className="block">
+          <span className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs font-medium">
+            {t('storyboards.method')}
+            <HelpHint text={t('storyboards.methodHint')} />
+          </span>
+          <Select
+            value={form.method === '' ? '视频' : form.method}
+            disabled={!canWrite}
+            onValueChange={value => field('method', value)}
+          >
+            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {[...legacyMethod, ...METHOD_OPTIONS].map(option => (
+                <SelectItem key={option} value={option}>
+                  {METHOD_OPTIONS.includes(option)
+                    ? t(`shotboard.production.${productionOfMethod(option)}`)
+                    : <>{t(`shotboard.production.${shot.production}`)}<span className="text-muted-foreground"> · {option}</span></>}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </label>
+
         {/* 转场与入点衔接是同一件事的两半：文字说「怎么接」，这一格说「母带上那一刀
             是什么形状」。它改的是接缝，不改素材——下次合成才会重算时间线。 */}
         <TransitionRow
@@ -375,6 +410,15 @@ export function ShotEditor({
   )
 }
 
+/** 与 packages/pipeline 的 METHOD_WORDS 逐字一致：界面写进 `method` 的就是分类器认得的档位词。 */
+const METHOD_OPTIONS: string[] = ['视频', '字卡', '屏幕录制', '合成', '界面']
+const PRODUCTION_BY_METHOD: Record<string, ShotboardShot['production']> = {
+  视频: 'video', 字卡: 'title-card', 屏幕录制: 'screen-recording', 合成: 'composition', 界面: 'ui',
+}
+function productionOfMethod(method: string): ShotboardShot['production'] {
+  return PRODUCTION_BY_METHOD[method] ?? 'video'
+}
+
 function pickFields(shot: ShotboardShot) {
   return {
     title: shot.title,
@@ -387,5 +431,6 @@ function pickFields(shot: ShotboardShot) {
     continuityOut: shot.continuityOut,
     transition: shot.transition,
     transitionMs: shot.transitionMs,
+    method: shot.method ?? '',
   }
 }

@@ -3,6 +3,7 @@ import type { MediaArtifact } from '@studio/db'
 import { resolveSlotCandidates, resolveVideoArtifactShot } from '@studio/db'
 import { reserveOrganizationCalls, recordJobIntent } from '@studio/pipeline'
 import { createAdapter } from '@studio/providers'
+import { isVetableArtifactStage, parseArtifactVeto, writeArtifactVeto, type ArtifactVeto } from '@studio/domain'
 import { pipelineJobs } from '../lib/jobs.js'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -21,6 +22,9 @@ export interface ArtifactDto {
   /** 人工导入件的原始文件名。对象键是按租户/项目/阶段重建的路径，人对着它认不出自己
    *  传的是哪个文件；只有导入那一档带这个名字，生成产物永远是 null。 */
   filename: string | null
+  /** SD-172：这一版被人否掉了（标不可用 + 理由）。null = 没人否过它。
+   *  读侧（镜头履历、生效版、合成取版）都看这一格，界面上「已否决」必须有出处。 */
+  veto: ArtifactVeto | null
 }
 
 export function toArtifactDto(artifact: MediaArtifact): ArtifactDto {
@@ -34,6 +38,7 @@ export function toArtifactDto(artifact: MediaArtifact): ArtifactDto {
     durationMs: artifact.durationMs,
     downloadUrl: `/artifacts/${artifact.id}/content`,
     filename: importedFilename(artifact.metadata),
+    veto: parseArtifactVeto(artifact.metadata),
   }
 }
 
@@ -63,6 +68,76 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       reply.header('content-type', artifact.mimeType)
       reply.header('content-length', String(stored.sizeBytes))
       return reply.send(stored.body)
+    },
+  )
+
+  // SD-172｜人工否决位：机器说「过线」不等于人收下这一版。
+  // #30 / #43 / #51 实测：过线即「自动取最新」，版本行只给「切版本」和「重跑」，
+  // 人想否掉一个机器说好的版本只能再花一次抽。这里给的就是那一刀：
+  // 标不可用 + 必填理由，落在产物自己的 metadata 上（不开新列），
+  // 镜头履历、生效版读数与合成取版三条链都读同一格（见 @studio/domain 的 artifact-veto）。
+  // 撤销（undo）也走这一条路由：否决是可撤回的人工判断，不是删除。
+  app.post<{ Params: { artifactId: string }; Body: { reason?: unknown; undo?: unknown } }>(
+    '/artifacts/:artifactId/veto',
+    { preHandler: requirePermission('episode:write') },
+    async (request, reply) => {
+      const auth = request.auth!
+      const artifact = await app.db.mediaArtifact.findFirst({
+        where: { id: request.params.artifactId, organizationId: auth.organizationId },
+      })
+      // 跨空间的 id 只会得到 404：存在的产物与别人的产物必须是同一个回答。
+      if (!artifact) return reply.code(404).send({ error: 'artifact not found' })
+      if (!isVetableArtifactStage(artifact.stage)) return reply.code(400).send({ error: 'veto:unsupportedStage' })
+      const undo = request.body?.undo === true
+      const reason = typeof request.body?.reason === 'string' ? request.body.reason.trim() : ''
+      // 理由对「标不可用」是必填的：没有理由的否决在履历里就是一条无声的删除，
+      // 下一个人只会看见少了一版。撤销不需要理由（它把人手上的东西还回去）。
+      if (!undo && reason === '') return reply.code(400).send({ error: 'veto:reasonRequired' })
+
+      const veto: ArtifactVeto | null = undo
+        ? null
+        : { at: new Date().toISOString(), by: auth.userId ?? 'unknown', reason: reason.slice(0, 500) }
+      const updated = await app.db.$transaction(async tx => {
+        const row = await tx.mediaArtifact.update({
+          where: { id: artifact.id },
+          data: { metadata: writeArtifactVeto(artifact.metadata, veto) },
+        })
+        // 钦定指针必须跟着走：人刚说这一版不能用，镜头却还把它钉成「就用这条」，
+        // 合成会照指针取回被否的那一版。清掉指针＝回到「自动取最新（跳过被否的）」。
+        // 锁定档一并放开：locked + 空指针按数据矛盾处理会让整集合成抛错，而这一刀
+        // 正是人对那条锁的更新决定。
+        if (artifact.storyboardId) {
+          const pointer = artifact.stage === 'VIDEO'
+            ? 'selectedVideoArtifactId'
+            : artifact.stage === 'FIRST_FRAME'
+              ? 'selectedFrameArtifactId'
+              : 'selectedVoiceArtifactId'
+          await tx.storyboard.updateMany({
+            where: { id: artifact.storyboardId, [pointer]: artifact.id },
+            data: pointer === 'selectedVideoArtifactId'
+              ? { selectedVideoArtifactId: null, lockedVideoSelection: false }
+              : pointer === 'selectedFrameArtifactId'
+                ? { selectedFrameArtifactId: null }
+                : { selectedVoiceArtifactId: null },
+          })
+        }
+        return row
+      })
+
+      await recordAudit(app.db, {
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: undo ? 'artifact.unveto' : 'artifact.veto',
+        entityType: 'media-artifact',
+        entityId: artifact.id,
+        payload: {
+          storyboardId: artifact.storyboardId,
+          stage: artifact.stage,
+          version: artifact.version,
+          ...(reason ? { reason: reason.slice(0, 500) } : {}),
+        },
+      })
+      return { artifact: toArtifactDto(updated) }
     },
   )
 

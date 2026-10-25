@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { readCompositionReview, reviewGapCodes } from '../src/index.js'
+import {
+  readCompositionReview,
+  readNeighborDuplicates,
+  reviewGapCodes,
+  NEIGHBOR_DUPLICATE_DISTANCE,
+  NEIGHBOR_DUPLICATE_RUN,
+} from '../src/index.js'
 
 // 一集两镜的最小台账：每个用例只改自己要验的那一处，其余保持齐全。
 // 键形状与 compose worker 落库那份逐字一致（resolved.shots + cuts + audio + beds）。
@@ -216,5 +222,59 @@ describe('验收三读数', () => {
     expect(readings.rhythm.gate.failures).toEqual(['avgShot', 'longTakeShare'])
     expect(readings.rhythm.present).toBe(true)
     expect(readings.complete).toBe(true)
+  })
+})
+
+// SD-184：邻镜重复读数。「选优」过去只逐镜判——#44/#45/#46 与 #57/#58/#59 各三镜
+// 几乎相同的画面串成 13.00 s 无切点段，台账里当时连这个数都不存在。
+describe('邻镜重复读数（SD-184）', () => {
+  it('三镜连续近重复 = 台账实测案档（13.00 s 无切点段）报 warning', () => {
+    const reading = readNeighborDuplicates([0.001, 0.002])
+    expect(reading.present).toBe(true)
+    expect(reading.maxRunLength).toBe(NEIGHBOR_DUPLICATE_RUN)
+    expect(reading.maxRunShotIndexes).toEqual([1, 2, 3])
+    expect(reading.status).toBe('warning')
+    expect(reading.duplicatePairCount).toBe(2)
+  })
+
+  it('重复链在超阈的一对断开，只报最长链', () => {
+    const reading = readNeighborDuplicates([0.001, 0.002, 0.4, 0.001])
+    expect(reading.maxRunLength).toBe(3)
+    expect(reading.maxRunShotIndexes).toEqual([1, 2, 3])
+    expect(reading.duplicatePairCount).toBe(3)
+    expect(reading.status).toBe('warning')
+  })
+
+  it('两镜一对重复不报警：2 连在台账没有实测塌陷案，只摆数', () => {
+    const reading = readNeighborDuplicates([0.001])
+    expect(reading.maxRunLength).toBe(2)
+    expect(reading.status).toBe('clean')
+  })
+
+  it('全不同的画面判 clean；测不出的对判 unknown，绝不判成 clean', () => {
+    expect(readNeighborDuplicates([0.6, 0.7]).status).toBe('clean')
+    expect(readNeighborDuplicates([0.6, 0.7]).maxRunLength).toBe(1)
+    expect(readNeighborDuplicates([0.6, 0.7]).maxRunShotIndexes).toEqual([])
+    const unknown = readNeighborDuplicates([null, 0.5])
+    expect(unknown.status).toBe('unknown')
+    expect(unknown.present).toBe(true)
+    expect(readNeighborDuplicates([null]).status).toBe('unknown')
+    // 首镜/单镜没有邻对可言：空表是 clean，不是「没测出来」。
+    expect(readNeighborDuplicates([]).status).toBe('clean')
+  })
+
+  it('null 距离打断重复链——没证据不判重复，也不判无重复', () => {
+    const reading = readNeighborDuplicates([0.001, null, 0.001])
+    expect(reading.maxRunLength).toBe(2)
+    // 链在 null 处断了，报不出 3 连；但缺口也让「干净」无从坐实，状态只能是没测出来。
+    expect(reading.status).toBe('unknown')
+  })
+
+  it('阈值单点定义且有实测出处', () => {
+    // 0.03 落在本集实测「同镜异抽 0.008」与「不同镜最远 0.080」之间的空档。
+    expect(NEIGHBOR_DUPLICATE_DISTANCE).toBe(0.03)
+    expect(readNeighborDuplicates([NEIGHBOR_DUPLICATE_DISTANCE, NEIGHBOR_DUPLICATE_DISTANCE]).maxRunLength).toBe(3)
+    expect(readNeighborDuplicates([0.031, 0.031]).maxRunLength).toBe(1)
+    expect(NEIGHBOR_DUPLICATE_RUN).toBe(3)
   })
 })

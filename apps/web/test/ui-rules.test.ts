@@ -21,6 +21,10 @@ import { describe, expect, it } from 'vitest'
  * 条款三：「上一轮待裁决」是**这一跑**停下来的事实，不许挂在「已定稿」的豁免里——
  * 「已定稿」讲的是上一版，两者能同时成立（SD-105：重跑一个已定稿素材、付费候选被 QC
  * 拦停待裁决，制作台却三处零信号，人根本不知道有一笔钱卡在等自己裁决）。
+ *
+ * 条款四（SD-122）：可交互元素不许嵌在原生 `<button>` 里。按钮套按钮/套链接是非法 HTML，
+ * React 报 hydration 错误并把整棵工作台退回客户端渲染；产物格在**加载失败那一态**才会
+ * 长出重试钮，所以静态渲染拦不住，只能扫 JSX 源。宿主是按钮的产物格必须标 `retryless`。
  */
 
 /** 文案落在这些元素里 = 落在设计好的说明位。 */
@@ -127,6 +131,70 @@ function guardedJsx(src: string, marker: RegExp): string {
   return src.slice(open)
 }
 
+interface JsxTag {
+  name: string
+  close: boolean
+  selfClose: boolean
+  attrs: string
+  at: number
+}
+
+/**
+ * JSX 标签扫描。属性值里的引号与任意层 `{}`/`()`/`[]` 都要跳过：正则版只认两层，
+ * 大预览按钮那种三层写法（`onClick={() => { … setReview({ … }) }}`）会被整个漏掉。
+ */
+function jsxTags(src: string): JsxTag[] {
+  const tags: JsxTag[] = []
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] !== '<') continue
+    const close = src[i + 1] === '/'
+    const start = close ? i + 2 : i + 1
+    const name = /^([A-Za-z][A-Za-z0-9.$_]*)/.exec(src.slice(start, start + 60))?.[1]
+    if (!name) continue
+    let end = start + name.length
+    let quote: string | null = null
+    let depth = 0
+    for (; end < src.length; end++) {
+      const char = src[end]
+      if (quote) {
+        if (char === quote) quote = null
+        continue
+      }
+      if (char === '"' || char === "'" || char === '`') quote = char
+      else if (char === '{' || char === '(' || char === '[') depth++
+      else if (char === '}' || char === ')' || char === ']') depth--
+      else if (char === '>' && depth === 0) break
+    }
+    tags.push({ name, close, selfClose: src[end - 1] === '/', attrs: src.slice(start + name.length, end), at: i })
+    i = end
+  }
+  return tags
+}
+
+/** 按钮里非法的可交互元素；ArtifactMedia 看它有没有声明「宿主是按钮」（retryless）。 */
+const INTERACTIVE_TAGS = new Set(['button', 'Button', 'GuardedButton', 'a', 'Link', 'ArtifactLoadError'])
+
+function nestedInteractive(src: string, file: string): string[] {
+  const lineOf = (offset: number) => src.slice(0, offset).split('\n').length
+  const stack: { name: string; at: number }[] = []
+  const found: string[] = []
+  for (const tag of jsxTags(src)) {
+    if (tag.close) {
+      const index = stack.map(entry => entry.name).lastIndexOf(tag.name)
+      if (index >= 0) stack.length = index
+      continue
+    }
+    const host = stack.find(entry => entry.name === 'button')
+    if (host) {
+      const where = `${file}:${lineOf(tag.at)}`
+      if (INTERACTIVE_TAGS.has(tag.name)) found.push(`${where} <${tag.name}> 嵌在 <button>(:${lineOf(host.at)}) 里`)
+      else if (tag.name === 'ArtifactMedia' && !/\bretryless/.test(tag.attrs)) found.push(`${where} <ArtifactMedia> 嵌在 <button>(:${lineOf(host.at)}) 里且没标 retryless`)
+    }
+    if (!tag.selfClose) stack.push({ name: tag.name, at: tag.at })
+  }
+  return found
+}
+
 describe('UI 规范机器检查', () => {
   it('解释类（*Hint）文案落在说明位，不铺成常驻正文、不当 placeholder/aria-label', () => {
     const offenders = [...tsxFiles('components'), ...tsxFiles('app')].flatMap(hintOffenders)
@@ -157,5 +225,21 @@ describe('UI 规范机器检查', () => {
     // 正向对照：把提示嵌回豁免块里必须被这套判据抓到，否则上面的绿灯是恒真。
     const nested = "{runFailed && asset.status !== 'APPROVED' && (<div>{asset.run.reviewPending}</div>)}"
     expect(guardedJsx(nested, /asset\.status !== 'APPROVED'/)).toContain('reviewPending')
+  })
+
+  it('可交互元素不嵌在原生 button 里（宿主是按钮的产物格必须标 retryless）', () => {
+    const offenders = [...tsxFiles('components'), ...tsxFiles('app')].flatMap(file => nestedInteractive(readFileSync(file, 'utf8'), file))
+    expect(offenders).toEqual([])
+  })
+
+  it('条款四判据本身有效：嵌套与漏标都抓得到，兄弟节点与 retryless 则放行', () => {
+    expect(nestedInteractive('<button type="button"><div><Button variant="outline">重试</Button></div></button>\n', 'demo.tsx')).toHaveLength(1)
+    expect(nestedInteractive('<button type="button"><a href="/x">下载</a></button>\n', 'demo.tsx')[0]).toContain('<a> 嵌在 <button>')
+    expect(nestedInteractive('<button type="button"><ArtifactMedia artifact={a} /></button>\n', 'demo.tsx')[0]).toContain('没标 retryless')
+    expect(nestedInteractive('<button type="button"><ArtifactMedia retryless artifact={a} /></button>\n', 'demo.tsx')).toEqual([])
+    // 兄弟节点写法（大预览那一处）不算违规。
+    expect(nestedInteractive('<><button type="button">格</button><Button onClick={f}>重试</Button></>\n', 'demo.tsx')).toEqual([])
+    // 三层括号写在同一个开标签里也必须被识别成按钮宿主，不许因解析退化而漏判。
+    expect(nestedInteractive('<button type="button" onClick={() => { if (a) setReview({ artifactId: null }) }}><Button /></button>\n', 'demo.tsx')).toHaveLength(1)
   })
 })

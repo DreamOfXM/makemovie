@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { Prisma, type PrismaClient } from '@studio/db'
-import { modelModalities, isModelModality, readDurationEvidence, reduceCallEvidence, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
-import { createAdapter, getCatalog, isKnownProvider, listCatalogs, type CatalogModel, type ProviderAdapter, type ProviderCatalog } from '@studio/providers'
+import { modelModalities, isModelModality, readDurationEvidence, readDurationSpec, reduceCallEvidence, type ModelCapability as DomainCapability, type ModelModality } from '@studio/domain'
+import { createAdapter, getCatalog, isKnownProvider, listCatalogs, catalogSpecFor, declaresDuration, findCatalogModel, specSourceOf, type CatalogModel, type ProviderAdapter, type ProviderCatalog } from '@studio/providers'
 import { decryptSecret, encryptSecret } from '@studio/security'
 import { recordAudit } from '../lib/audit.js'
 import { requirePermission } from '../plugins/auth.js'
@@ -23,10 +23,19 @@ interface ModelBody {
   acceptsFirstFrame?: boolean
   acceptsReferenceImages?: boolean
   maxReferenceImages?: number
+  /**
+   * The capability facts an operator declares for a model our catalogs do not describe —
+   * the same two fields the plan path reads before it spends money. Only the connection's
+   * hand-added route takes them; the org's catalog overlay has no column to keep them in.
+   */
+  duration?: unknown
+  resolutions?: unknown
 }
 
 /** A hand-entered row is a claim about one model, so the claim stays as narrow as our own catalog's widest. */
 const MAX_ENTERED_REFERENCE_IMAGES = 8
+/** A tier list is read by the delivery-tier picker; more spelling than this is a paste, not a declaration. */
+const MAX_ENTERED_RESOLUTIONS = 12
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
   /** Both probes speak to the same vendor with the same credentials; only the unit of verification differs. */
@@ -128,6 +137,13 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       if (!isKnownProvider(provider)) return reply.code(400).send({ error: 'provider must be one of the known catalogs' })
       const parsed = parseModelBody(request.body)
       if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
+      // This table has no spec column, so a declaration sent here would be stored as
+      // nothing at all — and the operator would believe the catalog now carries it.
+      const declared = parseDeclaredSpec(request.body)
+      if (!declared.ok) return reply.code(400).send({ error: declared.error })
+      if (declared.spec !== undefined) {
+        return reply.code(400).send({ error: `a catalog row keeps no capability spec — declare duration and resolutions on the connection’s model row, where the plan path reads them` })
+      }
       try {
         const entry = await app.db.catalogCustomModel.create({
           data: { organizationId: auth.organizationId, provider, ...parsed.data },
@@ -163,7 +179,15 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { createdAt: 'desc' },
       include: { capabilities: { orderBy: { model: 'asc' } } },
     })
-    return connections.map(({ encryptedSecret, accessKeyEncrypted, ...rest }) => ({ ...rest, apiKeySet: encryptedSecret.length > 0, accessKeySet: Boolean(accessKeyEncrypted) }))
+    return connections.map(({ encryptedSecret, accessKeyEncrypted, ...rest }) => ({
+      ...rest,
+      apiKeySet: encryptedSecret.length > 0,
+      accessKeySet: Boolean(accessKeyEncrypted),
+      // The operator has to be able to tell an inherited declaration from one they typed
+      // from one they never gave us — the empty one is the case that bills at the vendor
+      // default, and it used to be indistinguishable from the others on screen.
+      capabilities: rest.capabilities.map(capability => ({ ...capability, specSource: specSourceOf(rest.provider, capability.model, capability.modality, capability.spec) })),
+    }))
   })
 
   /**
@@ -222,7 +246,14 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       include: { capabilities: true },
     })
     await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.create', entityType: 'ProviderConnection', entityId: connection.id, payload: { provider, name, models: connection.capabilities.length } })
-    return reply.code(201).send({ ...connection, encryptedSecret: undefined, accessKeyEncrypted: undefined, apiKeySet: true, accessKeySet: Boolean(accessKey) })
+    return reply.code(201).send({
+      ...connection,
+      capabilities: connection.capabilities.map(capability => ({ ...capability, specSource: specSourceOf(provider, capability.model, capability.modality, capability.spec) })),
+      encryptedSecret: undefined,
+      accessKeyEncrypted: undefined,
+      apiKeySet: true,
+      accessKeySet: Boolean(accessKey),
+    })
   })
 
   app.patch<{ Params: { connectionId: string }; Body: ConnectionBody }>(
@@ -308,9 +339,16 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
   )
 
   /**
-   * The catalogs describe vendors we can name. This is how an operator adds the model
-   * we cannot: a fine-tune, a private checkpoint, or anything behind an
-   * OpenAI-compatible gateway, whose catalog is empty by definition.
+   * One named model, one call — the way an operator adds a model we cannot name: a
+   * fine-tune, a private checkpoint, or anything behind an OpenAI-compatible gateway,
+   * whose catalog is empty by definition.
+   *
+   * The spec is the point of this route, not a detail of it. `spec.duration` and
+   * `spec.resolutions` are the two facts the plan and the billing path read before money
+   * moves, so a row that arrives with neither does not "use a default the platform chose" —
+   * it hands the shot's length and tier to the vendor, silently. Hence the two rules below:
+   * inherit whatever our catalog already declares for this id, and demand a declaration
+   * from the operator for an id the catalog has never heard of.
    */
   app.post<{ Params: { connectionId: string }; Body: ModelBody }>(
     '/providers/connections/:connectionId/models',
@@ -323,20 +361,37 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const parsed = parseModelBody(request.body)
       if (!parsed.ok) return reply.code(400).send({ error: parsed.error })
 
+      const declared = parseDeclaredSpec(request.body)
+      if (!declared.ok) return reply.code(400).send({ error: declared.error })
+
       // A hand-entered row that names a model the vendor catalog already describes is not
       // a hand-entered row: leaving its spec empty makes the worker drop the shot's planned
       // length and bill at whatever the vendor defaults to (wan3.0 defaults to 1080P, the
       // priciest tier). The operator typed the same words the catalog carries.
-      const officialSpec = getCatalog(connection.provider)?.models.find(
-        entry => entry.model === parsed.data.model && entry.modality === parsed.data.modality,
-      )?.spec
+      const official = findCatalogModel(connection.provider, parsed.data.model, parsed.data.modality)
+      const inherited = catalogSpecFor(connection.provider, parsed.data.model, parsed.data.modality)
+      const collisions = Object.keys(declared.spec ?? {}).filter(key => inherited?.[key] !== undefined)
+      if (collisions.length > 0) {
+        // Refusing beats overwriting in either direction: an operator who wrote a number the
+        // catalog also states must not be left believing theirs is what got stored. Measured
+        // claims have their own route, and it is the one allowed to lower the cap.
+        return reply.code(400).send({ error: `"${official?.model ?? parsed.data.model}" is described by the ${connection.provider} catalog, which already declares ${collisions.join(' and ')} — inherit it, or record measured evidence on the row instead of hand-declaring the same field` })
+      }
+      const spec: Record<string, unknown> = { ...inherited, ...declared.spec }
+      // `mock` opens no socket and bills nothing, so there is no vendor default to fall
+      // back to and nothing to demand of it. Named rather than inferred: every real vendor
+      // buys seconds, including the gateways whose catalog is empty by definition.
+      if (connection.provider !== 'mock' && declaresDuration(parsed.data.modality) && readDurationSpec(spec) === undefined) {
+        return reply.code(400).send({ error: `"${parsed.data.model}" is billed per second: declare the lengths it accepts (duration) — an undeclared row sends no length and buys whatever the vendor defaults to` })
+      }
+      const storedSpec = Object.keys(spec).length === 0 ? undefined : spec
 
       try {
         const capability = await app.db.modelCapability.create({
-          data: { connectionId: connection.id, ...parsed.data, ...(officialSpec ? { spec: officialSpec as Prisma.InputJsonValue } : {}) },
+          data: { connectionId: connection.id, ...parsed.data, ...(storedSpec === undefined ? {} : { spec: storedSpec as Prisma.InputJsonValue }) },
         })
-        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.add', entityType: 'ModelCapability', entityId: capability.id, payload: { connectionId: connection.id, provider: connection.provider, model: capability.model, modality: capability.modality } })
-        return reply.code(201).send(capability)
+        await recordAudit(app.db, { organizationId: auth.organizationId, userId: auth.userId, action: 'provider.model.add', entityType: 'ModelCapability', entityId: capability.id, payload: { connectionId: connection.id, provider: connection.provider, model: capability.model, modality: capability.modality, specSource: specSourceOf(connection.provider, capability.model, capability.modality, capability.spec) } })
+        return reply.code(201).send({ ...capability, specSource: specSourceOf(connection.provider, capability.model, capability.modality, capability.spec) })
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
           return reply.code(409).send({ error: `model "${parsed.data.model}" is already configured on this connection for the "${parsed.data.modality}" modality` })
@@ -575,6 +630,42 @@ function mergeCatalog(catalog: ProviderCatalog, overlay: Overlay): EffectiveCata
 type ParsedModelBody =
   | { ok: false; error: string }
   | { ok: true; data: { model: string; displayName: string | null; modality: ModelModality; acceptsFirstFrame: boolean; acceptsReferenceImages: boolean; maxReferenceImages: number } }
+
+/**
+ * The two facts the plan and billing path reads, validated into the shape a catalog row
+ * itself carries. `duration` goes back through the domain's own reader, so a hand-entered
+ * declaration and a curated one are the same dialect — a second spelling here is exactly
+ * how `durations: [5, 10]` once got read as "anything up to 10".
+ */
+type ParsedDeclaredSpec = { ok: false; error: string } | { ok: true; spec: Record<string, unknown> | undefined }
+
+function parseDeclaredSpec(body: ModelBody | undefined): ParsedDeclaredSpec {
+  const spec: Record<string, unknown> = {}
+
+  if (body?.duration !== undefined && body.duration !== null) {
+    const duration = readDurationSpec({ duration: body.duration })
+    if (!duration) {
+      return { ok: false, error: 'duration must be declared as {"kind":"range","min":n,"max":m}, {"kind":"steps","values":[…]} or {"kind":"fixed","value":n}, in whole positive seconds' }
+    }
+    spec.duration = duration
+  }
+
+  if (body?.resolutions !== undefined && body.resolutions !== null) {
+    if (!Array.isArray(body.resolutions)) return { ok: false, error: 'resolutions must be a list of the tiers this model accepts, in the vendor’s own spelling' }
+    if (body.resolutions.length > MAX_ENTERED_RESOLUTIONS) return { ok: false, error: `resolutions must list at most ${MAX_ENTERED_RESOLUTIONS} tiers` }
+    const tiers: string[] = []
+    for (const value of body.resolutions) {
+      if (typeof value !== 'string') return { ok: false, error: 'resolutions must be a list of tiers, e.g. ["720P", "1080P"]' }
+      const tier = value.trim()
+      if (tier === '' || tier.length > 24) return { ok: false, error: 'each resolution tier must be 1–24 characters, e.g. "720P"' }
+      if (!tiers.includes(tier)) tiers.push(tier)
+    }
+    // An empty list declares nothing, which is the same statement as not sending one.
+    if (tiers.length > 0) spec.resolutions = tiers
+  }
+
+  return { ok: true, spec: Object.keys(spec).length === 0 ? undefined : spec }
+}
 
 /**
  * One validator for every hand-entered model row, whether it lands on a connection

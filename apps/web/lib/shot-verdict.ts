@@ -1,5 +1,5 @@
 import { audioSourceInEffect, classifyFailure, isTerminalFailure, recordedAudioMode, type FailureKind } from '@studio/domain'
-import type { GenerationArtifact, ShotAudioSource, ShotboardShot } from './api'
+import type { ArtifactVeto, GenerationArtifact, ShotAudioSource, ShotboardShot, ShotVideoCandidate } from './api'
 import { FAILURE_CAUSE_KEY } from './failure-cause'
 import type { TranslateFn } from './i18n'
 
@@ -18,6 +18,44 @@ export interface ShotAudioFields {
   importedAmbience?: { id: string } | null
 }
 
+/** 判「这一镜有没有能播的画面」要读的最小字段（候选只认有没有条目与停没停在问询上）。 */
+export interface ShotPictureFields {
+  firstFrame: GenerationArtifact | null
+  video: GenerationArtifact | null
+  videoCandidates: readonly { awaitingDecision?: boolean }[]
+  frameCandidates: readonly { awaitingDecision?: boolean }[]
+}
+
+/**
+ * 大预览（右栏那块画布）真正在放的那一件。三档产物的键与面板的区块键同源。
+ */
+export type PreviewProduct = 'frame' | 'video' | 'audio'
+
+export interface PreviewSurface {
+  /** 画布此刻真正显示的那一档——头部「正看：X」只许报它。 */
+  shown: PreviewProduct
+  /** 点开的档位没有可播产物、画布回落显示首帧时，记下回落前指的是哪一档；没回落为 null。 */
+  fellBackFrom: PreviewProduct | null
+}
+
+/**
+ * SD-103：一块面板上不许有两句话。上一版「正看」按 `activeProduct` 取值，而画布在
+ * 没有成片时自行回落显示首帧（实拍 s6 镜头 #6：头部「正看：视频片段」+ 同一块画布
+ * 一张静帧和角标「只有首帧 · 还没抽成片」）。裁决放在这里，画布与头部读同一份：
+ * 想看的档位真有产物、或那一段正在产（画布是这一档的生成中蒙版）→ 就报那一档；
+ * 否则画布实际显示的是首帧，「正看」必须跟着改成首帧。
+ */
+export function previewSurface(
+  shot: Pick<ShotboardShot, 'firstFrame'>,
+  wanted: PreviewProduct,
+  hasWantedArtifact: boolean,
+  wantedBusy: boolean,
+): PreviewSurface {
+  if (hasWantedArtifact || wantedBusy) return { shown: wanted, fellBackFrom: null }
+  if (wanted === 'frame' || !shot.firstFrame) return { shown: wanted, fellBackFrom: null }
+  return { shown: 'frame', fellBackFrom: wanted }
+}
+
 /**
  * 这一镜「生效」的声音来源档：人钦定过就是那一档，没钦定就按镜型默认
  * （有台词=只用配音，无台词=只用原声）——判定在 @studio/domain。分段控件拿它
@@ -34,6 +72,16 @@ export function shotAudioMode(shot: ShotAudioFields): ResolvedAudioMode {
 /** 这一档要不要等一条配音轨：只有「只用原声」不等，其余三档都等。 */
 export function shotNeedsVoiceTrack(mode: ResolvedAudioMode): boolean {
   return mode !== 'native'
+}
+
+/**
+ * 这一镜的云端 TTS 配音还进不进母带。生效档是「导入音频」时，混音层只认导入件
+ * （compose 的 manifest 就按 recordedAudioMode 取轨，与这里同一份判据）——云端配音
+ * 行、它的钦定与「重跑「配音」」都是不上片的死入口，其中重跑还要真烧一次云端调用
+ * （SD-189）。界面据此收口，不再挂一个静默计费的按钮。
+ */
+export function cloudVoiceEntersMaster(shot: ShotAudioFields): boolean {
+  return shotAudioMode(shot) !== 'imported'
 }
 
 /** 这一镜是否还欠一条人声轨——与 pipeline 的 TTS 门、导入门同一口径。 */
@@ -147,7 +195,7 @@ export function cardStage(shot: ShotboardShot, verdict: ShotVerdict): CardStage 
   // 本机镜头（字卡/屏幕录制/合成/UI）永远不会有平台排产的首帧：它的空不是欠账，
   // 是分镜表明写要人来做。这一档必须排在进度档位之前——不然画面一旦到手，徽章就会
   // 从「手工 · 字卡」翻成「等你启动生成」，催用户去启动一次永远不会发生的生成。
-  // 有没有画面由那三枚点和详情里的「✓ 入片」说，徽章只说身份。
+  // 有没有画面由那三枚点和详情里的「✓ 已钦定」说，徽章只说身份。
   if (verdict.stage === 'idle' && shot.production !== 'video') return 'local'
   if (verdict.stage === 'idle' && verdict.done === verdict.total) return 'complete'
   if (verdict.stage === 'idle' && verdict.done > 0) return 'start'
@@ -229,7 +277,7 @@ export function productionWord(t: TranslateFn, production: ShotboardShot['produc
 }
 
 /**
- * 放映条那一格什么时候画斜纹：画面（首帧/视频）一件都没有。配音落地不算数——
+ * 放映条那一格什么时候画斜纹：画面（首帧/视频）一件都播不出来。配音落地不算数——
  * 放映条是画面时间轴，声音齐了画面还没起色的镜在时间轴上仍然是空格。此前斜纹
  * 挂在 verdict 的「一件产物都没有」上，一整集配完音斜纹就全部消失，进度条读不
  * 出画面欠账（2026-09-28 用户实测：只跑了一批配音，12 格斜纹全灭）。
@@ -238,7 +286,9 @@ export function stripIsEmpty(shot: ShotboardShot, stage: CardStage): boolean {
   // local 不画斜纹：放映条的斜纹是「平台还欠这一镜画面」，而本机镜头的画面从来
   // 不走平台；给它斜纹等于把「没人生成」写成「生成失败」。
   if (stage === 'local') return false
-  return (stage === 'idle' || stage === 'start') && !shot.firstFrame && !shot.video
+  // 「有没有画面」按能不能播算（SD-168）：停在等你裁决上的那一版播得出来，
+  // 给它斜纹等于在时间轴上把一条付费成片抹成空格。
+  return (stage === 'idle' || stage === 'start') && !hasPlayablePicture(shot)
 }
 
 /** 放映条格子的底色：绿=手上有可用画面、红=要你决定、琥珀=等你审、蓝=在产、灰=还没产。 */
@@ -255,16 +305,48 @@ export function stageTone(stage: CardStage): 'ready' | 'danger' | 'warning' | 'r
 }
 
 /**
+ * 这一镜手上有播得出来的画面吗。只认生效版（钦定 > 最新成功）不够：停在「等你裁决」
+ * 上的那一版是真花了钱、播放器能放的产物（SD-120 就是为把它带进版本列表才做的）。
+ * 只看生效版就会出现 SD-168 实拍 #9 那句自相矛盾——播放器能放 v1，红条与徽章却写
+ * 「这一镜还没有画面」。卡片、放映条、预览面板三处都读这一份判据。
+ */
+export function hasPlayableVideo(shot: ShotPictureFields): boolean {
+  return Boolean(shot.video) || shot.videoCandidates.length > 0
+}
+
+/** 首帧同一口径：候选里那一版（含停在等你裁决的）也画得出来。 */
+export function hasPlayableFrame(shot: ShotPictureFields): boolean {
+  return Boolean(shot.firstFrame) || shot.frameCandidates.length > 0
+}
+
+/** 这一镜到底有没有画面（首帧或成片任一播得出来）。 */
+export function hasPlayablePicture(shot: ShotPictureFields): boolean {
+  return hasPlayableFrame(shot) || hasPlayableVideo(shot)
+}
+
+/**
+ * 有能播的那一版，可它还没进生效链——整版停在「等你裁决」上。这句和「上一版还挂在
+ * 这一镜上」是两件事：前者要人收下或重抽，后者手上已经有一条上片的片。
+ */
+export function pictureParkedOnly(shot: ShotPictureFields, stage: 'frame' | 'video'): boolean {
+  const candidates = stage === 'frame' ? shot.frameCandidates : shot.videoCandidates
+  const effective = stage === 'frame' ? shot.firstFrame : shot.video
+  return !effective && candidates.some(candidate => candidate.awaitingDecision === true)
+}
+
+/**
  * 「重抽没过线」和「这一镜卡住了」是两件事，界面必须分开说。
  * 最新一次尝试失败、但上一版画面还在镜头上：要决定的是「再抽一次还是收下这一版」，
  * 不是去解一个并不存在的阻塞——把它写成「被阻塞」，同一张卡就会同时出现红徽章和绿点。
+ * 「上一版」按能不能播算（SD-168）：停在等你裁决上的那一版同样是手上有画面，
+ * 它不许再被压进「视频失败」那枚只该说真没有产物的徽章。
  */
 export function retryWithOutputLeft(shot: ShotboardShot): boolean {
   if (shot.attention.includes('shot_blocked')) return false
   const frameFailed = shot.attention.includes('frame_failed')
   const videoFailed = shot.attention.includes('video_failed')
   if (!frameFailed && !videoFailed) return false
-  return (!frameFailed || Boolean(shot.firstFrame)) && (!videoFailed || Boolean(shot.video))
+  return (!frameFailed || hasPlayableFrame(shot)) && (!videoFailed || hasPlayableVideo(shot))
 }
 
 /**
@@ -299,7 +381,9 @@ export function shotDemandText(t: TranslateFn, shot: ShotboardShot, code: string
       // 把它算进「N 版待选」等于让人去选一个后端会拒绝的版本。
       return t('shotboard.reason.selectionOpen', { count: shot.videoCandidates.filter(candidate => candidate.awaitingDecision !== true).length })
     case 'awaiting_review':
-      return shot.video ? t('shotboard.reason.reviewClip') : shot.firstFrame ? t('shotboard.reason.reviewFrame') : t('shotboard.reason.reviewShot')
+      // 「已出」按播不播得出来算（SD-168）：停在等你裁决上的那一版就是已经出了的画面，
+      // 只看生效链会把一条能播的付费成片说成什么都没有。
+      return hasPlayableVideo(shot) ? t('shotboard.reason.reviewClip') : hasPlayableFrame(shot) ? t('shotboard.reason.reviewFrame') : t('shotboard.reason.reviewShot')
     default:
       return ''
   }
@@ -309,12 +393,58 @@ export function shotDemandText(t: TranslateFn, shot: ShotboardShot, code: string
  * 失败那句先报真因，再报这一镜手上还剩什么。
  * 审计没过线（或认不出原因）才走原来的两句——那时「再抽一次」确实是正确建议；
  * 额度/权限/参数这类终因下写「决定再抽一次还是收下」，是把用户往墙上推。
+ * 「手上还剩什么」三档（SD-168）：真的一件没有 / 有可播的那一版但停在等你裁决 /
+ * 上一版还在生效。把第一档的话挂在第二档上，就是「播放器能放 v1、红条说没有画面」。
  */
 function failureDemand(t: TranslateFn, shot: ShotboardShot, stage: 'frame' | 'video'): string {
   const raw = stage === 'frame' ? shot.firstFrameError : shot.videoError
-  const hasOutput = stage === 'frame' ? Boolean(shot.firstFrame) : Boolean(shot.video)
+  const playable = stage === 'frame' ? hasPlayableFrame(shot) : hasPlayableVideo(shot)
+  const parked = pictureParkedOnly(shot, stage)
   const causeKey = FAILURE_CAUSE_KEY[classifyFailure(raw)]
-  if (!causeKey) return hasOutput ? t(`shotboard.reason.${stage}Retry`) : t(`shotboard.reason.${stage}Failed`)
-  const keptKey = `shotboard.failure.${stage}${hasOutput ? 'Kept' : 'None'}`
+  if (!causeKey) {
+    if (!playable) return t(`shotboard.reason.${stage}Failed`)
+    return parked ? t(`shotboard.reason.${stage}Parked`) : t(`shotboard.reason.${stage}Retry`)
+  }
+  const keptKey = `shotboard.failure.${stage}${!playable ? 'None' : parked ? 'Parked' : 'Kept'}`
   return `${t(keptKey)} · ${t(causeKey)}`
+}
+
+/**
+ * SD-172｜「机器过了 ≠ 人认了」的那一刀。
+ * 后端把否决存在产物自己的 metadata 里，读回来就是这一版被人判不可用的事实；
+ * 生效版（shot.video）由后端换回上一版可用的，界面只负责把「谁被否了、为什么」说清楚。
+ */
+export function vetoOf(candidate: { veto?: ArtifactVeto | null }): ArtifactVeto | null {
+  return candidate.veto ?? null
+}
+
+/** 这一镜被人工否决过的版本（新→旧，与候选同序）：版本行标红、履历说理由。 */
+export function vetoedVideoTakes(shot: ShotboardShot): ShotVideoCandidate[] {
+  return shot.videoCandidates.filter(candidate => candidate.veto != null)
+}
+
+/**
+ * SD-179｜「收下这版」之后仍然不想要它：那一版的档上必须还有重跑入口。
+ * 收下把任务钉成成功，于是它同时满足两条会吞掉这一刀的条件——「这镜已有产物，给生成」
+ * 与「这一镜已有一笔提交在途或待核对」。走问询路由的 rerun 才是出口：它带人工方向、
+ * 开新批次，把 settled 的收下如实当成历史而不是在途。
+ *
+ * 只在「收下之后没有更好的东西」时给这一刀：更新的一版已经买回来（且没被否、也没停在
+ * 等人裁决）时，重跑的入口归那一版，这里再挂一枚就是让人在两条并重跑里猜。
+ */
+export interface WaivedRerunTarget {
+  taskId: string
+  artifactId: string
+  version: number
+  waiveReason: string | null
+}
+
+export function waivedTakeRerunTarget(shot: ShotboardShot): WaivedRerunTarget | null {
+  // 只有真买过的版本有这一刀：本机渲染与导入档没有问询履历，也就没有「收下」。
+  const index = shot.videoCandidates.findIndex(candidate => candidate.waived === true && candidate.taskId !== null)
+  if (index === -1) return null
+  const superseded = shot.videoCandidates.slice(0, index).some(candidate => candidate.veto == null && candidate.awaitingDecision !== true)
+  if (superseded) return null
+  const candidate = shot.videoCandidates[index]!
+  return { taskId: candidate.taskId!, artifactId: candidate.artifactId, version: candidate.version, waiveReason: candidate.waiveReason ?? null }
 }

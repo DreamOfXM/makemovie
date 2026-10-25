@@ -50,6 +50,7 @@ interface TaskDto {
   status: string
   attempts: number
   provider: string | null
+  connectionName: string | null
   model: string | null
   error: string | null
   createdAt: string
@@ -76,6 +77,7 @@ interface CompositionDto {
   artifact: ArtifactDto | null
   subtitle: ArtifactDto | null
   score: ArtifactDto | null
+  block: { kind: string; detail: string } | null
 }
 
 interface Connection {
@@ -244,8 +246,11 @@ describe('generation trigger', () => {
     // name: what the vendor calls it — and what the shot ends up buying — is decided per
     // candidate at submit time, so it cannot be written here.
     const planned = await env.db.storyboard.findUniqueOrThrow({ where: { id: storyboardIds[1] }, select: { durationMs: true } })
+    // SD-085：这一镜的描述没有点名任何读数，走禁字档。这里旧版钉的是「短文字一律清晰
+    // 可读」那条——平台在付费提示词里要求画面出现可读字符，2026-10-21 的数字钟就是这么
+    // 长出来的。三档判档本身由 packages/pipeline/test/screen-text-rule.test.ts 钉。
     expect(JSON.parse(stored.requestSnapshot ?? '')).toEqual({
-      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：标题、标签、招牌等短文字一律使用简体中文，清晰可读；禁止出现可辨认的英文单词或字母；长文书类（协议/证书/书页）的正文文字可作虚化模糊处理，不必逐字可读，但不得出现可读的英文。\n\n运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定、不推不拉。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
+      input: { prompt: `SB2: Chase scene\n\n画面文字规则（最高优先级）：画面中不出现任何文字或可读字符；画面保持简洁，不添加描述之外的道具与装饰。\n\n运动规则（与画面文字规则同级）：画面中人物的一切动作与镜头运动只能来自上文描述明确写出的内容——描述没有写的动作不得出现。描述未提及任何动作时，只保持呼吸起伏、眨眼与光线的缓慢变化，机位固定、不推不拉。\n\n视觉风格：${getStyleVisualDirective(realistic, 'VIDEO')}` },
       parameters: { seed: generationSeed(stored.idempotencyKey!), durationSeconds: Math.round(planned.durationMs / 1000) },
     })
 
@@ -264,6 +269,8 @@ describe('generation trigger', () => {
     const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(200)
     expect(res.json().batch.id).toBe(scriptBatchId)
+    // 这一击什么都没排：这笔任务已经成功，不该被复活，也不该给界面「已重新排队」的借口。
+    expect(res.json()).toMatchObject({ created: false, requeued: 0 })
     expect(await env.db.generationTask.count({ where: { batchId: scriptBatchId } })).toBe(1)
     expect(await env.db.generationBatch.count({ where: { episodeId } })).toBe(2)
   })
@@ -275,6 +282,10 @@ describe('generation trigger', () => {
     const res = await env.app.inject({ method: 'POST', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(editorToken), payload: { stage: 'SCRIPT' } })
     expect(res.statusCode).toBe(200)
     expect(res.json().batch.id).toBe(scriptBatchId)
+    // 回执必须分得开「一笔也没排」与「死任务已按当前绑定重排、正在烧钱」：
+    // 只回一个 created 布尔时，界面把这一击报成「未新建任务 · 已有提交在途」，
+    // 而那笔任务其实刚被重新排队。
+    expect(res.json()).toMatchObject({ created: false, requeued: 1 })
 
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: scriptTaskId } })
     expect(stored).toMatchObject({ status: 'QUEUED', attempts: 0, provider: null, model: null, errorSnapshot: null })
@@ -314,6 +325,27 @@ describe('generation listing', () => {
 
     const missing = await env.app.inject({ method: 'GET', url: '/api/episodes/does-not-exist/generations', headers: authHeaders(viewerToken) })
     expect(missing.statusCode).toBe(404)
+  })
+
+  it('SD-082：任务带上最后一次提交所用的连接名，没有台账就报 null', async () => {
+    const connection = await env.db.providerConnection.findFirstOrThrow({ where: { organizationId, name: 'gen-main' } })
+    // 两次提交落在同一条任务上：报的是最新那次用的连接，不是第一条台账。
+    const other = await env.db.providerConnection.create({
+      data: { organizationId, provider: 'mock', name: 'retired-connection', baseUrl: 'mock://local', encryptedSecret: 'x' },
+    })
+    await env.db.submissionAttempt.createMany({
+      data: [
+        { taskId: videoTaskId, attemptNumber: 1, slot: 0, provider: 'mock', connectionId: other.id, model: 'mock-t2v' },
+        { taskId: videoTaskId, attemptNumber: 2, slot: 0, provider: 'mock', connectionId: connection.id, model: 'mock-t2v' },
+      ],
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    const tasks = (res.json() as { batches: BatchDto[] }).batches.flatMap(batch => batch.tasks)
+    expect(tasks.find(task => task.id === videoTaskId)!.connectionName).toBe('gen-main')
+    // 从没提交过的任务（脚本任务还在排队）没有连接可报，不许拿厂商或默认连接顶上。
+    expect(tasks.find(task => task.id === scriptTaskId)!.connectionName).toBeNull()
   })
 })
 
@@ -531,6 +563,8 @@ describe('artifact content', () => {
       downloadUrl: `/artifacts/${artifact.id}/content`,
       // 生成产物永远没有原始文件名：那个名字只属于人自己传上来的音频。
       filename: null,
+      // 没人否过这一版；SD-172 的否决事实随产物下发，读侧与界面共用这一格。
+      veto: null,
     }])
     expect(task.qc).toEqual({ kind: 'visual', score: 0.9, status: 'COMPLETED' })
     // qc 是最新一次的裁决；历史栏的「最高分」要的是全部尝试，两者必须同时下发。
@@ -597,6 +631,8 @@ describe('episode composition', () => {
     expect(composition.id).toBe(finished.id)
     expect(composition.artifact).toMatchObject({ id: master.id, downloadUrl: `/artifacts/${master.id}/content` })
     expect(composition.subtitle).toMatchObject({ id: subtitleArtifact.id, mimeType: 'application/x-subrip', downloadUrl: `/artifacts/${subtitleArtifact.id}/content` })
+    // 出了片就没有「为什么没出片」可说（SD-177）。
+    expect(composition.block).toBeNull()
     // A newer score exists for this episode and is deliberately not the one named:
     // a score bought after the compose is not in this file.
     await env.db.mediaArtifact.create({
@@ -612,6 +648,29 @@ describe('episode composition', () => {
     const downloaded = await env.app.inject({ method: 'GET', url: `/api/artifacts/${subtitleArtifact.id}/content`, headers: authHeaders(viewerToken) })
     expect(downloaded.statusCode).toBe(200)
     expect(downloaded.rawPayload.toString('utf8')).toBe(cues)
+  })
+
+  // SD-177：「已阻塞」必须自带解释。界面按 kind 翻成人话，原文只进悬停提示——
+  // 直接把 worker 那句英文报文印在卡片上就是内部文本上屏。
+  it('names the reason a composition stopped, as a code the screen can translate', async () => {
+    const blockedEpisode = await env.db.episode.create({ data: { projectId, number: 99, title: 'Blocked EP' } })
+    const raw = "storyboard sbx01: take 2 is not conditioned on take 1's end frame — the splice has a visible seam and will not render as one shot"
+    const blocked = await env.db.composition.create({
+      data: { episodeId: blockedEpisode.id, status: 'BLOCKED', manifest: JSON.stringify({ storyboardIds: [] }), errorSnapshot: raw },
+    })
+
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${blockedEpisode.id}/generations`, headers: authHeaders(viewerToken) })
+    expect(res.statusCode).toBe(200)
+    expect((res.json() as { composition: CompositionDto | null }).composition).toMatchObject({
+      id: blocked.id,
+      block: { kind: 'seam_unconditioned', detail: raw },
+    })
+
+    // 阻塞但行上没有原因（原因落库之前的旧数据）：不给 block，界面就不编一句原因出来，
+    // 只留「已阻塞」这个状态本身。
+    const silent = await env.db.composition.create({ data: { episodeId: blockedEpisode.id, status: 'BLOCKED', manifest: '{}' } })
+    const relisted = await env.app.inject({ method: 'GET', url: `/api/episodes/${blockedEpisode.id}/generations`, headers: authHeaders(viewerToken) })
+    expect((relisted.json() as { composition: CompositionDto | null }).composition).toMatchObject({ id: silent.id, block: null })
   })
 
   it('records trigger, cancel and composition events in the audit trail', async () => {
@@ -2292,7 +2351,7 @@ describe('generation plan pre-flight', () => {
 
     // Scoping to named shots narrows the plan the same way the trigger narrows.
     const scoped = (await plan(ownerToken, planEpisodeId, `stage=IMAGE&storyboardIds=${planStoryboardIds[0]}`)).body.plan!
-    expect(scoped.items).toEqual([{ id: planStoryboardIds[0], label: '#1 Plan SB1', disposition: 'skipped' }])
+    expect(scoped.items).toEqual([{ id: planStoryboardIds[0], label: '#1 Plan SB1', disposition: 'skipped', model: null, wave: 1 }])
     expect((await plan(ownerToken, planEpisodeId, 'stage=IMAGE&storyboardIds=not-a-shot')).statusCode).toBe(400)
   })
 
@@ -2427,6 +2486,69 @@ describe('generation plan pre-flight', () => {
     expect(videoPlan.models[0]).toContain('mock/mock-i2v')
     const fallback = videoPlan.models.findIndex(model => model.includes('mock/mock-t2v'))
     expect(fallback).toBeGreaterThan(0)
+  })
+})
+
+// SD-065 / ledger #201: 预审把「等场景主帧」的镜算成这一轮要派出、还给它点了一个
+// 模型名——真触发时它整镜 BLOCKED，一帧不烧。这一条从 API 层证明计划已经改口。
+describe('generation plan scene master waves', () => {
+  interface WavePlanItem { id: string; label: string; disposition: string; model: string | null; wave: 1 | 2 }
+  interface WavePlan {
+    items: WavePlanItem[]
+    newCount: number
+    dispatchCount: number
+    deferred: { shotNumber: number; label: string; waitsForShotNumber: number; waitsForLabel: string }[]
+    deferredCount: number
+  }
+
+  it('reports a non-first shot waiting for its scene master as wave 2, outside dispatchCount, and names the shot it waits for', async () => {
+    const project = await env.app.inject({ method: 'POST', url: '/api/projects', headers: authHeaders(ownerToken), payload: { name: 'Wave Drama' } })
+    expect(project.statusCode).toBe(201)
+    const projectId = project.json().id as string
+    const episode = await env.app.inject({ method: 'POST', url: `/api/projects/${projectId}/episodes`, headers: authHeaders(ownerToken), payload: { number: 1, title: 'Wave EP1' } })
+    expect(episode.statusCode).toBe(201)
+    const episodeId = episode.json().id as string
+    const shotIds: string[] = []
+    for (const number of [1, 2]) {
+      const shot = await env.app.inject({
+        method: 'POST', url: `/api/episodes/${episodeId}/storyboards`, headers: authHeaders(ownerToken),
+        payload: { number, title: `Master SB${number}`, durationMs: 3000, description: `同一景的第 ${number} 镜`, dialogue: '' },
+      })
+      expect(shot.statusCode).toBe(201)
+      shotIds.push(shot.json().id as string)
+    }
+    // POST 分镜不带场景列；主帧分组读的是这条列，直接落库才还原得了现场。
+    await env.db.storyboard.updateMany({ where: { episodeId }, data: { location: '滨江楼道', sceneNumber: 1 } })
+    await env.db.scriptVersion.create({ data: { episodeId, version: 1, content: 'wave script', checksum: 'wave-script', status: 'APPROVED' } })
+
+    const created = await env.app.inject({ method: 'POST', url: '/api/providers/connections', headers: authHeaders(ownerToken), payload: { provider: 'mock', name: 'plan-waves', apiKey: 'test-key' } })
+    expect(created.statusCode).toBe(201)
+    const connection = created.json() as Connection
+    expect((await env.app.inject({ method: 'POST', url: `/api/providers/connections/${connection.id}/probe`, headers: authHeaders(ownerToken) })).statusCode).toBe(200)
+    const binding = await env.app.inject({
+      method: 'POST', url: '/api/bindings', headers: authHeaders(ownerToken),
+      payload: { slot: 'image_gen', capabilityId: connection.capabilities.find(capability => capability.model === 'mock-image')!.id, projectId },
+    })
+    expect(binding.statusCode).toBe(201)
+
+    const res = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generation-plan?stage=IMAGE`, headers: authHeaders(ownerToken) })
+    expect(res.statusCode).toBe(200)
+    const plan = res.json().plan as WavePlan
+
+    // 两镜都没首帧：首镜本轮要烧，第二镜等它的主帧——账面新任务仍是 2，真正派出的只有 1。
+    expect(plan.newCount).toBe(2)
+    expect(plan.dispatchCount).toBe(1)
+    expect(plan.dispatchCount).toBeLessThan(plan.newCount)
+    expect(plan.deferredCount).toBe(1)
+    expect(plan.deferred).toEqual([{ shotNumber: 2, label: '#2 Master SB2', waitsForShotNumber: 1, waitsForLabel: '滨江楼道' }])
+
+    const first = plan.items.find(item => item.id === shotIds[0])!
+    const waiting = plan.items.find(item => item.id === shotIds[1])!
+    expect(first).toMatchObject({ disposition: 'new', wave: 1 })
+    expect(waiting).toMatchObject({ disposition: 'new', wave: 2, model: null })
+    // 首镜本轮真要派 image_gen：模型名必须来自同一条候选链（连接名 + provider/model）。
+    expect(typeof first.model).toBe('string')
+    expect(first.model).toContain('plan-waves · mock/mock-image')
   })
 })
 
@@ -2616,5 +2738,33 @@ describe('generation review (ask before retrying)', () => {
     expect(res.json().error).toMatch(/nothing to waive/)
     const stored = await env.db.generationTask.findUniqueOrThrow({ where: { id: pending.taskId } })
     expect(stored.status).toBe('FAILED')
+  })
+
+  // SD-170：界面印「本集重抽额度」只能读这里的活算值。快照里那份 budgetUsed 冻在
+  // 那次裁决那一刻（台账实测：10-22 冻 6/63、10-23 冻 4/63，中间没重跑整集），
+  // 两张快照并排就「读数倒退」。活值与 worker 同一套 episodeRetryBudget：
+  // 用量 = Σ max(attempts-1,0)（只数镜头绑定的 FIRST_FRAME/VIDEO/AUDIO），上限 = 在用镜数 × 每镜上限。
+  it('carries the live episode retry budget, independent of what any snapshot froze', async () => {
+    const before = await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) })
+    expect(before.statusCode).toBe(200)
+    const base = (before.json() as { retryBudget: { used: number; limit: number } }).retryBudget
+    expect(base).toEqual({ used: expect.any(Number), limit: expect.any(Number) })
+
+    // 两笔停在裁决上的任务，各自把 6/63 与 4/63 冻进快照；它们对活账本各贡献 attempts-1=1。
+    const frozen6 = await createPendingReview({ budgetLimit: 63, budgetUsed: 6 })
+    const frozen4 = await createPendingReview({ budgetLimit: 63, budgetUsed: 4 })
+    expect(frozen6.snapshot.budgetUsed).not.toBe(frozen4.snapshot.budgetUsed)
+
+    const after = (await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) }))
+      .json() as { retryBudget: { used: number; limit: number } }
+    // 现值只有一个，且只随真实重抽次数走——不随两份互不相容的快照摆动。
+    expect(after.retryBudget.used).toBe(base.used + 2)
+    expect(after.retryBudget.limit).toBe(base.limit)
+
+    // 计数被回退就是这里出事：把其中一笔任务的尝试次数再加一，现值必须跟着进一位。
+    await env.db.generationTask.update({ where: { id: frozen4.taskId }, data: { attempts: 3 } })
+    const bumped = (await env.app.inject({ method: 'GET', url: `/api/episodes/${episodeId}/generations`, headers: authHeaders(viewerToken) }))
+      .json() as { retryBudget: { used: number } }
+    expect(bumped.retryBudget.used).toBe(after.retryBudget.used + 1)
   })
 })

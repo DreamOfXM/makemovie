@@ -209,3 +209,95 @@ export function getCatalog(provider: string): ProviderCatalog | undefined {
 export function listCatalogs(): ProviderCatalog[] {
   return [...registry.values()]
 }
+
+/**
+ * The modalities whose billed tier the plan path reads out of `spec`: a shot's length is
+ * pinned from `spec.duration` and the delivery resolution from `spec.resolutions`. A row
+ * outside this set costs nothing by the second, so an empty spec there is a label, not a
+ * bill — which is why only these ones are demanded of an operator.
+ */
+export const declaredDurationModalities = ['t2v', 'i2v', 'r2v'] as const
+
+export function declaresDuration(modality: string): boolean {
+  return (declaredDurationModalities as readonly string[]).includes(modality)
+}
+
+/**
+ * The catalog row an operator means when they type a model id, or undefined when our
+ * catalogs have never heard of it.
+ *
+ * Ids match case-insensitively on purpose: the vendor's own console displays some of
+ * these names in a different case than the API accepts, and a row copied from the screen
+ * is the same model as the row in our list. Leaving it unmatched would throw away the
+ * declaration we already hold for it — which is how a hand-added row lost its length and
+ * billed at the vendor default.
+ *
+ * One id can carry several rows (`wan3.0-video` is filed under both t2v and i2v), so the
+ * modality is a preference, not a filter: when the operator asks for a modality we have
+ * not listed for that id, the id's own row still states the lengths it accepts.
+ */
+export function findCatalogModel(provider: string, model: string, modality?: string): CatalogModel | undefined {
+  const wanted = model.trim().toLowerCase()
+  if (wanted === '') return undefined
+  const sameId = (getCatalog(provider)?.models ?? []).filter(entry => entry.model.trim().toLowerCase() === wanted)
+  if (sameId.length === 0) return undefined
+  return (modality === undefined ? undefined : sameId.find(entry => entry.modality === modality)) ?? sameId[0]
+}
+
+/**
+ * The facts our catalogs already carry for a hand-entered model id, or undefined when they
+ * carry none. A row that exists but declares nothing (`mock`'s video rows) is not a spec to
+ * inherit — reporting one would tell the operator a length is pinned when nothing is.
+ */
+export function catalogSpecFor(provider: string, model: string, modality?: string): Record<string, unknown> | undefined {
+  const declared = findCatalogModel(provider, model, modality)?.spec
+  return hasSpec(declared) ? declared : undefined
+}
+
+/**
+ * Where a capability row's spec came from — the three states the models page must tell
+ * apart, because each one answers a different question ("can I trust the number the plan
+ * quoted?" is only yes for the first two).
+ *
+ * `catalog` means the row carries exactly what our own curated list declares for this
+ * model. `manual` means somebody wrote numbers for it on this connection. `unknown` means
+ * nothing is declared, so the plan path has nothing to read and the vendor's default is
+ * what gets bought.
+ */
+export type SpecSource = 'catalog' | 'manual' | 'unknown'
+
+export function specSourceOf(provider: string, model: string, modality: string, spec: unknown): SpecSource {
+  if (!hasSpec(spec)) return 'unknown'
+  const declared = catalogSpecFor(provider, model, modality)
+  return declared !== undefined && jsonEquals(declared, spec) ? 'catalog' : 'manual'
+}
+
+function hasSpec(spec: unknown): boolean {
+  if (spec === null || spec === undefined) return false
+  if (Array.isArray(spec)) return spec.length > 0
+  if (typeof spec === 'object') return Object.keys(spec as Record<string, unknown>).length > 0
+  return true
+}
+
+/**
+ * Structural equality over JSON values. Prisma hands `spec` back with its keys in
+ * storage order, so a stringified comparison would call an inherited catalog row manual
+ * for no reason a human could read off the screen.
+ */
+function jsonEquals(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((item, index) => jsonEquals(item, b[index]))
+  }
+  if (isJsonRecord(a) || isJsonRecord(b)) {
+    if (!isJsonRecord(a) || !isJsonRecord(b)) return false
+    const keys = Object.keys(a)
+    if (keys.length !== Object.keys(b).length) return false
+    return keys.every(key => key in b && jsonEquals(a[key], b[key]))
+  }
+  return a === b
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

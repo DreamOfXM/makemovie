@@ -32,7 +32,11 @@ it('replays a durable result after a rolled-back completion without duplicate ar
     expect(submit).toHaveBeenCalledTimes(1)
     expect(await env.db.mediaArtifact.count({ where: { taskId: seed.taskId } })).toBe(1)
     expect(await env.db.qualityCheck.count({ where: { artifact: { taskId: seed.taskId } } })).toBe(1)
-    expect(await env.db.usageLedger.count({ where: { taskId: seed.taskId } })).toBe(1)
+    // 重投落回同一格：账本只一行，且体积是补进来的真读数，不是受理时那行 0。
+    const usage = await env.db.usageLedger.findMany({ where: { taskId: seed.taskId } })
+    expect(usage).toHaveLength(1)
+    expect(usage[0]!.attemptId).not.toBeNull()
+    expect(usage[0]!.outputUnits).toBeGreaterThan(0)
     expect(await env.db.storyboard.count({ where: { episodeId: seed.episodeId } })).toBe(3)
   } finally { vi.restoreAllMocks(); await env.stop() }
 })

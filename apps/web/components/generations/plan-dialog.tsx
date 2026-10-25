@@ -219,22 +219,36 @@ export function PlanDialog({ pending, onClose, onConfirm }: {
                 </ul>
               </div>
             )}
+            {/* 本轮真正派出的镜与等场景主帧的镜分开报：主帧未落位的镜真触发只会落
+                BLOCKED、不入队、不烧钱，不能算进这一批的派出数。 */}
+            {plan.deferred.length > 0 && (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-relaxed">
+                <span className="text-foreground font-medium tabular-nums">{t('generations.planDispatched', { count: plan.dispatchCount })}</span>
+                <span className="text-muted-foreground"> · </span>
+                <span className="text-warning-ink font-medium tabular-nums">
+                  {t('generations.planWaitingMaster', { count: plan.deferredCount, shots: plan.deferred.map(entry => `#${entry.shotNumber}`).join('、') })}
+                </span>
+              </div>
+            )}
             <ul className="max-h-60 space-y-1 overflow-y-auto text-xs">
               {plan.items.map(item => {
                 const idle = item.disposition === 'skipped' || item.disposition === 'local'
                 return (
-                  <li key={item.id} className="flex items-center justify-between gap-2 border-b py-1 last:border-b-0">
-                    <span className={cn('min-w-0 truncate', idle && 'text-muted-foreground/60')}>{item.label}</span>
-                    <span
-                      className={cn(
-                        'shrink-0 font-medium',
-                        item.disposition === 'new' && 'text-primary',
-                        item.disposition === 'retry' && 'text-warning-ink',
-                        idle && 'text-muted-foreground',
-                      )}
-                    >
-                      {t(`generations.planItem.${item.disposition}`)}
-                    </span>
+                  <li key={item.id} className="border-b py-1 last:border-b-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={cn('min-w-0 truncate', idle && 'text-muted-foreground/60')}>{item.label}</span>
+                      <span
+                        className={cn(
+                          'shrink-0 font-medium',
+                          item.disposition === 'new' && 'text-primary',
+                          item.disposition === 'retry' && 'text-warning-ink',
+                          idle && 'text-muted-foreground',
+                        )}
+                      >
+                        {t(`generations.planItem.${item.disposition}`)}
+                      </span>
+                    </div>
+                    {item.model && <p className="text-muted-foreground mt-0.5 truncate text-[11px]">{item.model}</p>}
                   </li>
                 )
               })}

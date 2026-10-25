@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { ChevronDownIcon, ChevronRightIcon, ChevronUpIcon } from 'lucide-react'
 import { translateEnum, useI18n, type TranslateFn } from '@/lib/i18n'
+import { failureCauseCopy } from '@/lib/failure-cause'
 import type { ShotEvent } from '@/lib/shot-history'
 import { batchCountOf } from '@/lib/shot-history'
 import { cn, formatDuration } from '@/lib/utils'
@@ -121,6 +122,9 @@ interface ShotHistoryProps {
   canRetry: boolean
   canPin: boolean
   qcThreshold: number | undefined
+  /** 这一镜的云端配音进不进母带（SD-189）：导入档下它产的是死轨，履历里的「重试这一步」
+   *  就是又一笔永远不上片的付费调用，于是不给入口。 */
+  voiceLive: boolean
   /** 这一镜正在抽的阶段：转圈期间行尾的动作按钮不受理第二次点击。 */
   busy: boolean
   onRetry(stage: 'IMAGE' | 'VIDEO' | 'AUDIO'): void
@@ -134,13 +138,32 @@ function eventLabel(event: ShotEvent, t: TranslateFn): string {
   return translateEnum(t, 'generations.stage', event.kind)
 }
 
+/** SD-082：只有实测值许当「这一版多长」报；量不到就明写计划，被模型时长地板抬过的两个数并排。 */
+function durationWords(event: ShotEvent, t: TranslateFn): string | null {
+  if (event.durationMs === null) {
+    return event.plannedMs === null ? null : t('storyboards.eventDurationPlanned', { duration: formatDuration(event.plannedMs) })
+  }
+  return event.plannedMs !== null && event.plannedMs !== event.durationMs
+    ? t('storyboards.eventDurationRaised', { measured: formatDuration(event.durationMs), planned: formatDuration(event.plannedMs) })
+    : t('storyboards.eventDurationMeasured', { duration: formatDuration(event.durationMs) })
+}
+
 function eventMessage(event: ShotEvent, t: TranslateFn): string {
   if (event.kind === 'BREAKDOWN') return t('storyboards.eventBreakdownReplaced', { revision: event.revision })
   const parts: string[] = []
-  if (event.durationMs !== null) parts.push(formatDuration(event.durationMs))
+  const duration = durationWords(event, t)
+  if (duration) parts.push(duration)
   if (event.model) parts.push(event.model)
+  // SD-082：连接名是用户自己起的（「百炼免费额度」），比厂商名更能回答「花的是哪条链」；
+  // 台账被删或还没提交时连接名缺失，退回厂商。
+  if (event.connectionName) parts.push(t('storyboards.eventConnection', { connection: event.connectionName }))
+  else if (event.provider) parts.push(t('storyboards.eventProvider', { provider: event.provider }))
   if (event.tone === 'failed') {
-    if (event.error) parts.push(event.error)
+    // SD-167：内部报文不上屏，只报认得出的因（额度/权限/参数/网络/审查）。
+    // 这一行不写「这一镜还没有画面」——履历里每一行都是某一版的记录，那一版有没有画面
+    // 由行本身和状态徽章说，套镜头卡那句会在一条能放的 4s 旁边写「没有画面」。
+    const cause = failureCauseCopy(t, event.error)
+    if (cause) parts.push(cause)
     // 这一条就是第几次尝试:一条任务会把它的每次尝试都记在 attempts 上，
     // 写重试上限会把「第 1 次就挂」和「抽满 3 次才挂」说成同一件事。
     if (event.attempts !== null) parts.push(t('storyboards.eventAttempts', { count: event.attempts }))
@@ -192,7 +215,7 @@ function EventBadge({ event, qcThreshold, t }: { event: ShotEvent; qcThreshold: 
  * 这一镜的历史：按镜号聚合，跨批次、跨阶段，新的在上。批次那层没有删掉，降级成行尾那枚
  * 「批 N」——日常要回答的是「#3 这一镜怎么样了」，不是「22:24 那一批怎么样了」。
  */
-export function ShotHistory({ events, live, canRetry, canPin, qcThreshold, busy, onRetry, onPin }: ShotHistoryProps) {
+export function ShotHistory({ events, live, canRetry, canPin, qcThreshold, voiceLive, busy, onRetry, onPin }: ShotHistoryProps) {
   const { t, locale } = useI18n()
   const [expanded, setExpanded] = useState(false)
   const [failedOnly, setFailedOnly] = useState(false)
@@ -231,11 +254,14 @@ export function ShotHistory({ events, live, canRetry, canPin, qcThreshold, busy,
         <ul className="divide-y divide-border/50">
           {shown.map(event => {
             const message = eventMessage(event, t)
+            // SD-167：报文从行面上摘掉后，这一行的原文只剩浮层这一个家——排查不能丢。
+            const evidence = event.tone === 'failed' ? event.error : null
             // 空消息不给气泡：flex-1 的跨度照样能悬停，会弹出一个空黑框。
             const messageCell = (
               <span className="text-muted-foreground min-w-0 flex-1 truncate">{message}</span>
             )
-            const retryable = live && canRetry && !busy && event.tone === 'failed' && event.kind !== 'BREAKDOWN'
+            const retryable =
+              live && canRetry && !busy && event.tone === 'failed' && event.kind !== 'BREAKDOWN' && (event.kind !== 'AUDIO' || voiceLive)
             const pinnable = live && canPin && !busy && event.kind === 'VIDEO' && event.tone === 'ok' && !event.selected && event.artifactId !== null
             return (
               <li
@@ -245,10 +271,13 @@ export function ShotHistory({ events, live, canRetry, canPin, qcThreshold, busy,
                 <time className="text-subtle-foreground shrink-0 tabular-nums">{stamp(event.at, locale)}</time>
                 <span className="text-muted-foreground w-14 shrink-0">{eventLabel(event, t)}</span>
                 <EventBadge event={event} qcThreshold={qcThreshold} t={t} />
-                {message ? (
+                {message || evidence ? (
                   <Tooltip>
                     <TooltipTrigger asChild>{messageCell}</TooltipTrigger>
-                    <TooltipContent className="break-all">{message}</TooltipContent>
+                    <TooltipContent className="max-w-prose break-all">
+                      {message}
+                      {evidence && <p className="font-mono text-[11px] opacity-70">{evidence}</p>}
+                    </TooltipContent>
                   </Tooltip>
                 ) : messageCell}
                 {event.tone === 'failed' && event.bestScore !== null ? (

@@ -439,6 +439,43 @@ export function isTerminalFailure(kind: FailureKind): boolean {
   return kind === 'quota' || kind === 'access' || kind === 'param'
 }
 
+/**
+ * 合成整集停在「已阻塞」时的因（SD-177）。worker 抛的是英文诊断句，里面是
+ * storyboard/artifact 的裸 id——直接上屏就是内部文本泄漏，全说「合成失败」又等于
+ * 没说。这里把已知的每一句收成一个稳定码，界面按码给人话，原文留给排查。
+ * 扩族必须带 worker 侧的真实抛句，认不出的进 composeBlock.unknown，不许原样上屏。
+ */
+export const composeBlockKinds = [
+  'missing_video',
+  'selection_stale',
+  'snapshot_drift',
+  'seam_unconditioned',
+  'edit_clip_unknown',
+  'edit_source_missing',
+  'clip_not_editable',
+  'trim_failed',
+  'wrong_episode',
+  'unknown',
+] as const
+export type ComposeBlockKind = (typeof composeBlockKinds)[number]
+
+const COMPOSE_BLOCK_PATTERNS: readonly [ComposeBlockKind, RegExp][] = [
+  ['seam_unconditioned', /is not conditioned on take .*end frame/i],
+  ['snapshot_drift', /no longer matches the master's own segments|not a spliced master/i],
+  ['selection_stale', /locked video selection|lockedVideoSelection but no selectedVideoArtifactId|frozen video artifact .* no longer resolves/i],
+  ['edit_clip_unknown', /references artifact .* that is not a video of this shot|anchors a hidden or unknown clip/i],
+  ['edit_source_missing', /source artifact .* not found/i],
+  ['clip_not_editable', /raw source is not editable media/i],
+  ['trim_failed', /failed to (conform clip|trim clip)/i],
+  ['wrong_episode', /does not belong to episode/i],
+  ['missing_video', /has no succeeded video artifact/i],
+]
+
+export function classifyComposeBlock(raw: string | null | undefined): ComposeBlockKind {
+  if (!raw) return 'unknown'
+  return COMPOSE_BLOCK_PATTERNS.find(([, pattern]) => pattern.test(raw))?.[0] ?? 'unknown'
+}
+
 /** 一个（provider, model）迄今的真实调用履历。 */
 export interface CallEvidence {
   ok: number
@@ -623,3 +660,5 @@ export * from './readiness.js'
 export * from './contracts.js'
 
 export * from './duration.js'
+
+export * from './artifact-veto.js'

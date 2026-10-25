@@ -88,6 +88,18 @@ describe('分镜文本体检', () => {
     expect(codes([shot('a', { description: '（特写·平视·固定）墙上有字幕两个字' })], 'a')).toEqual(['on_screen_text_in_shot'])
   })
 
+  it('SD-174：台词原文抄进画面描述也报——ON_SCREEN_TEXT 那份写法清单接不住「说话人：台词」', () => {
+    // #47 实拍原文：description 里写着「他：别删我。」，dialogue 同值。规则当时要求
+    // 「短文字一律清晰可读」，模型于是把这句台词烧成了画面上的字。
+    expect(codes([shot('a', { description: '（近景·平视·固定）他：别删我。', dialogue: '别删我。', speaker: '陈默' })], 'a'))
+      .toEqual(['on_screen_text_in_shot'])
+    expect(codes([shot('a', { description: '(close-up·eye level·static) He: Don\'t delete it.', dialogue: 'Don\'t delete it.', speaker: 'Chen Mo' })], 'a'))
+      .toEqual(['on_screen_text_in_shot'])
+    // 两列各归各的不报：台词只在 dialogue 里，描述只写动作。
+    expect(codes([shot('a', { description: '（近景·平视·固定）他伸手去抓桌上的钟', dialogue: '别删我。', speaker: '陈默' })], 'a'))
+      .toEqual([])
+  })
+
   it('非实拍镜不查这条：字卡与 UI 就是用来上屏写字的', () => {
     for (const method of ['字卡', 'UI', '合成', '屏幕录制']) {
       expect(codes([shot('a', { method, description: '黑屏。字幕：第 1 次。' })], 'a')).toEqual([])
@@ -103,5 +115,15 @@ describe('分镜文本体检', () => {
   it('一镜多处缺口逐条列全', () => {
     const findings = codes([shot('a', { description: '她坐在长桌边', dialogue: '你来了。', speaker: null })], 'a')
     expect(findings).toEqual(['camera_mark_missing', 'dialogue_without_speaker'])
+  })
+
+  it('SD-123：实拍镜零绑定要提示——绑定是定妆照参考图的唯一来源', () => {
+    expect(codes([shot('a', { boundAssetCount: 0 })], 'a')).toEqual(['no_asset_binding'])
+    // 绑了一条（哪怕只绑了场景）就不再报：这条只抓「一个都没绑」，不推断该绑哪些。
+    expect(codes([shot('a', { boundAssetCount: 1 })], 'a')).toEqual([])
+    // 没读绑定关系 ≠ 读到零：调用方没给这个字段时整条判据跳过。
+    expect(codes([shot('a')], 'a')).toEqual([])
+    // 字卡/UI 镜本来就不吃素材，不许报。
+    expect(codes([shot('a', { method: '字卡', description: '第三日 11:59', boundAssetCount: 0 })], 'a')).toEqual([])
   })
 })

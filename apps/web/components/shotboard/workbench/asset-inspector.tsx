@@ -180,7 +180,8 @@ export function AssetInspector({ episodeId, asset, onChanged }: { episodeId: str
                   >
                     <span className="w-20 shrink-0">
                       {version.artifact ? (
-                        <ArtifactMedia artifact={version.artifact} label={`v${version.version}`} interactive={false} className="h-12 w-full rounded" />
+                        /* 版本行整行是按钮：缩略图不再嵌重试钮，失败条只报事实；点这一行会把该版送上大图，大图自带重试（SD-122）。 */
+                        <ArtifactMedia retryless artifact={version.artifact} label={`v${version.version}`} interactive={false} className="h-12 w-full rounded" />
                       ) : (
                         <span className="border-border/60 flex h-12 w-full items-center justify-center rounded border border-dashed">
                           <ImageIcon className="text-muted-foreground size-3.5" />
