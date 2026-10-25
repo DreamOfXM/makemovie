@@ -3,22 +3,125 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MakeMovie —— 从一页故事到一集可交付的成片</title>
-<meta name="description" content="MakeMovie 是可自托管的 AI 影视生产平台。喂给它一段小说节选、故事梗概或剧本，它交回一集成片：拍摄剧本、分镜清单、角色与道具参考图、首帧、视频片段、角色配音、配乐、字幕、母版与交付清单——每一个要花钱的阶段都挡在你的审批之后。">
+<title>MakeMovie —— 开源自托管的 AI 视频生产平台｜小说剧本到成片母带</title>
+<meta name="description" content="开源自托管的 AI 影视生产平台：输入小说节选或剧本，交回一集经你审批的成片母带——拍摄剧本、分镜、首帧、片段、配音、配乐、字幕、交付清单。">
 <meta name="theme-color" content="#07090e">
+<meta name="robots" content="max-image-preview:large">
+<meta name="google-site-verification" content="">
 <link rel="canonical" href="https://dreamofxm.github.io/makemovie/zh/">
+<link rel="author" href="https://github.com/DreamOfXM">
+<link rel="describedby" href="https://dreamofxm.github.io/makemovie/llms.txt">
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="MakeMovie">
 <meta property="og:title" content="MakeMovie —— 从一页故事到一集可交付的成片">
 <meta property="og:description" content="可自托管的 AI 视频生产：原文进，可审计的成片出。花钱阶段前设审批闸门，每个产物带血缘，Apache-2.0。">
 <meta property="og:url" content="https://dreamofxm.github.io/makemovie/zh/">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:locale:alternate" content="en_US">
 <meta property="og:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-zh.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:alt" content="MakeMovie 制作台：左侧镜头列表，中间选中镜头的剧本，右侧它的首帧、片段与配音轨。">
+<meta name="twitter:site" content="@DreamOfXM">
+<meta name="twitter:creator" content="@DreamOfXM">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="MakeMovie —— 从一页故事到一集可交付的成片">
+<meta name="twitter:description" content="可自托管的 AI 视频生产：原文进，可审计的成片出。花钱阶段前设审批闸门，每个产物带血缘，Apache-2.0。">
 <meta name="twitter:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-zh.png">
-<link rel="alternate" hreflang="en" href="../">
-<link rel="alternate" hreflang="zh-Hans" href="./">
+<meta name="twitter:image:alt" content="MakeMovie 制作台：左侧镜头列表，中间选中镜头的剧本，右侧它的首帧、片段与配音轨。">
+<link rel="alternate" hreflang="en" href="https://dreamofxm.github.io/makemovie/">
+<link rel="alternate" hreflang="zh-Hans" href="https://dreamofxm.github.io/makemovie/zh/">
+<link rel="alternate" hreflang="x-default" href="https://dreamofxm.github.io/makemovie/">
 <link rel="stylesheet" href="../assets/site.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://dreamofxm.github.io/makemovie/#organization",
+      "name": "MakeMovie",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "logo": "https://dreamofxm.github.io/makemovie/assets/favicon.svg",
+      "sameAs": [
+        "https://github.com/DreamOfXM/makemovie",
+        "https://github.com/DreamOfXM",
+        "https://x.com/DreamOfXM"
+      ]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://dreamofxm.github.io/makemovie/#website",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "name": "MakeMovie",
+      "inLanguage": ["en", "zh-Hans"],
+      "publisher": { "@id": "https://dreamofxm.github.io/makemovie/#organization" }
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://dreamofxm.github.io/makemovie/zh/#application",
+      "name": "MakeMovie",
+      "inLanguage": "zh-Hans",
+      "applicationCategory": "MultimediaApplication",
+      "operatingSystem": "Linux、macOS、Windows——用 Docker Compose 自托管",
+      "url": "https://dreamofxm.github.io/makemovie/zh/",
+      "codeRepository": "https://github.com/DreamOfXM/makemovie",
+      "downloadUrl": "https://github.com/DreamOfXM/makemovie/releases",
+      "softwareVersion": "0.2.2",
+      "dateModified": "2026-10-25",
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "image": "https://dreamofxm.github.io/makemovie/assets/og-image-zh.png",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": [
+        "上传的每一版原文在生成前先过来源审计",
+        "由小说节选、梗概或剧本写出拍摄剧本并拆成分镜",
+        "角色、道具、场景参考图，逐镜首帧与视频片段",
+        "逐镜角色配音生成，也支持导入自己录的声音",
+        "整集配乐床与环境声床，人声出现时自动闪避",
+        "字幕轨、镜头转场，合成出实测时长的母带",
+        "每一个会花钱的阶段都停在人工审批之后",
+        "每个产物带血缘：任务、提示词、模型、连接与审核分",
+        "用量只报物理量——计费调用、重试、字符数、字节数",
+        "交付时生成 EDL 与 FCP XML 剪辑清单和带校验值的清单",
+        "绑内置 mock 供应商即可零 API 键跑通整条链",
+        "多租户组织、五种角色与带中文标签的动作审计轨迹"
+      ]
+    },
+    {
+      "@type": "ImageObject",
+      "@id": "https://dreamofxm.github.io/makemovie/zh/#hero-image",
+      "contentUrl": "https://dreamofxm.github.io/makemovie/assets/hero-workbench-zh.png",
+      "url": "https://dreamofxm.github.io/makemovie/assets/hero-workbench-zh.png",
+      "width": 2880,
+      "height": 1800,
+      "caption": "MakeMovie 制作台：左侧镜头清单与每镜产物状态点，中间是选中镜头的剧本字段，右侧是它的首帧、视频片段与配音轨。",
+      "creditText": "DreamOfXM",
+      "inLanguage": "zh-Hans",
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "creator": { "@id": "https://dreamofxm.github.io/makemovie/#organization" },
+      "isPartOf": { "@id": "https://dreamofxm.github.io/makemovie/zh/#page" }
+    },
+    {
+      "@type": "WebPage",
+      "@id": "https://dreamofxm.github.io/makemovie/zh/#page",
+      "url": "https://dreamofxm.github.io/makemovie/zh/",
+      "name": "MakeMovie —— 开源自托管的 AI 视频生产平台",
+      "inLanguage": "zh-Hans",
+      "isPartOf": { "@id": "https://dreamofxm.github.io/makemovie/#website" },
+      "about": { "@id": "https://dreamofxm.github.io/makemovie/zh/#application" },
+      "primaryImageOfPage": { "@id": "https://dreamofxm.github.io/makemovie/zh/#hero-image" },
+      "isAccessibleForFree": true
+    }
+  ]
+}
+</script>
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -57,8 +160,8 @@
       <a href="#workflow">生产流程</a>
       <a href="#install">安装</a>
       <a class="hide-sm" href="#faq">常见问题</a>
-      <div class="lang" aria-open="false">
-        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="语言">
+      <div class="lang" data-open="false">
+        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="语言：简体中文">
           <svg class="ic" aria-hidden="true" style="width:15px;height:15px"><use href="#i-globe"/></svg>
           简体中文
           <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg>
@@ -70,7 +173,7 @@
             <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
         </div>
       </div>
-      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie" rel="nofollow">
+      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie">
         <svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>
         GitHub
       </a>
@@ -93,7 +196,7 @@
 
     <div class="hero-cta">
       <a class="btn btn-primary" href="#install"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-terminal"/></svg>本机跑起来</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
     </div>
 
     <div class="clone">
@@ -116,7 +219,10 @@
         <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
         <span class="addr">localhost:3010 · 制作台</span>
       </div>
-      <img src="../assets/hero-workbench-zh.png" width="2880" height="1800" alt="MakeMovie 制作台：左侧镜头清单与每镜产物状态点，中间是选中镜头的剧本字段，右侧是它的首帧、视频片段与配音轨。">
+      <picture>
+        <source type="image/webp" srcset="../assets/hero-workbench-zh.webp">
+        <img src="../assets/hero-workbench-zh.png" width="2880" height="1800" fetchpriority="high" decoding="async" alt="MakeMovie 制作台：左侧镜头清单与每镜产物状态点，中间是选中镜头的剧本字段，右侧是它的首帧、视频片段与配音轨。">
+      </picture>
       <figcaption>每镜一张卡：左边读它的剧本，右边是它的首帧、片段与配音。截图来自本机实例上的一次真实生产——13 个镜头里 2 个产物齐了等审、1 个首帧失败，其余斜纹格还没开跑。</figcaption>
     </figure>
   </div>
@@ -449,7 +555,10 @@
         <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
         <span class="addr">localhost:3010 · 模型中心</span>
       </div>
-      <img src="../assets/model-center-zh.png" width="2880" height="1800" loading="lazy" decoding="async" alt="MakeMovie 模型中心的就绪度标签页：上方是四步配置流程说明，下方逐个能力槽位标为就绪，横幅显示必填 4/4 已配齐。">
+      <picture>
+        <source type="image/webp" srcset="../assets/model-center-zh.webp">
+        <img src="../assets/model-center-zh.png" width="2880" height="1800" loading="lazy" decoding="async" alt="MakeMovie 模型中心的就绪度标签页：上方是四步配置流程说明，下方逐个能力槽位标为就绪，横幅显示必填 4/4 已配齐。">
+      </picture>
       <figcaption>配好密钥后的模型中心：每个能力槽位解析到绑定在它上面的模型，而一个槽位只有在厂商自己确认过权限后才会变成就绪。</figcaption>
     </figure>
   </div>
@@ -524,7 +633,7 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
       <span class="req">中英双语控制台</span>
       <span class="req">深色与浅色主题</span>
     </div>
-    <p class="note">完整快速开始、配置参考与两种自托管模式都在 <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md" rel="nofollow">README</a> 里。FFmpeg 负责剪出母版并写入标识，worker 镜像已经带了它。</p>
+    <p class="note">完整快速开始、配置参考与两种自托管模式都在 <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md">README</a> 里。FFmpeg 负责剪出母版并写入标识，worker 镜像已经带了它。</p>
   </div>
 </section>
 
@@ -600,15 +709,16 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
     <p>一个仓库，Apache-2.0，没有付费档位，也没有托管版。这是一套还在生长的开源生产线——无论你热爱视频制作，还是热爱技术，都欢迎加入建设：提一个 issue 指出毛边，投一个 PR 把它修掉，或者写下你想要的工作流。目标只有一个：把它建成一套更友好、更灵活、能服务更多人的视频制作平台。</p>
     <p class="caveat">也要坦白一件事：受经费所限，本项目的测试还远谈不上彻底——真实模型、不同组合、各种边界，覆盖到的只是其中一部分。所以测试恰恰是最需要帮手的地方：用你自己的书跑一遍完整链路，换一个模型试试，拆一本长篇；撞见问题就提 issue，愿意的话顺手修掉再投个 PR。每一次这样的参与，都在替下一个人把路铺平。</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>提交 issue</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>参与贡献 · 提 PR</a>
+      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>在 GitHub 上标星</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>提交 issue</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>参与贡献 · 提 PR</a>
     </div>
     <div class="inline-links">
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md" rel="nofollow">架构</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow">贡献</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md" rel="nofollow">README</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md">架构</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md">贡献</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.zh-CN.md">README</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE">Apache-2.0</a>
+      <a href="https://dreamofxm.github.io/makemovie/llms.txt">llms.txt</a>
     </div>
   </div>
 </section>
@@ -620,7 +730,7 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
     <div class="legal">
       <span>界面截图：本软件的本机实例。</span>
       <span>图标：<a href="https://lucide.dev" rel="nofollow">Lucide</a>（ISC）。</span>
-      <span>许可：<a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>。</span>
+      <span>许可：<a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE">Apache-2.0</a>。</span>
     </div>
   </div>
 </footer>

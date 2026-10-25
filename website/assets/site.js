@@ -17,19 +17,19 @@
     var options = Array.prototype.slice.call(menu.querySelectorAll('[role="option"]'))
 
     function open(state) {
-      lang.setAttribute('aria-open', state ? 'true' : 'false')
+      lang.setAttribute('data-open', state ? 'true' : 'false')
       btn.setAttribute('aria-expanded', state ? 'true' : 'false')
       if (state) options[0].focus()
     }
     btn.addEventListener('click', function (e) {
       e.stopPropagation()
-      open(lang.getAttribute('aria-open') !== 'true')
+      open(lang.getAttribute('data-open') !== 'true')
     })
     document.addEventListener('click', function (e) {
-      if (lang.getAttribute('aria-open') === 'true' && !lang.contains(e.target)) open(false)
+      if (lang.getAttribute('data-open') === 'true' && !lang.contains(e.target)) open(false)
     })
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && lang.getAttribute('aria-open') === 'true') {
+      if (e.key === 'Escape' && lang.getAttribute('data-open') === 'true') {
         open(false)
         btn.focus()
       }

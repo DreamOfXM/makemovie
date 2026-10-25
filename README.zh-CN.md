@@ -6,6 +6,8 @@
 
 [English](./README.md) | 中文
 
+逐阶段的产品图文导览：[MakeMovie —— 开源自托管的 AI 视频生产平台](https://dreamofxm.github.io/makemovie/zh/)
+
 可自托管 · 同一条生产线服务短剧、电影与长视频：
 
 `原文审计 → 剧本 → 资产 → 分镜 → 首帧 → 视频 → 配音与配乐 → 合成 → 验收 → 交付`

@@ -36,6 +36,12 @@ jobs:
       - name: Pack guard
         run: node scripts/pack-check.mjs
 
+      # The product page is hand-written static HTML with no build step, so the
+      # only thing that catches a stale JSON-LD version or a broken hreflang pair
+      # is reading the files themselves.
+      - name: Website guard
+        run: node scripts/website-check.mjs
+
       # The worker synthesizes mock media and composes episodes with the real
       # binary, so the tests fail loudly rather than silently skipping it.
       - name: Ensure FFmpeg

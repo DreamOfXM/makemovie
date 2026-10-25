@@ -3,21 +3,123 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MakeMovie — turn a page of story into a delivered episode</title>
-<meta name="description" content="MakeMovie is a self-hosted AI film and video production platform. Feed it a novel excerpt, a treatment or a screenplay and it returns a finished episode: script, shots, cast references, first frames, clips, character voices, score, subtitles, master and delivery manifest — with your approval in front of every stage that costs you something.">
+<title>MakeMovie — self-hosted open-source AI video production platform</title>
+<meta name="description" content="Open-source, self-hosted AI video production: a novel excerpt or screenplay in, an approved episode master out — script, shots, clips, voices, score, subtitles.">
 <meta name="theme-color" content="#202124">
+<meta name="robots" content="max-image-preview:large">
+<meta name="google-site-verification" content="">
 <link rel="canonical" href="https://dreamofxm.github.io/makemovie/">
+<link rel="author" href="https://github.com/DreamOfXM">
+<link rel="describedby" href="https://dreamofxm.github.io/makemovie/llms.txt">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="MakeMovie">
 <meta property="og:title" content="MakeMovie — turn a page of story into a delivered episode">
 <meta property="og:description" content="Self-hosted AI video production: source text in, audited episode master out. Approval gates before every paid stage, lineage on every artifact, Apache-2.0.">
 <meta property="og:url" content="https://dreamofxm.github.io/makemovie/">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="zh_CN">
 <meta property="og:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-en.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:alt" content="The MakeMovie Workbench: shot list on the left, the selected shot's script in the middle, its frame, clip and voice tracks on the right.">
+<meta name="twitter:site" content="@DreamOfXM">
+<meta name="twitter:creator" content="@DreamOfXM">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="MakeMovie — turn a page of story into a delivered episode">
+<meta name="twitter:description" content="Self-hosted AI video production: source text in, audited episode master out. Approval gates before every paid stage, lineage on every artifact, Apache-2.0.">
 <meta name="twitter:image" content="https://dreamofxm.github.io/makemovie/assets/og-image-en.png">
-<link rel="alternate" hreflang="en" href="./">
-<link rel="alternate" hreflang="zh-Hans" href="zh/">
+<meta name="twitter:image:alt" content="The MakeMovie Workbench: shot list on the left, the selected shot's script in the middle, its frame, clip and voice tracks on the right.">
+<link rel="alternate" hreflang="en" href="https://dreamofxm.github.io/makemovie/">
+<link rel="alternate" hreflang="zh-Hans" href="https://dreamofxm.github.io/makemovie/zh/">
+<link rel="alternate" hreflang="x-default" href="https://dreamofxm.github.io/makemovie/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://dreamofxm.github.io/makemovie/#organization",
+      "name": "MakeMovie",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "logo": "https://dreamofxm.github.io/makemovie/assets/favicon.svg",
+      "sameAs": [
+        "https://github.com/DreamOfXM/makemovie",
+        "https://github.com/DreamOfXM",
+        "https://x.com/DreamOfXM"
+      ]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://dreamofxm.github.io/makemovie/#website",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "name": "MakeMovie",
+      "inLanguage": ["en", "zh-Hans"],
+      "publisher": { "@id": "https://dreamofxm.github.io/makemovie/#organization" }
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://dreamofxm.github.io/makemovie/#application",
+      "name": "MakeMovie",
+      "applicationCategory": "MultimediaApplication",
+      "operatingSystem": "Linux, macOS, Windows — self-hosted with Docker Compose",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "codeRepository": "https://github.com/DreamOfXM/makemovie",
+      "downloadUrl": "https://github.com/DreamOfXM/makemovie/releases",
+      "softwareVersion": "0.2.2",
+      "dateModified": "2026-10-25",
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "image": "https://dreamofxm.github.io/makemovie/assets/og-image-en.png",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": [
+        "Source audit of every uploaded version before generation",
+        "Script writing and shot breakdown from a novel excerpt, treatment or screenplay",
+        "Cast, prop and scene references, first frames and video clips per shot",
+        "Character voice generation and imported voice tracks per shot",
+        "Episode score bed and ambient beds with voice ducking",
+        "Subtitle track, transitions and a composed master with measured duration",
+        "Human approval gate in front of every stage that can spend money",
+        "Lineage per artifact: task, prompt, model, connection and review score",
+        "Usage reported in physical units — billed calls, retries, characters, bytes",
+        "EDL and FCP XML edit lists plus a checksummed delivery manifest",
+        "Mock provider runs the full chain with no API keys",
+        "Multi-tenant organizations with five roles and an audit trail"
+      ]
+    },
+    {
+      "@type": "ImageObject",
+      "@id": "https://dreamofxm.github.io/makemovie/#hero-image",
+      "contentUrl": "https://dreamofxm.github.io/makemovie/assets/hero-workbench-en.png",
+      "url": "https://dreamofxm.github.io/makemovie/assets/hero-workbench-en.png",
+      "width": 2880,
+      "height": 1800,
+      "caption": "The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right.",
+      "creditText": "DreamOfXM",
+      "inLanguage": "en",
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "creator": { "@id": "https://dreamofxm.github.io/makemovie/#organization" },
+      "isPartOf": { "@id": "https://dreamofxm.github.io/makemovie/#page" }
+    },
+    {
+      "@type": "WebPage",
+      "@id": "https://dreamofxm.github.io/makemovie/#page",
+      "url": "https://dreamofxm.github.io/makemovie/",
+      "name": "MakeMovie — self-hosted open-source AI video production platform",
+      "inLanguage": "en",
+      "isPartOf": { "@id": "https://dreamofxm.github.io/makemovie/#website" },
+      "about": { "@id": "https://dreamofxm.github.io/makemovie/#application" },
+      "primaryImageOfPage": { "@id": "https://dreamofxm.github.io/makemovie/#hero-image" },
+      "isAccessibleForFree": true
+    }
+  ]
+}
+</script>
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
@@ -57,8 +159,8 @@
       <a href="#workflow">The chain</a>
       <a href="#install">Install</a>
       <a class="hide-sm" href="#faq">FAQ</a>
-      <div class="lang" aria-open="false">
-        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Language">
+      <div class="lang" data-open="false">
+        <button class="lang-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Language: English">
           <svg class="ic" aria-hidden="true" style="width:15px;height:15px"><use href="#i-globe"/></svg>
           English
           <svg class="ic chev" aria-hidden="true"><use href="#i-chevron-down"/></svg>
@@ -70,7 +172,7 @@
             <svg class="ic tick" aria-hidden="true"><use href="#i-check"/></svg></a>
         </div>
       </div>
-      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie" rel="nofollow">
+      <a class="btn btn-outline btn-sm" href="https://github.com/DreamOfXM/makemovie">
         <svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>
         GitHub
       </a>
@@ -93,7 +195,7 @@
 
     <div class="hero-cta">
       <a class="btn btn-primary" href="#install"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-terminal"/></svg>Run it locally</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
     </div>
 
     <div class="clone">
@@ -116,7 +218,10 @@
         <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
         <span class="addr">localhost:3010 · Workbench</span>
       </div>
-      <img src="assets/hero-workbench-en.png" width="2880" height="1800" alt="The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right.">
+      <picture>
+        <source type="image/webp" srcset="assets/hero-workbench-en.webp">
+        <img src="assets/hero-workbench-en.png" width="2880" height="1800" fetchpriority="high" decoding="async" alt="The MakeMovie Workbench: the shot list on the left with per-shot artifact dots, the selected shot's script fields in the middle, and its first frame, video clip and voice tracks on the right.">
+      </picture>
       <figcaption>One card per shot: its script on the left, its picture, clip and voice on the right. Captured mid-production on a local instance — of the 13 shots, two have all their artifacts in and await review, one failed its first frame, and the hatched cells have not run yet.</figcaption>
     </figure>
   </div>
@@ -447,7 +552,10 @@
         <span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>
         <span class="addr">localhost:3010 · Model center</span>
       </div>
-      <img src="assets/model-center-en.png" width="2880" height="1800" loading="lazy" decoding="async" alt="The MakeMovie Model center, readiness tab: a four-step setup explainer above a list of capability slots each marked Ready, with a banner saying 4 of 4 required slots are usable.">
+      <picture>
+        <source type="image/webp" srcset="assets/model-center-en.webp">
+        <img src="assets/model-center-en.png" width="2880" height="1800" loading="lazy" decoding="async" alt="The MakeMovie Model center, readiness tab: a four-step setup explainer above a list of capability slots each marked Ready, with a banner saying 4 of 4 required slots are usable.">
+      </picture>
       <figcaption>The Model center with keys bound. Every capability slot resolves to the models bound to it, and a slot only turns ready once the provider itself has confirmed the entitlement.</figcaption>
     </figure>
   </div>
@@ -522,7 +630,7 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
       <span class="req">English &amp; Chinese console</span>
       <span class="req">Dark &amp; light theme</span>
     </div>
-    <p class="note">The full quick start, the configuration reference and the two self-hosting modes are in the <a href="https://github.com/DreamOfXM/makemovie#quick-start" rel="nofollow">README</a>. FFmpeg is what composes the master and burns the label; the worker image already includes it.</p>
+    <p class="note">The full quick start, the configuration reference and the two self-hosting modes are in the <a href="https://github.com/DreamOfXM/makemovie#quick-start">README</a>. FFmpeg is what composes the master and burns the label; the worker image already includes it.</p>
   </div>
 </section>
 
@@ -598,15 +706,16 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
     <p>One repository, Apache-2.0, no paid tier and no hosted version. This is a production line that is still growing, and everyone who loves making videos or loves building software is welcome at the workbench: file an issue for a rough edge, send a pull request to sand it down, or describe the workflow you wish existed. The goal is one thing — a friendlier, more flexible video-making platform that serves more people.</p>
     <p class="caveat">One thing we'll say plainly: funding limits how thoroughly this project can be tested. Real models, different combinations, edge cases — we've covered a fraction of them. So testing is exactly where help counts the most: run an episode end to end with your own book, swap in a different model, split something long — and when something breaks, file an issue, or send the PR that fixes it. Every one of those paves the road for the next person.</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>Open an issue</a>
-      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>Contribute · send a PR</a>
+      <a class="btn btn-primary" href="https://github.com/DreamOfXM/makemovie"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-star"/></svg>Star on GitHub</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/issues"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-message-square"/></svg>Open an issue</a>
+      <a class="btn btn-outline" href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md"><svg class="ic" aria-hidden="true" style="width:16px;height:16px"><use href="#i-list-checks"/></svg>Contribute · send a PR</a>
     </div>
     <div class="inline-links">
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md" rel="nofollow">Architecture</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md" rel="nofollow">Contributing</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.md" rel="nofollow">README</a>
-      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/README.md">README</a>
+      <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE">Apache-2.0</a>
+      <a href="https://dreamofxm.github.io/makemovie/llms.txt">llms.txt</a>
     </div>
   </div>
 </section>
@@ -618,7 +727,7 @@ pnpm dev                    # api :4010 · web :3010 · worker</code></pre>
     <div class="legal">
       <span>Interface screenshots: a local instance of this software.</span>
       <span>Icons: <a href="https://lucide.dev" rel="nofollow">Lucide</a> (ISC).</span>
-      <span>License: <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE" rel="nofollow">Apache-2.0</a>.</span>
+      <span>License: <a href="https://github.com/DreamOfXM/makemovie/blob/main/LICENSE">Apache-2.0</a>.</span>
     </div>
   </div>
 </footer>

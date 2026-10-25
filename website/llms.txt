@@ -1,0 +1,78 @@
+# MakeMovie
+
+> MakeMovie is an open-source, self-hostable AI film and video production platform. You feed it source writing — a novel excerpt, a treatment, or a screenplay — and it returns a finished episode master: shooting script, shot breakdown, cast and prop references, first frames, video clips, character voices, score, subtitles, master file and a checksummed delivery manifest. Apache-2.0.
+
+## What it is, precisely
+
+- [Repository](https://github.com/DreamOfXM/makemovie): Apache-2.0 source, pnpm monorepo, open issues.
+- [Product page, English](https://dreamofxm.github.io/makemovie/): the page this file describes.
+- [Product page, 简体中文](https://dreamofxm.github.io/makemovie/zh/): the same page in Simplified Chinese.
+- [License](https://github.com/DreamOfXM/makemovie/blob/main/LICENSE): Apache-2.0.
+- [Releases](https://github.com/DreamOfXM/makemovie/releases): current build and self-hosting assets.
+- [Architecture](https://github.com/DreamOfXM/makemovie/blob/main/ARCHITECTURE.md): how the stages fit together.
+- [Maintainer](https://github.com/DreamOfXM) — also on [X](https://x.com/DreamOfXM).
+
+A pipeline, not a prompt box. The unit of work is an episode, and the unit of review is a shot.
+
+## Optional: the machine-readable page contract
+
+- [sitemap.xml](https://dreamofxm.github.io/makemovie/sitemap.xml): both language versions, with last-modified.
+- [robots.txt](https://dreamofxm.github.io/makemovie/robots.txt): allow-all, and it points back here.
+
+## The chain
+
+`source audit → script → assets → storyboards → first frames → videos → voice & score → composition → acceptance → delivery`
+
+- Source versions are audited before anything is generated, and a shot keeps a stable number across revisions.
+- Dialogue stays structured data per shot (speaker, line, duration), which is what lets subtitles, dubbing and QC read the same script.
+- Every artifact carries its lineage: the task, the prompt, the model, the connection and the review score that produced it.
+- Delivery builds an EDL and an FCP XML edit list from the same shot manifest, so the episode opens in Premiere Pro or DaVinci Resolve instead of staying inside the console.
+
+## Three decisions that shape the product
+
+1. **Approval sits in front of the spend.** Each stage that can call a paid model stops for a human decision. A pre-run review names the task count and the shots still missing inputs before anything is dispatched.
+2. **Usage in physical units, never an invoice.** The console reports billed calls, retries, prompt characters and artifact bytes per stage and per model. There is deliberately no money field, because the platform cannot see your vendor's pricing plan.
+3. **It runs where you run it.** Docker Compose brings up Postgres, Redis and MinIO; the app is a pnpm monorepo you can also run from source. Bring your own model keys.
+
+## Try it without an API key
+
+Bind the bundled mock provider to every slot (`mock-script`, `mock-storyboard`, `mock-image`, `mock-t2v`, `mock-i2v`, `mock-tts`, `mock-music`, `mock-vlm`) and the whole chain runs end to end. `mock-tts` and `mock-music` generate audible tones rather than placeholder bytes, so you can hear what the mix does. The output is synthetic test media — for walking the workflow, not for shipping.
+
+## What is not there yet
+
+- The reference-to-video slot is listed and bound like the others, but the chain does not consume it yet: clips are driven by a shot's own first frame, not by its cast.
+- The OpenAI, Google and Anthropic adapters are wired from published vendor documentation and covered by contract tests against stubbed HTTP. They have not been run against a live account, and each catalog entry says so on its own row.
+- Audio QC stops at a loudness floor: no per-shot loudness matching, and no option to burn subtitles into the picture instead of shipping them as a soft track.
+- The visual-audit pass mark is fixed at 0.7 and has not been calibrated against live vision-model scores.
+- Deep content audits — source coverage, cross-shot continuity verified after generation — are prompted for, not yet verified afterwards.
+
+## Privacy
+
+Only the calls you send to the model vendors you bind, and the artifact bytes if you point storage at an S3 endpoint. MakeMovie does not train models, and there is no analytics or telemetry code in the app. Provider credentials are encrypted at rest with AES-256-GCM and are never returned by a read endpoint.
+
+## Teams
+
+Multi-tenant organizations with five roles (owner, admin, editor, reviewer, viewer), database-backed sessions with Argon2id password hashing, member management with session revocation, and an audit trail of state transitions and privileged actions with every action code labelled in plain language. The console is available in English and Chinese, in a dark and a light theme. The language the content is written in is a project setting, separate from the console's display language.
+
+## Install
+
+```bash
+git clone https://github.com/DreamOfXM/makemovie.git
+cd makemovie
+cp .env.example .env    # set STUDIO_MASTER_KEY: openssl rand -hex 32
+docker compose up -d    # postgres, redis, minio
+pnpm install
+pnpm --filter @studio/db generate
+pnpm db:migrate
+pnpm dev                # web :3010, api :4010
+```
+
+Requires Node.js ≥ 22.18 and pnpm ≥ 9.
+
+## Questions answered on the page
+
+- How is this different from LTX Studio, Runway or HeyGen? — Those sell the generation; this one's unit is the episode, and it finishes with a signed-off master.
+- Do I need API keys to try it? — No, the mock provider runs the whole chain.
+- Will it tell me what something costs? — It tells you what something consumes, and never pretends to be an invoice.
+- Which parts are not there yet? — Listed above, and listed again on the page.
+- Does anything of mine leave the machine? — Only what you send to vendors you bind.

@@ -1,0 +1,13 @@
+# https://dreamofxm.github.io/makemovie/
+# MakeMovie — product page. Public by default; nothing here is behind a login.
+#
+# Crawlers read robots.txt at the host root (https://dreamofxm.github.io/robots.txt),
+# so this copy governs nothing on its own — the root file, which lives in the
+# DreamOfXM/DreamOfXM.github.io repository, has to carry the same Sitemap line.
+# Submitting https://dreamofxm.github.io/makemovie/sitemap.xml directly in
+# Search Console is what actually registers it.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://dreamofxm.github.io/makemovie/sitemap.xml

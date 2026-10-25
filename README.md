@@ -6,6 +6,8 @@
 
 English | [中文](./README.zh-CN.md)
 
+Product tour, stage by stage: [MakeMovie — self-hosted AI video production](https://dreamofxm.github.io/makemovie/)
+
 Self-hostable · One pipeline for short dramas, films, and long-form video:
 
 `source audit → script → assets → storyboards → first frames → videos → voice & score → composition → acceptance → delivery`

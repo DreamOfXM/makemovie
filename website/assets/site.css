@@ -10,7 +10,7 @@
   --foreground: oklch(0.965 0.005 265);
   --muted: oklch(0.78 0.008 265);
   --subtle: oklch(0.64 0.01 265);
-  --faint: oklch(0.58 0.01 265);
+  --faint: oklch(0.6 0.01 265);
 
   --primary: oklch(0.68 0.13 278);
   --primary-ink: oklch(0.16 0.03 278);
@@ -103,13 +103,13 @@ header.nav.pinned { border-bottom-color: var(--line); background: oklch(0.14 0.0
 }
 .lang-btn:hover { color: var(--foreground); border-color: oklch(1 0 0 / 34%); }
 .lang-btn svg.chev { width: 14px; height: 14px; transition: transform 160ms ease; }
-.lang[aria-open="true"] .lang-btn svg.chev { transform: rotate(180deg); }
+.lang[data-open="true"] .lang-btn svg.chev { transform: rotate(180deg); }
 .lang-menu {
   position: absolute; right: 0; top: calc(100% + 8px); min-width: 168px;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 12px;
   box-shadow: var(--shadow-overlay); padding: 6px; display: none; z-index: 60;
 }
-.lang[aria-open="true"] .lang-menu { display: block; }
+.lang[data-open="true"] .lang-menu { display: block; }
 .lang-menu [role="option"] {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
   background: none; border: 0; color: var(--foreground); font: inherit; font-size: 0.9375rem;
@@ -181,6 +181,7 @@ h1 .thin { color: var(--subtle); font-weight: 400; }
 .shot-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: oklch(0 0 0 / 22%); }
 .shot-bar .lamp { width: 9px; height: 9px; border-radius: 50%; background: oklch(1 0 0 / 14%); }
 .shot-bar .addr { margin-left: 8px; font-family: var(--font-mono); font-size: 0.6875rem; color: var(--faint); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+.shot picture { display: block; }
 .shot img { width: 100%; height: auto; }
 figcaption { font-size: 0.8125rem; color: var(--faint); padding: 12px 16px 14px; border-top: 1px solid var(--line); }
 
