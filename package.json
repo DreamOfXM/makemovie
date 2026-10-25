@@ -1,7 +1,7 @@
 {
   "name": "makemovie",
-  "version": "0.2.0",
-  "description": "AI film and video production platform — from source text to an audited, delivered master. A self-hostable pipeline for short dramas, series and films, with an EDL / FCP XML edit list for Premiere Pro and DaVinci Resolve.",
+  "version": "0.2.1",
+  "description": "Agent skills and a terminal manual for MakeMovie — a self-hostable AI film and video production platform: source text to an audited, delivered master, with an EDL / FCP XML edit list for Premiere Pro and DaVinci Resolve. Ships two installable skills; the platform itself runs from the repository.",
   "license": "Apache-2.0",
   "homepage": "https://dreamofxm.github.io/makemovie/",
   "repository": {

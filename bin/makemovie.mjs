@@ -1,24 +1,33 @@
 #!/usr/bin/env node
 /**
- * MakeMovie — the manual is the command.
+ * MakeMovie — the manual is the command, and the package ships the skills.
  *
  * With no arguments this prints the whole of MakeMovie in about a thousand
  * words: what it is, how to run it with no API key, how to run it for real, how
  * to finish the cut in an editor, and the rules for an agent working in a file
  * a human may also be editing. A single argument prints one section.
  *
- * This file is deliberately dependency-free, makes no network call, and writes
- * nothing to disk. It exists so that a person or an agent can learn the project
- * from one command instead of being pointed at a README.
+ * `makemovie skill` prints a skill's full text so an agent that cannot install
+ * skills can still read one. `makemovie install-skill` is the only command that
+ * writes to disk: it copies the skills in this package into an agent's skills
+ * directory. Everything else is read-only, dependency-free and offline.
  */
 
-import { readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const ORDER = ['about', 'try', 'run', 'export', 'agent', 'docs'];
+
+// Where each host looks for skills. These two are the measured, documented
+// locations; other hosts can be served with an explicit --dir.
+const HOSTS = {
+  'claude-code': '.claude/skills',
+  cursor: '.agents/skills',
+};
 
 const SECTIONS = {
   about: `
@@ -36,11 +45,13 @@ MakeMovie — from a piece of source writing to an audited, delivered master.
   manifest — plus an edit list, so the cut is yours to finish (see: makemovie
   export).
 
-  Commands:  makemovie            this manual
-             makemovie export     finishing the cut in an editor
-             makemovie mock       running the whole chain with no API key
-             makemovie agent      rules for an agent in a human's file
-             makemovie docs       the documentation map
+  Commands:  makemovie                 this manual
+             makemovie skill [name]     one skill's full text
+             makemovie install-skill    copy the skills into an agent's directory
+             makemovie export           finishing the cut in an editor
+             makemovie mock             running the whole chain with no API key
+             makemovie agent            rules for an agent in a human's file
+             makemovie docs             the documentation map
 `,
 
   try: `
@@ -126,23 +137,33 @@ IF YOU ARE AN AGENT
        are.
     4. Address everything by a stable id, never by position or order.
 
-  Full text: AGENT-EDITING.md. The production methodology the pipeline encodes is
-  docs/skills/film-production/SKILL.md.
+  If your host reads skills from a directory, install both skills in one command:
+
+    npx -y makemovie@latest install-skill
+      -> .claude/skills/ and .agents/skills/ in the current directory
+    npx -y makemovie@latest install-skill --global --agent claude-code
+      -> ~/.claude/skills/
+    npx -y makemovie@latest skill          (or: skill film-production)
+      -> prints a skill's full text, for a host that cannot install skills
+
+  Full text of the concurrency rules:
+  https://github.com/DreamOfXM/makemovie/blob/main/AGENT-EDITING.md
 `,
 
   docs: `
 DOCUMENTATION
 
-  README.md      what it is, features, quick start
-  README.zh-CN.md   the same, in Chinese
-  ARCHITECTURE.md   domain model, capability policy, state machine, orchestration,
-                    queue design, quality gates, storage, security
-  CONTRIBUTING.md   development workflow, testing, pull-request checklist
-  AGENT-EDITING.md  concurrency rules for an agent in a human's file
-  skills/makemovie/SKILL.md
-                    the one-command entry point for coding agents
-  docs/skills/film-production/SKILL.md
-                    the production methodology the pipeline encodes
+  In this package (also printed by: makemovie skill):
+    skills/makemovie/SKILL.md        how to operate an installation
+    skills/film-production/SKILL.md  the production methodology the pipeline encodes
+
+  In the repository (https://github.com/DreamOfXM/makemovie/blob/main/):
+    README.md          what it is, features, quick start
+    README.zh-CN.md    the same, in Chinese
+    ARCHITECTURE.md    domain model, capability policy, state machine, orchestration,
+                       queue design, quality gates, storage, security
+    CONTRIBUTING.md    development workflow, testing, pull-request checklist
+    AGENT-EDITING.md   concurrency rules for an agent in a human's file
 `,
 };
 
@@ -174,12 +195,161 @@ function version() {
   }
 }
 
+const SKILLS_DIR = resolve(ROOT, 'skills');
+
+function skills() {
+  return readdirSync(SKILLS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(resolve(SKILLS_DIR, entry.name, 'SKILL.md')))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function frontmatter(file) {
+  const text = readFileSync(file, 'utf8');
+  const block = text.match(/^---\n([\s\S]*?)\n---/);
+  if (!block) return null;
+  const field = (key) => {
+    const hit = block[1].match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
+    return hit ? hit[1].trim() : '';
+  };
+  return { name: field('name'), description: field('description') };
+}
+
+function fail(message) {
+  process.stderr.write(`makemovie: ${message}\n`);
+  process.exit(1);
+}
+
+function printSkill(name) {
+  const available = skills();
+  const chosen = name || 'makemovie';
+  if (!available.includes(chosen)) {
+    fail(`no skill named "${chosen}". Available: ${available.join(', ')}`);
+  }
+  process.stdout.write(readFileSync(resolve(SKILLS_DIR, chosen, 'SKILL.md'), 'utf8'));
+}
+
+const INSTALL_USAGE = `Copy the skills in this package into an agent's skills directory.
+
+  makemovie install-skill                        .claude/skills/ and .agents/skills/
+  makemovie install-skill --agent claude-code    .claude/skills/ only
+  makemovie install-skill --agent cursor         .agents/skills/ only
+  makemovie install-skill --global               the same, under your home directory
+  makemovie install-skill --dir <path>           an explicit skills directory
+  makemovie install-skill --skill makemovie      one skill instead of all of them
+  makemovie install-skill --dry-run              print the plan, write nothing
+
+Existing copies of a skill directory are replaced, so a stale file from an older
+version cannot survive an upgrade. Nothing outside those directories is touched.
+`;
+
+function splitList(argv, index, flag) {
+  const list = (argv[index] || '').split(',').filter(Boolean);
+  if (list.length === 0) fail(`${flag} needs a value`);
+  return list;
+}
+
+function parseInstallArgs(argv) {
+  const opts = { agents: null, global: false, dir: null, only: null, dryRun: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--global' || arg === '-g') opts.global = true;
+    else if (arg === '--dry-run') opts.dryRun = true;
+    else if (arg === '--agent' || arg === '-a') opts.agents = splitList(argv, ++i, arg);
+    else if (arg === '--dir' || arg === '-d') opts.dir = argv[++i] || fail('--dir needs a path');
+    else if (arg === '--skill' || arg === '-s') opts.only = splitList(argv, ++i, arg);
+    else if (arg === '--help' || arg === '-h') {
+      process.stdout.write(INSTALL_USAGE);
+      return null;
+    } else fail(`unknown option "${arg}" (see: makemovie install-skill --help)`);
+  }
+
+  if (opts.dir && (opts.global || opts.agents)) fail('--dir cannot be combined with --global or --agent');
+
+  const available = skills();
+  if (opts.only) {
+    const unknown = opts.only.filter((name) => !available.includes(name));
+    if (unknown.length > 0) fail(`no skill named ${unknown.join(', ')}. Available: ${available.join(', ')}`);
+  }
+
+  if (opts.agents) {
+    const unknown = opts.agents.filter((name) => name !== 'all' && !Object.hasOwn(HOSTS, name));
+    if (unknown.length > 0) {
+      fail(`unknown agent ${unknown.join(', ')}. Known: ${Object.keys(HOSTS).join(', ')}`);
+    }
+  }
+
+  return opts;
+}
+
+function installSkill(argv) {
+  const opts = parseInstallArgs(argv);
+  if (!opts) return;
+
+  const chosen = opts.only || skills();
+  const bases = opts.dir
+    ? [{ label: 'custom', base: resolve(opts.dir) }]
+    : (opts.agents && !opts.agents.includes('all') ? opts.agents : Object.keys(HOSTS)).map((host) => ({
+        label: host,
+        base: opts.global ? join(homedir(), HOSTS[host]) : resolve(HOSTS[host]),
+      }));
+
+  const plan = [];
+  for (const { label, base } of bases) {
+    for (const skill of chosen) {
+      plan.push({ label, skill, src: resolve(SKILLS_DIR, skill), dest: join(base, skill) });
+    }
+  }
+
+  if (opts.dryRun) {
+    process.stdout.write(`dry run — ${plan.length} directories would be written:\n`);
+  }
+
+  let items = 0;
+  for (const step of plan) {
+    const source = resolve(step.src, 'SKILL.md');
+    const meta = frontmatter(source);
+    if (!meta || meta.name !== step.skill) {
+      fail(`${step.skill}/SKILL.md has no valid frontmatter name (expected "${step.skill}")`);
+    }
+
+    if (!opts.dryRun) {
+      mkdirSync(dirname(step.dest), { recursive: true });
+      rmSync(step.dest, { recursive: true, force: true });
+      cpSync(step.src, step.dest, { recursive: true });
+      items += readdirSync(step.dest).length;
+    }
+    process.stdout.write(`  ${step.label.padEnd(12)} ${step.dest}\n`);
+  }
+
+  if (opts.dryRun) {
+    process.stdout.write('nothing was written.\n');
+    return;
+  }
+
+  process.stdout.write(
+    `installed ${chosen.length} skill${chosen.length === 1 ? '' : 's'} into ${plan.length} ` +
+      `director${plan.length === 1 ? 'y' : 'ies'} (${items} file${items === 1 ? '' : 's'}).\n` +
+      `Restart the agent session so it picks the skills up.\n`,
+  );
+}
+
 function main() {
   const raw = process.argv[2];
   const key = raw ? raw.replace(/^--?/, '').toLowerCase() : 'all';
 
   if (key === 'version' || key === 'v') {
     process.stdout.write('makemovie ' + version() + '\n');
+    return;
+  }
+
+  if (key === 'install-skill' || key === 'install') {
+    installSkill(process.argv.slice(3));
+    return;
+  }
+
+  if (key === 'skill' || key === 'skills') {
+    printSkill(process.argv[3]);
     return;
   }
 
@@ -198,7 +368,7 @@ function main() {
 
   process.stdout.write(
     `Unknown command: ${raw}\n\n` +
-      `Commands: about, run, mock, export, agent, docs, version\n` +
+      `Commands: about, try, run, export, agent, docs, skill, install-skill, version\n` +
       `Run makemovie with no arguments for the whole manual.\n`,
   );
 }

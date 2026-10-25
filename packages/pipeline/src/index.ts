@@ -1442,7 +1442,7 @@ export function shotTextRule(
     ?? noTextRule(locale)
 }
 
-/** 素材板的版式规格（定妆照/设定图标准，对齐 docs/skills/film-production 的角色一致性要求）：
+/** 素材板的版式规格（定妆照/设定图标准，对齐 skills/film-production 的角色一致性要求）：
  *  角色图是身份锚点，必须多角度、中性背景、无文字——裸描述会生成剧照而非参考图。
  *  角色设定已从"白底三视图"升级为"角色板"（Character Board,2026 行业新标准）：
  *  一张竖版海报内集成身份信息+多角度脸部特写+全身三视图+服饰细节+表情集，
@@ -2266,7 +2266,7 @@ export async function triggerStage(
   // shot frame and a clip are described by the storyboard text this stage consumes,
   // so they are already in the project's language. Only the voice line needs a
   // formatter, because a speaker marker is script convention rather than content.
-  // 定妆照/设定图标准（对齐 docs/skills/film-production 的角色一致性要求）：
+  // 定妆照/设定图标准（对齐 skills/film-production 的角色一致性要求）：
   // 角色图是身份锚点，必须多角度、中性背景、无文字——裸描述会生成剧照而非参考图。
   // 角色设定已从"白底三视图"升级为"角色板"（Character Board,2026 行业新标准）：
   // 一张竖版海报内集成身份信息+多角度脸部特写+全身三视图+服饰细节+表情集,

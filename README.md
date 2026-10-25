@@ -370,8 +370,9 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, model readiness and content language, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow, testing, pull-request checklist
 - [AGENT-EDITING.md](./AGENT-EDITING.md) — the four concurrency rules for an agent editing a file a human may also be editing
-- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — the one-command entry point for coding agents: `npx -y makemovie@latest`
-- [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — the production methodology the pipeline encodes
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — how a coding agent operates an installation; the same package prints the whole project on one command: `npx -y makemovie@latest`
+- [skills/film-production/SKILL.md](./skills/film-production/SKILL.md) — the production methodology the pipeline encodes
+- Both skills install into an agent's skills directory with `npx -y makemovie@latest install-skill` (`.claude/skills/` and `.agents/skills/`, or `--global` for the home directory)
 
 ## License
 

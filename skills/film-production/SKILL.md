@@ -1,6 +1,6 @@
 ---
 name: film-production
-description: 影视生产总控规范 — 独立于任何外部项目，覆盖原文审计到交付的可审计、可追溯生产链路
+description: 影视生产总控规范 — 独立于任何外部项目，覆盖原文审计到交付的可审计、可追溯生产链路。Triggers: film production, storyboard breakdown, shot list, continuity, delivery audit, 分镜拆解, 短剧, 母版, 交付审核.
 license: Apache-2.0
 ---
 

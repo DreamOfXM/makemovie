@@ -1,6 +1,8 @@
-# Publish the one-command manual to npm on version tags.
-# A stranger then reads the whole project without cloning:
+# Publish the terminal manual and the two agent skills to npm on version tags.
+# A stranger then reads the whole project without cloning, or installs the
+# skills into an agent's skills directory:
 #   npx -y makemovie@latest
+#   npx -y makemovie@latest install-skill
 #
 # Authentication is OIDC only — there is no npm token anywhere in this repository.
 # One-time setup, once the package exists on npm (npmjs.com -> the package ->

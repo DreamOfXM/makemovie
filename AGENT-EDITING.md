@@ -27,4 +27,4 @@ The human edits, the agent reads the current state and continues. The agent edit
 ## See also
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — the development workflow and pull-request checklist
-- [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — the production methodology the pipeline encodes
+- [skills/film-production/SKILL.md](./skills/film-production/SKILL.md) — the production methodology the pipeline encodes

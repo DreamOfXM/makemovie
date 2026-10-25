@@ -341,8 +341,9 @@ API 集成测试启动内嵌 PostgreSQL、应用真实迁移，端到端覆盖�
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 领域模型、能力策略、模型就绪度与内容语言、状态机、编排、队列设计、质量闸门、控制台信息架构、存储、安全
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发流程、测试、Pull Request 检查清单
 - [AGENT-EDITING.md](./AGENT-EDITING.md) — 当人与 agent 同时编辑同一份文件时的四条并发规则
-- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — 面向 coding agent 的一条命令入口：`npx -y makemovie@latest`
-- [docs/skills/film-production/SKILL.md](./docs/skills/film-production/SKILL.md) — 生产线所编码的制作方法论
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — coding agent 如何操作一套安装；同一个包也可以用一条命令打印整个项目：`npx -y makemovie@latest`
+- [skills/film-production/SKILL.md](./skills/film-production/SKILL.md) — 生产线所编码的制作方法论
+- 两个技能都可以装进 agent 的技能目录：`npx -y makemovie@latest install-skill`（落到 `.claude/skills/` 与 `.agents/skills/`，加 `--global` 则装到用户主目录）
 
 ## 许可证
 
