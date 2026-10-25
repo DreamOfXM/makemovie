@@ -78,6 +78,9 @@ MakeMovie turns a piece of source writing — a novel excerpt, a treatment, a sc
 - Traceability: every generated script, shot, asset and artifact records the task, prompt, provider, model and quality check that produced it
 - Review organised the way the chain produces: picture, clip and voice listed per shot with per-shot regeneration, and score, subtitles and the master presented as episode-level tracks
 - Pre-screen: a silent rough cut assembled in the browser from whatever already exists, shot by shot, with shots that have no clip standing in as their storyboard frame — see the pacing of the episode before spending on the missing pieces
+- Shot length is decided before spending: an episode carries a target duration and a rhythm profile, the breakdown records shot type, transition and sound per shot, and a shot longer than every bound model can buy is flagged in the pre-run review with three explicit choices — split it into takes, switch to a model that sells the length, or write more shots — rather than quietly trimmed
+- Continuous takes inside one shot: when a long shot is split, each take after the first opens on the previous take's last frame, and the cut between shots uses an xfade transition sized from the plan instead of a hard cut, so the seam is not something the viewer has to forgive
+- The review shows the numbers behind a verdict: seam count, master duration against the edit document, voice coverage, and per-shot frame scores, structure drift and neighbour repetition — a pass or a rejection points at a reading rather than an opinion
 - AI-content labeling on the delivered file, per the Chinese GB 45438-2025 rule for generated synthetic content: the master carries the marks and the delivery manifest records whether they were written or why they were downgraded
 
 **Sound**
@@ -123,6 +126,9 @@ Common issues / 常见问题: Postgres is on host port **5433** and Redis on **6
 | Distributed example projects (read-only, cloneable) / 可分发示例项目 | ✅ |
 | Creation readiness guidance / 创作就绪度引导 | ✅ |
 | Structured shot controls (framing, angle, movement, mood) / 镜头结构化控制 | ✅ |
+| Shot-length planning with split takes and frame chaining / 分镜定长与分段帧链 | ✅ |
+| Transitions between shots (xfade) / 镜头转场 | ✅ |
+| Review readings (seam, duration, voice coverage, per-shot scores) / 审片读数 | ✅ |
 | Selection locks (video/voice/references) / 选版锁定 | ✅ |
 | Video extend (artifact operations) / 视频延长 | ✅ (mock; real adapter pending) |
 | SFX slot for dialogue-free shots / 音效槽位 | ✅ |
