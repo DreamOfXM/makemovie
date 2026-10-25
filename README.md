@@ -179,7 +179,7 @@ wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env
 docker compose --profile full up -d                  # postgres, redis, api, worker, web
 ```
 
-Migrations run inside the api container before it serves; open http://localhost:3010. The first start generates a `STUDIO_MASTER_KEY`, writes it into the `secrets` volume and reuses that one from then on. It decrypts the provider credentials in the database, so keep that volume backed up next to the database — or set `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` yourself and hold it deliberately. Pin a version with `VERSION=0.2.0` in `.env` (default is `latest`); images live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}` for amd64 and arm64.
+Migrations run inside the api container before it serves; open http://localhost:3010. The first start generates a `STUDIO_MASTER_KEY`, writes it into the `secrets` volume and reuses that one from then on. It decrypts the provider credentials in the database, so keep that volume backed up next to the database — or set `STUDIO_MASTER_KEY` (`openssl rand -hex 32`) in `.env` yourself and hold it deliberately. Pin a version with `VERSION=0.2.1` in `.env` (default is `latest`); images live at `ghcr.io/dreamofxm/makemovie/{api,worker,web}` for amd64 and arm64.
 
 **Building the images yourself** (from a checkout):
 
@@ -224,6 +224,20 @@ Produce an episode:
    - Then inspect or download the manifest, the subtitle track, and the EDL / FCP XML edit lists for a finishing editor, and record an accept or reject.
 
 Triggering a stage twice returns the existing batch instead of queueing duplicate work; **Regenerate** is the deliberate way to re-run a stage after editing its upstream.
+
+## Agent skills
+
+A coding agent can operate an installation on your behalf, and both skills it needs ship in one npm package:
+
+```bash
+npx -y makemovie@latest install-skill             # into .claude/skills/ and .agents/skills/
+npx -y makemovie@latest install-skill --global    # the same, under your home directory
+npx -y makemovie@latest                           # or just read the manual in the terminal
+```
+
+`skills/makemovie/SKILL.md` is the operator's manual turned into instructions: bring the stack up, bind the four required slots, then step through the pipeline, stopping between stages for approval — every stage that spends money is a decision the human makes, not something the agent can step over. `skills/film-production/SKILL.md` is the methodology underneath: shot grammar, continuity, which artifact belongs to which step, and what a delivery has to prove.
+
+The package contains the skills and the manual; the platform itself runs from this repository or from the published images in Quick start above. `install-skill` is the only command that writes to disk — it reports each destination, replaces an older copy so a stale file cannot survive an upgrade, and touches nothing outside those directories. `--dry-run` prints the plan without writing; `--agent`, `--skill` and `--dir` place the skills somewhere else.
 
 ## Style Presets
 
@@ -370,9 +384,8 @@ API integration tests boot an embedded PostgreSQL, apply the real migrations, an
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — domain model, capability policy, model readiness and content language, state machine, orchestration, queue design, quality gates, console information architecture, storage, security
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — development workflow, testing, pull-request checklist
 - [AGENT-EDITING.md](./AGENT-EDITING.md) — the four concurrency rules for an agent editing a file a human may also be editing
-- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — how a coding agent operates an installation; the same package prints the whole project on one command: `npx -y makemovie@latest`
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — how a coding agent operates an installation ([install it](#agent-skills))
 - [skills/film-production/SKILL.md](./skills/film-production/SKILL.md) — the production methodology the pipeline encodes
-- Both skills install into an agent's skills directory with `npx -y makemovie@latest install-skill` (`.claude/skills/` and `.agents/skills/`, or `--global` for the home directory)
 
 ## License
 

@@ -108,6 +108,15 @@ MakeMovie 把一段原文——小说节选、故事梗概或剧本——通过�
 - 归因不说谎：因厂商免费额度耗尽而死掉的任务报为额度，而不是报成「审核没过线」
 - 用量看板只报物理量——调用次数、提示词字符、产物字节、已花的尝试——控制台与 API 里没有任何金额字段
 
+## 启动诊断
+
+| 步骤 | 命令 | 它回答什么 |
+| --- | --- | --- |
+| 环境体检 | `pnpm check` | 各集链路健康、模型槽位（探测 + 真实调用证据）、GB 45438 角标与字幕能力——逐项给修复指引，有必修项即非零退出。 |
+| API 启动自检 | `curl :4010/api/system/startup-check` | 免登录：数据库与已应用迁移、ffmpeg 滤镜（subtitles / drawtext）、主密钥、存储后端。模型配置刻意不在此——那属于登录后的模型中心就绪度，环境错误不会冒充「缺模型」。 |
+
+常见问题：Postgres 用宿主端口 **5433**、Redis 用 **6380**，不是默认端口；精简版 ffmpeg 会静默丢掉字幕烧录能力——`pnpm check` 会点名缺失的滤镜；全零主密钥仅限开发，生产环境会拒绝用它启动。
+
 ## 里头有什么
 
 | 能力 | 状态 |
@@ -194,6 +203,20 @@ pnpm dev                                              # api :4010 · web :3010 �
    - 随后可查看或下载清单、字幕轨，以及交给收尾剪辑师的 EDL / FCP XML 剪辑列表，并记录验收通过或拒绝。
 
 同一阶段重复触发会返回已有批次，不会重复排队；编辑上游后重跑请使用 **Regenerate**。
+
+## Agent 技能
+
+coding agent 可以替你操作一套安装，它需要的两个技能随同一个 npm 包发布：
+
+```bash
+npx -y makemovie@latest install-skill             # 装进 .claude/skills/ 与 .agents/skills/
+npx -y makemovie@latest install-skill --global    # 装进用户主目录下的同名目录
+npx -y makemovie@latest                           # 或者直接在终端读整份手册
+```
+
+`skills/makemovie/SKILL.md` 把操作手册写成指令：把栈拉起来、绑定四个必填槽位，然后一步一步推进流水线，每两个阶段之间都停下来等你批准——每一个花钱的阶段都由人决定，agent 不能替你跨过。`skills/film-production/SKILL.md` 是底下的方法论：镜头语法、连续性、产物归属到哪一步，以及一份交付要能证明什么。
+
+这个包装的是技能与手册；平台本身从本仓库运行，或使用上面「快速开始」里的镜像。`install-skill` 是唯一会写盘的命令——它逐个报出落点，旧版本目录会被整个替换（旧文件不会残留到升级之后），这两个目录之外一概不碰。`--dry-run` 只打印计划不写盘；`--agent`、`--skill`、`--dir` 可以把技能放到别处。
 
 ## 风格预设
 
@@ -294,7 +317,7 @@ pnpm db:migrate && pnpm dev
 mkdir makemovie && cd makemovie
 wget https://github.com/DreamOfXM/makemovie/releases/latest/download/docker-compose.yml
 wget https://github.com/DreamOfXM/makemovie/releases/latest/download/example.env -O .env
-# 需要固定版本就加 VERSION=0.2.0（默认 latest）
+# 需要固定版本就加 VERSION=0.2.1（默认 latest）
 docker compose --profile full up -d   # postgres, redis, api, worker, web（minio 走 --profile s3）
 ```
 
@@ -341,9 +364,8 @@ API 集成测试启动内嵌 PostgreSQL、应用真实迁移，端到端覆盖�
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 领域模型、能力策略、模型就绪度与内容语言、状态机、编排、队列设计、质量闸门、控制台信息架构、存储、安全
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 开发流程、测试、Pull Request 检查清单
 - [AGENT-EDITING.md](./AGENT-EDITING.md) — 当人与 agent 同时编辑同一份文件时的四条并发规则
-- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — coding agent 如何操作一套安装；同一个包也可以用一条命令打印整个项目：`npx -y makemovie@latest`
+- [skills/makemovie/SKILL.md](./skills/makemovie/SKILL.md) — coding agent 如何操作一套安装（[安装方式](#agent-技能)）
 - [skills/film-production/SKILL.md](./skills/film-production/SKILL.md) — 生产线所编码的制作方法论
-- 两个技能都可以装进 agent 的技能目录：`npx -y makemovie@latest install-skill`（落到 `.claude/skills/` 与 `.agents/skills/`，加 `--global` 则装到用户主目录）
 
 ## 许可证
 
