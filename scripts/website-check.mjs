@@ -83,6 +83,7 @@ function siteFile(pageFile, ref) {
 
 const attr = (tag, name) => new RegExp(`${name}="([^"]*)"`).exec(tag)?.[1] ?? '';
 const hreflangSet = new Map();
+const imgRights = new Map();
 
 for (const page of PAGES) {
   const label = page.url.replace(ORIGIN, 'website') || 'website/';
@@ -240,6 +241,15 @@ for (const page of PAGES) {
           `${label}: ImageObject 声明 ${imgNode.width}x${imgNode.height}，实测 ${dims ? `${dims.width}x${dims.height}` : '读不到'}`);
         check(String(imgNode.license ?? '').includes('Apache-2.0'), `${label}: ImageObject 没有 license，引用方拿不到授权口径`);
         check(String(imgNode.creditText ?? '') !== '', `${label}: ImageObject 没有 creditText`);
+        // Google 原文（10-26 抓的）：creator/creditText/copyrightNotice/license 给了任意一个，
+        // 其余三个就升为推荐项——缺一个就是 Search Console 一条「图像元数据」警告。
+        check(String(imgNode.copyrightNotice ?? '').trim() !== '', `${label}: ImageObject 没有 copyrightNotice，版权归谁读不出来`);
+        const acquire = String(imgNode.acquireLicensePage ?? '').trim();
+        check(acquire !== '', `${label}: ImageObject 没有 acquireLicensePage`);
+        // 授权页必须是页面上真挂出来的那一条，否则字段会漂到没人见过的 URL 上。
+        check(acquire !== '' && html.includes(`href="${acquire}"`),
+          `${label}: acquireLicensePage=${acquire || '缺'}，页面上没有这条可见链接，引用方点不进授权页`);
+        imgRights.set(page.url, [String(imgNode.copyrightNotice ?? '').trim(), acquire]);
         const pageNode = graph.find((g) => g['@type'] === 'WebPage');
         check(String(pageNode?.primaryImageOfPage?.['@id'] ?? '').endsWith('#hero-image'),
           `${label}: WebPage.primaryImageOfPage 没指向那个 ImageObject 节点`);
@@ -262,6 +272,15 @@ for (const [url, alts] of hreflangSet) {
     const other = hreflangSet.get(a.href);
     check(other !== undefined, `hreflang ${a.href} 不在已知的双语页集合里`);
     if (other) check(other.some((o) => o.lang === a.lang), `${url} 声明 ${a.lang}→${a.href}，但那一页没有互指回来`);
+  }
+}
+
+// 同一张图在两页上必须只有一套版权口径，否则 Google 读到两个互相矛盾的出处。
+if (imgRights.size >= 2) {
+  const [base, ...rest] = [...imgRights.entries()];
+  for (const [url, v] of rest) {
+    check(v[0] === base[1][0], `copyrightNotice 双语不一致：${base[0]} vs ${url}`);
+    check(v[1] === base[1][1], `acquireLicensePage 双语不一致：${base[0]} vs ${url}`);
   }
 }
 
